@@ -1,0 +1,11 @@
+{
+    "prefix": "!",
+    "adminRoleName": "Admin",
+    "channelIds": {
+        "vote": "1412056935917948961",
+        "acc": "1412304090146541748",
+        "save": "1412041741804241028",
+        "log": "1412316496830402600"
+    },
+    "voteDurationHours": 8
+}
