@@ -10,8 +10,8 @@ const config = {
     leaveChannelId: '1412648951638917271',
     registrationChannelId: '1412304090146541748',
     registrationRoleId: '1412079693934624828',
-    logChannelId: '1412316496830402600',       // CHANNEL BARU UNTUK LOG
-    saveDataChannelId: '1412649363037229176',  // CHANNEL BARU UNTUK SAVE DATA
+    logChannelId: '1412316496830402600',
+    saveDataChannelId: '1412649363037229176',
 };
 
 const client = new Client({
@@ -34,7 +34,6 @@ async function saveData() {
     const channel = client.channels.cache.get(config.saveDataChannelId);
     if (!channel) return console.error("Channel save data tidak ditemukan!");
 
-    // Konversi Map ke Array agar bisa disimpan di JSON
     const dataToSave = {
         registrationMessageId,
         registrations: Array.from(registrations.entries()),
@@ -45,14 +44,12 @@ async function saveData() {
     const attachment = new AttachmentBuilder(dataBuffer, { name: 'data.json' });
 
     try {
-        // Hapus save-an lama dari bot
         const oldMessages = await channel.messages.fetch({ limit: 10 });
         const botMessages = oldMessages.filter(msg => msg.author.id === client.user.id);
         if (botMessages.size > 0) {
             await channel.bulkDelete(botMessages);
         }
         
-        // Kirim save-an baru
         await channel.send({ content: `💾 Data backup terakhir pada: <t:${Math.floor(Date.now() / 1000)}:F>`, files: [attachment] });
         console.log('✅ Data berhasil disimpan.');
     } catch (error) {
@@ -124,7 +121,8 @@ async function updateRegistrationMessage() {
         let description = '';
         let count = 1;
         registrations.forEach((gamertag, userId) => {
-            description += `${count}. <@${userId}> - **${gamertag}**\n`;
+            // --- PERUBAHAN DI BARIS INI ---
+            description += `${count}. **${gamertag}** - <@${userId}>\n`;
             count++;
         });
         embed.setDescription(description);
@@ -139,13 +137,13 @@ async function updateRegistrationMessage() {
         } else {
             message = await channel.send({ embeds: [embed] });
             registrationMessageId = message.id;
-            await saveData(); // Simpan karena ada ID pesan baru
+            await saveData();
         }
     } catch (error) {
         console.log("Pesan registrasi lama tidak ditemukan, membuat yang baru.");
         const message = await channel.send({ embeds: [embed] });
         registrationMessageId = message.id;
-        await saveData(); // Simpan karena ada ID pesan baru
+        await saveData();
     }
 }
 
