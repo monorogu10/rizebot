@@ -21,6 +21,7 @@ const client = new Client({
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.GuildModeration // untuk audit log (opsional tapi disarankan)
     ],
     partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
@@ -98,6 +99,22 @@ async function logActivity(embed) {
     }
 }
 
+// --- Util kecil untuk memotong teks agar aman di Embed ---
+function truncate(text, max = 1024) {
+    if (!text) return '';
+    return text.length > max ? text.slice(0, max - 3) + '...' : text;
+}
+
+function formatAttachments(attachments) {
+    if (!attachments || attachments.size === 0) return '—';
+    const lines = [];
+    attachments.forEach((att, idx) => {
+        lines.push(`${idx + 1}. ${att.name || 'lampiran'} (${att.contentType || 'tipe?'}): ${att.url}`);
+    });
+    const joined = lines.join('\n');
+    return truncate(joined, 1024);
+}
+
 // --- Event Saat Bot Siap ---
 client.once('ready', async () => {
     console.log(`✅ Bot siap! Login sebagai ${client.user.tag}`);
@@ -165,7 +182,7 @@ async function handleLinkDetection(message) {
             .addFields(
                 { name: 'Member', value: `${message.author} (${message.author.id})`, inline: true },
                 { name: 'Channel', value: `${message.channel}`, inline: true },
-                { name: 'Isi Pesan', value: `\`\`\`${message.content}\`\`\`` }
+                { name: 'Isi Pesan', value: `\`\`\`${truncate(message.content, 1000)}\`\`\`` }
             ).setTimestamp();
         await logActivity(logEmbed);
         return true;
@@ -238,7 +255,7 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
 
 client.on('messageReactionAdd', async (reaction) => {
     if (reaction.partial) await reaction.fetch().catch(() => { return; });
-    if (reaction.emoji.name === '🗑️' && reaction.count >= 3) {
+    if (reaction.emoji.name === '🗑️' && reaction.count >= 10) {
         const message = reaction.message;
         if (message.author.bot || message.author.id === config.botToIgnoreId) return;
         const member = await message.guild.members.fetch(message.author.id).catch(() => null);
@@ -248,6 +265,111 @@ client.on('messageReactionAdd', async (reaction) => {
             const confirmation = await message.channel.send(`🗑️ Pesan dari ${message.author} telah dihapus.`);
             setTimeout(() => confirmation.delete().catch(console.error), 5000);
         } catch (error) { console.error('Gagal hapus via reaksi:', error); }
+    }
+});
+
+// --- DETEKSI PESAN DIHAPUS & LOG KE CHANNEL ---
+async function findDeleterAuditLog(guild, targetUserId) {
+    // Mencoba cari siapa yang menghapus melalui Audit Log (type: Message Delete = 72)
+    // Perlu permission "View Audit Log" pada bot.
+    try {
+        const fetched = await guild.fetchAuditLogs({ type: 72, limit: 5 }); // 72 = MessageDelete
+        const now = Date.now();
+        const entry = fetched.entries.find(e => {
+            // kadang 'target' bisa user, kadang null; cek kedekatan waktu juga
+            const closeInTime = now - e.createdTimestamp < 10_000; // dalam 10 detik terakhir
+            const sameTarget = e.target && e.target.id ? (e.target.id === targetUserId) : true; // fallback jika null
+            return closeInTime && sameTarget;
+        });
+        if (entry) {
+            return entry.executor; // User yang mengeksekusi penghapusan
+        }
+    } catch (err) {
+        // Abaikan jika tidak ada izin / gagal
+    }
+    return null;
+}
+
+client.on('messageDelete', async (message) => {
+    try {
+        // Pastikan data terisi jika partial
+        if (message.partial) {
+            try { await message.fetch(); } catch { /* tetap lanjut dengan data yang ada */ }
+        }
+        if (!message.guild) return; // DM tidak dilog
+        // Abaikan penghapusan pesan bot sendiri? Biasanya tetap berguna untuk dilog.
+        // Jika ingin abaikan, uncomment baris berikut:
+        // if (message.author?.bot) return;
+
+        const authorTag = message.author ? `${message.author.tag} (${message.author.id})` : 'Tidak diketahui';
+        const channelMention = message.channel ? `${message.channel}` : 'Tidak diketahui';
+        const content = message.content ? message.content : (message.partial ? '[Konten tidak tersedia (partial)]' : '[Tidak ada konten]');
+        const attachmentsInfo = formatAttachments(message.attachments);
+
+        // Coba cari siapa yang menghapus
+        let deleterText = 'Tidak diketahui';
+        if (message.guild && message.guild.members.me?.permissions.has(PermissionsBitField.Flags.ViewAuditLog)) {
+            const deleter = await findDeleterAuditLog(message.guild, message.author?.id);
+            if (deleter) deleterText = `${deleter.tag} (${deleter.id})`;
+        }
+
+        const embed = new EmbedBuilder()
+            .setColor('#ff6b6b')
+            .setTitle('🗑️ Pesan Dihapus')
+            .addFields(
+                { name: 'Penulis', value: authorTag, inline: false },
+                { name: 'Channel', value: channelMention, inline: false },
+                { name: 'Dihapus oleh', value: deleterText, inline: false },
+                { name: 'Isi Pesan', value: content.trim() ? `\`\`\`${truncate(content, 1000)}\`\`\`` : '—', inline: false },
+                { name: 'Lampiran', value: attachmentsInfo, inline: false }
+            )
+            .setFooter({ text: `Message ID: ${message.id}` })
+            .setTimestamp();
+
+        await logActivity(embed);
+    } catch (error) {
+        console.error('Gagal melog messageDelete:', error);
+    }
+});
+
+client.on('messageDeleteBulk', async (messages) => {
+    try {
+        // messages adalah Collection<Message>
+        const first = messages.first();
+        const guild = first?.guild;
+        const channel = first?.channel;
+
+        let deleterText = 'Tidak diketahui';
+        if (guild && guild.members.me?.permissions.has(PermissionsBitField.Flags.ViewAuditLog)) {
+            const deleter = await findDeleterAuditLog(guild, null);
+            if (deleter) deleterText = `${deleter.tag} (${deleter.id})`;
+        }
+
+        const count = messages.size;
+        const sampleLines = [];
+        let i = 0;
+        for (const msg of messages.values()) {
+            i++;
+            const author = msg.author ? `${msg.author.tag}` : 'Unknown';
+            const content = msg.content ? truncate(msg.content.replace(/\n/g, ' '), 120) : (msg.partial ? '[partial]' : '[empty]');
+            sampleLines.push(`${i}. ${author}: ${content}`);
+            if (i >= 10) break; // contoh maksimal 10 baris agar tidak kepanjangan
+        }
+
+        const embed = new EmbedBuilder()
+            .setColor('#ff9f43')
+            .setTitle('🧹 Bulk Delete Terdeteksi')
+            .addFields(
+                { name: 'Jumlah Pesan', value: String(count), inline: true },
+                { name: 'Channel', value: channel ? `${channel}` : 'Tidak diketahui', inline: true },
+                { name: 'Dihapus oleh', value: deleterText, inline: false },
+                { name: 'Contoh (max 10)', value: sampleLines.length ? `\`\`\`\n${sampleLines.join('\n')}\n\`\`\`` : '—', inline: false }
+            )
+            .setTimestamp();
+
+        await logActivity(embed);
+    } catch (error) {
+        console.error('Gagal melog messageDeleteBulk:', error);
     }
 });
 
