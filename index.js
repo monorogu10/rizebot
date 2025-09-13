@@ -28,7 +28,9 @@ const client = new Client({
 
 // --- Penyimpanan Data ---
 let registrations = new Map();
-let registrationMessageId = null;
+// Sekarang kita simpan banyak pesan "info" (pagination)
+let registrationMessageIds = []; // array of message IDs (string)
+
 
 // --- FUNGSI SAVE & LOAD DATA ---
 async function saveData() {
@@ -36,9 +38,10 @@ async function saveData() {
     if (!channel) return console.error("Channel save data tidak ditemukan!");
 
     const dataToSave = {
-        registrationMessageId,
+        registrationMessageIds, // was: registrationMessageId
         registrations: Array.from(registrations.entries()),
     };
+
 
     const jsonString = JSON.stringify(dataToSave);
     const dataBuffer = Buffer.from(jsonString, 'utf-8');
@@ -50,7 +53,7 @@ async function saveData() {
         if (botMessages.size > 0) {
             await channel.bulkDelete(botMessages);
         }
-        
+
         await channel.send({ content: `💾 Data backup terakhir pada: <t:${Math.floor(Date.now() / 1000)}:F>`, files: [attachment] });
         console.log('✅ Data berhasil disimpan.');
     } catch (error) {
@@ -79,9 +82,10 @@ async function loadData() {
         const response = await fetch(attachment.url);
         const data = await response.json();
 
-        registrationMessageId = data.registrationMessageId || null;
+        registrationMessageIds = Array.isArray(data.registrationMessageIds) ? data.registrationMessageIds : [];
         registrations = new Map(data.registrations || []);
-        
+
+
         console.log(`✅ Data berhasil dimuat. Total ${registrations.size} pendaftar.`);
     } catch (error) {
         console.error('Gagal memuat data:', error);
@@ -123,46 +127,116 @@ client.once('ready', async () => {
     updateRegistrationMessage();
 });
 
+function buildRegistrationEmbeds() {
+  const MAX_DESC = 3900; // kasih buffer < 4096
+  const embeds = [];
+
+  const header = '🌠 Pendaftaran Server Starlight';
+  const footer = 'Gunakan !help untuk melihat perintah';
+
+  if (registrations.size === 0) {
+    embeds.push(
+      new EmbedBuilder()
+        .setColor('#FFD700')
+        .setTitle(header)
+        .setDescription('Saat ini belum ada member yang terdaftar.')
+        .setTimestamp()
+        .setFooter({ text: footer })
+    );
+    return embeds;
+  }
+
+  // Susun baris
+  const lines = [];
+  let i = 1;
+  for (const [userId, gamertag] of registrations.entries()) {
+    lines.push(`${i}. **${gamertag}** - <@${userId}>`);
+    i++;
+  }
+
+  // Chunk berdasarkan panjang description
+  let page = [];
+  let currentLen = 0;
+  for (const line of lines) {
+    // +1 untuk '\n' saat join
+    const addLen = line.length + 1;
+    if (currentLen + addLen > MAX_DESC && page.length > 0) {
+      embeds.push(page);
+      page = [];
+      currentLen = 0;
+    }
+    page.push(line);
+    currentLen += addLen;
+  }
+  if (page.length) embeds.push(page);
+
+  // Konversi tiap chunk jadi Embed
+  const finalEmbeds = embeds.map((pageLines, idx) => {
+    const e = new EmbedBuilder()
+      .setColor('#FFD700')
+      .setTitle(`${header} — Hal ${idx + 1}/${embeds.length}`)
+      .setDescription(pageLines.join('\n'))
+      .addFields({ name: 'Total Pendaftar', value: `${registrations.size} member`, inline: true })
+      .setTimestamp()
+      .setFooter({ text: footer });
+    return e;
+  });
+
+  return finalEmbeds;
+}
+
+
 // --- Fungsi untuk Mengupdate Pesan List Pendaftaran ---
 async function updateRegistrationMessage() {
-    const channel = client.channels.cache.get(config.registrationChannelId);
-    if (!channel) return console.error("Channel registrasi tidak ditemukan!");
+  const channel = client.channels.cache.get(config.registrationChannelId);
+  if (!channel) return console.error("Channel registrasi tidak ditemukan!");
 
-    const embed = new EmbedBuilder()
-        .setColor('#FFD700').setTitle('🌠 Pendaftaran Server Starlight')
-        .setTimestamp().setFooter({ text: 'Gunakan !help untuk melihat perintah' });
+  const embeds = buildRegistrationEmbeds();
 
-    if (registrations.size === 0) {
-        embed.setDescription('Saat ini belum ada member yang terdaftar.');
-    } else {
-        let description = '';
-        let count = 1;
-        registrations.forEach((gamertag, userId) => {
-            // --- PERUBAHAN DI BARIS INI ---
-            description += `${count}. **${gamertag}** - <@${userId}>\n`;
-            count++;
-        });
-        embed.setDescription(description);
-        embed.addFields({ name: 'Total Pendaftar', value: `${registrations.size} member` });
-    }
+  try {
+    // Edit pesan yang sudah ada sejauh mungkin
+    let i = 0;
 
-    try {
-        let message;
-        if (registrationMessageId) {
-            message = await channel.messages.fetch(registrationMessageId);
-            await message.edit({ embeds: [embed] });
+    // Edit pesan-pesan lama sesuai jumlah embed baru
+    for (; i < Math.min(registrationMessageIds.length, embeds.length); i++) {
+      try {
+        const msg = await channel.messages.fetch(registrationMessageIds[i]).catch(() => null);
+        if (msg) {
+          await msg.edit({ embeds: [embeds[i]] });
         } else {
-            message = await channel.send({ embeds: [embed] });
-            registrationMessageId = message.id;
-            await saveData();
+          // kalau pesan hilang, kirim baru
+          const sent = await channel.send({ embeds: [embeds[i]] });
+          registrationMessageIds[i] = sent.id;
         }
-    } catch (error) {
-        console.log("Pesan registrasi lama tidak ditemukan, membuat yang baru.");
-        const message = await channel.send({ embeds: [embed] });
-        registrationMessageId = message.id;
-        await saveData();
+      } catch (err) {
+        // Jika edit gagal (mis. embed terlalu besar), coba kirim baru
+        const sent = await channel.send({ embeds: [embeds[i]] });
+        registrationMessageIds[i] = sent.id;
+      }
     }
+
+    // Jika embed baru lebih banyak dari pesan yang ada ⇒ kirim sisanya
+    for (; i < embeds.length; i++) {
+      const sent = await channel.send({ embeds: [embeds[i]] });
+      registrationMessageIds.push(sent.id);
+    }
+
+    // Jika pesan lama lebih banyak dari embed baru ⇒ hapus sisanya
+    if (registrationMessageIds.length > embeds.length) {
+      const toDelete = registrationMessageIds.slice(embeds.length);
+      for (const id of toDelete) {
+        const msg = await channel.messages.fetch(id).catch(() => null);
+        if (msg) await msg.delete().catch(() => {});
+      }
+      registrationMessageIds = registrationMessageIds.slice(0, embeds.length);
+    }
+
+    await saveData();
+  } catch (error) {
+    console.error("Gagal update pesan registrasi:", error);
+  }
 }
+
 
 // --- Fungsi Cek Link & Blokir ---
 async function handleLinkDetection(message) {
