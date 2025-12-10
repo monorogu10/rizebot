@@ -13,8 +13,8 @@ const LINK_REGEX = /https?:\/\/\S+/i;
 
 // Channel whitelist for keyword reply
 const KEYWORD_CHANNELS = new Set(['1412299373731385354','1411683951575040160','1209816094156529745']);
-// Keywords that trigger the official download link
-const KEYWORD_REGEX = /\b(monodeco|decorize)\b/i;
+// Keywords that trigger the official download link (must be the only word)
+const KEYWORD_REGEX = /^(?:monodeco|decorize|mdco)$/i;
 // Track messages we've already replied to (avoid double reply on edits)
 const repliedKeywordMsgIds = new Set();
 
@@ -50,14 +50,18 @@ async function maybeReplyKeyword(msg) {
     if (!msg.guild || msg.author?.bot) return;
     if (!KEYWORD_CHANNELS.has(String(msg.channelId))) return;
 
-    const text = msg.content || '';
+    const text = (msg.content || '').trim();
     if (!KEYWORD_REGEX.test(text)) return;
 
     // Avoid duplicate replies for the same message (e.g., after an edit)
     if (repliedKeywordMsgIds.has(msg.id)) return;
     repliedKeywordMsgIds.add(msg.id);
 
-    await msg.channel.send('Unduh addon monoDeco terbaru di situs resmi: https://monodeco.my.id/');
+    // Send a private, self-destructing reply to the author only
+    const dm = await msg.author
+      .send('Unduh addon monoDeco terbaru di situs resmi: https://monodeco.my.id/')
+      .catch(() => null);
+    if (dm) setTimeout(() => dm.delete().catch(() => {}), 5000);
   } catch (e) {
     console.error('Keyword reply error:', e);
   }
