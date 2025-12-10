@@ -1,0 +1,14 @@
+const SAVE_CHANNEL_ID = '1412649363037229176';
+const STORAGE_FILE_NAME = 'leaderboard-data.json';
+
+const LINK_REGEX = /https?:\/\/\S+/i;
+const KEYWORD_CHANNELS = new Set(['1412299373731385354', '1411683951575040160', '1209816094156529745']);
+const KEYWORD_REGEX = /^(?:monodeco|decorize|mdco)$/i;
+
+module.exports = {
+  SAVE_CHANNEL_ID,
+  STORAGE_FILE_NAME,
+  LINK_REGEX,
+  KEYWORD_CHANNELS,
+  KEYWORD_REGEX
+};
