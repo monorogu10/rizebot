@@ -1,4 +1,5 @@
 const { formatCurrency, formatStatsLine } = require('../utils/format');
+const { COMMAND_CHANNELS } = require('../config');
 
 function sortByReward(entries) {
   return [...entries].sort((a, b) => {
@@ -9,6 +10,11 @@ function sortByReward(entries) {
 
 async function handleStatusCommand(msg, leaderboardStore) {
   if ((msg.content || '').trim().toLowerCase() !== '!status') return false;
+
+  if (!COMMAND_CHANNELS.has(String(msg.channelId))) {
+    await msg.reply('Command hanya bisa dipakai di channel yang ditentukan.');
+    return true;
+  }
 
   const leaderboard = leaderboardStore.getLeaderboard();
   const topByModel = leaderboard.slice(0, 10);
