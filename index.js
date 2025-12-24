@@ -3,9 +3,6 @@ const { Client, GatewayIntentBits: I, Partials: T } = require('discord.js');
 
 const { maybeBlockLink } = require('./src/features/linkBlocker');
 const { maybeReplyKeyword } = require('./src/features/keywordReply');
-const { createLeaderboardStore } = require('./src/services/leaderboardStore');
-const { handleAdminCommands } = require('./src/commands/adminCommands');
-const { handleStatusCommand } = require('./src/commands/statusCommand');
 const { createMessageHandler } = require('./src/handlers/messageHandler');
 
 const client = new Client({
@@ -13,30 +10,17 @@ const client = new Client({
   partials: [T.Message, T.Channel]
 });
 
-const leaderboardStore = createLeaderboardStore();
 
 const baseHandleMessage = createMessageHandler({
   linkBlocker: maybeBlockLink,
-  keywordReply: maybeReplyKeyword,
-  adminCommands: msg => handleAdminCommands(msg, leaderboardStore),
-  statusCommand: msg => handleStatusCommand(msg, leaderboardStore)
+  keywordReply: maybeReplyKeyword
 });
 
-let resolveStoreReady;
-const storeReadyPromise = new Promise(res => { resolveStoreReady = res; });
-
-client.once('ready', async () => {
+client.once('ready', () => {
   console.log(`バ. Bot ready as ${client.user.tag}`);
-  try {
-    await leaderboardStore.init(client);
-    console.log('Leaderboard data loaded dari channel save (jika ada).');
-  } finally {
-    resolveStoreReady();
-  }
 });
 
 async function handleMessage(msg) {
-  await storeReadyPromise;
   await baseHandleMessage(msg);
 }
 

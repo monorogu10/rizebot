@@ -1,21 +1,18 @@
-const { KEYWORD_CHANNELS, KEYWORD_REGEX } = require('../config');
+const { KEYWORD_LINKS } = require('../config');
 
 const repliedKeywordMsgIds = new Set();
 
 async function maybeReplyKeyword(msg) {
   try {
     if (!msg.guild || msg.author?.bot) return false;
-    if (!KEYWORD_CHANNELS.has(String(msg.channelId))) return false;
 
-    const text = (msg.content || '').trim();
-    if (!KEYWORD_REGEX.test(text)) return false;
+    const text = (msg.content || '').trim().toLowerCase();
+    if (!Object.prototype.hasOwnProperty.call(KEYWORD_LINKS, text)) return false;
+    const link = KEYWORD_LINKS[text];
     if (repliedKeywordMsgIds.has(msg.id)) return false;
 
     repliedKeywordMsgIds.add(msg.id);
-    const dm = await msg.author
-      .send('Unduh addon monoDeco terbaru di situs resmi: https://monodeco.my.id/')
-      .catch(() => null);
-    if (dm) setTimeout(() => dm.delete().catch(() => {}), 5000);
+    await msg.reply(`Silakan cek: ${link}`).catch(() => null);
     return true;
   } catch (err) {
     console.error('Keyword reply error:', err);

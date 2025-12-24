@@ -1,4 +1,4 @@
-function createMessageHandler({ linkBlocker, keywordReply, adminCommands, statusCommand }) {
+function createMessageHandler({ linkBlocker, keywordReply }) {
   return async function handleMessage(msg) {
     if (!msg) return;
 
@@ -6,10 +6,6 @@ function createMessageHandler({ linkBlocker, keywordReply, adminCommands, status
     if (deleted) return;
 
     await keywordReply(msg);
-    const handledAdmin = await adminCommands(msg);
-    if (handledAdmin) return;
-
-    await statusCommand(msg);
   };
 }
 

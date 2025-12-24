@@ -11,8 +11,14 @@ const ALLOWED_GIF_HOSTS = new Set([
   'i.imgur.com',
   'cdn.discordapp.com'
 ]);
-const KEYWORD_CHANNELS = new Set(['1412299373731385354', '1411683951575040160', '1209816094156529745']);
-const KEYWORD_REGEX = /^(?:monodeco|decorize|mdco)$/i;
+const KEYWORD_LINKS = {
+  monodeco: 'https://www.curseforge.com/minecraft-bedrock/addons/mdco26',
+  mdco: 'https://www.curseforge.com/minecraft-bedrock/addons/mdco26',
+  mde: 'https://www.curseforge.com/minecraft-bedrock/addons/mdco26',
+  decorize: 'https://www.curseforge.com/minecraft-bedrock/addons/decorize-furniture',
+  gen4: 'https://www.curseforge.com/minecraft-bedrock/addons/monodeco-plus',
+  mdg4: 'https://www.curseforge.com/minecraft-bedrock/addons/monodeco-plus'
+};
 const COMMAND_CHANNELS = new Set(['1444968497800286219', '1209816094156529745']);
 
 module.exports = {
@@ -20,7 +26,6 @@ module.exports = {
   STORAGE_FILE_NAME,
   LINK_REGEX,
   ALLOWED_GIF_HOSTS,
-  KEYWORD_CHANNELS,
-  KEYWORD_REGEX,
+  KEYWORD_LINKS,
   COMMAND_CHANNELS
 };
