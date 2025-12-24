@@ -4,6 +4,7 @@ const { Client, GatewayIntentBits: I, Partials: T } = require('discord.js');
 const { maybeBlockLink } = require('./src/features/linkBlocker');
 const { maybeReplyKeyword } = require('./src/features/keywordReply');
 const { createMessageHandler } = require('./src/handlers/messageHandler');
+const { registerMemberEvents } = require('./src/handlers/memberEvents');
 
 const client = new Client({
   intents: [I.Guilds, I.GuildMessages, I.MessageContent, I.GuildMembers],
@@ -15,6 +16,8 @@ const baseHandleMessage = createMessageHandler({
   linkBlocker: maybeBlockLink,
   keywordReply: maybeReplyKeyword
 });
+
+registerMemberEvents(client);
 
 client.once('ready', () => {
   console.log(`バ. Bot ready as ${client.user.tag}`);
