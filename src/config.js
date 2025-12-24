@@ -16,7 +16,10 @@ const ALLOWED_GIF_HOSTS = new Set([
 const KEYWORD_LINKS = {
   monodeco: 'https://www.curseforge.com/minecraft-bedrock/addons/mdco26',
   mdco: 'https://www.curseforge.com/minecraft-bedrock/addons/mdco26',
-  mde: 'https://www.curseforge.com/minecraft-bedrock/addons/mdco26',
+  mde: 'https://www.curseforge.com/minecraft-bedrock/addons/mde-26',
+  engine: 'https://www.curseforge.com/minecraft-bedrock/addons/mde-26',
+  mdengine: 'https://www.curseforge.com/minecraft-bedrock/addons/mde-26',
+  monodecoengine: 'https://www.curseforge.com/minecraft-bedrock/addons/mde-26',
   monodecogen4: 'https://www.curseforge.com/minecraft-bedrock/addons/monodeco-plus',
   decorize: 'https://www.curseforge.com/minecraft-bedrock/addons/decorize-furniture',
   gen4: 'https://www.curseforge.com/minecraft-bedrock/addons/monodeco-plus',
