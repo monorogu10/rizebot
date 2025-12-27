@@ -14,16 +14,16 @@ const ALLOWED_GIF_HOSTS = new Set([
   'cdn.discordapp.com'
 ]);
 const KEYWORD_LINKS = {
-  monodeco: 'https://www.curseforge.com/minecraft-bedrock/addons/mdco26',
-  mdco: 'https://www.curseforge.com/minecraft-bedrock/addons/mdco26',
-  mde: 'https://www.curseforge.com/minecraft-bedrock/addons/mde-26',
-  engine: 'https://www.curseforge.com/minecraft-bedrock/addons/mde-26',
-  mdengine: 'https://www.curseforge.com/minecraft-bedrock/addons/mde-26',
-  monodecoengine: 'https://www.curseforge.com/minecraft-bedrock/addons/mde-26',
-  monodecogen4: 'https://www.curseforge.com/minecraft-bedrock/addons/monodeco-plus',
-  decorize: 'https://www.curseforge.com/minecraft-bedrock/addons/decorize-furniture',
-  gen4: 'https://www.curseforge.com/minecraft-bedrock/addons/monodeco-plus',
-  mdg4: 'https://www.curseforge.com/minecraft-bedrock/addons/monodeco-plus',
+  monodeco: 'https://monodeco.my.id/',
+  mdco: 'https://monodeco.my.id/',
+  mde: 'https://monodeco.my.id/',
+  engine: 'https://monodeco.my.id/',
+  mdengine: 'https://monodeco.my.id/',
+  monodecoengine: 'https://monodeco.my.id/',
+  monodecogen4: 'https://monodeco.my.id/',
+  decorize: 'https://monodeco.my.id/',
+  gen4: 'https://monodeco.my.id/',
+  mdg4: 'https://monodeco.my.id/',
   server: 'https://discord.gg/XvMgRJpRBV',
   live: 'https://www.youtube.com/@monodeco_md',
   update: 'https://www.youtube.com/@monodeco_md',
@@ -31,7 +31,7 @@ const KEYWORD_LINKS = {
   donate: 'https://sociabuzz.com/monodeco/tribe',
   donasi: 'https://sociabuzz.com/monodeco/tribe',
   support: 'https://sociabuzz.com/monodeco/tribe',
-  website: 'https://curseforge.com/members/monodeco/projects'
+  website: 'https://monodeco.my.id/'
 };
 const COMMAND_CHANNELS = new Set(['1444968497800286219', '1209816094156529745']);
 
