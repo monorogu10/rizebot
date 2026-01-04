@@ -4,7 +4,8 @@ const REGISTER_PROMPT = [
   '1. tujuan join starlight?',
   '2. janji tidak akan rusuh,berkata-kata toxic dan hal buruk lainnya?',
   '3. bisa bertanggung jawab jika mengalami kesalahan?',
-  'jawab dengan cara ketik !jawab dan isi pesan selanjutnya dengan jawaban. pesan anda akan di kirimkan langsung ke admin',
+  'jawab dengan cara ketik !jawab dan isi pesan selanjutnya dengan jawaban di channel ini.',
+  'pesan jawaban kamu akan otomatis dihapus dan dikirim langsung ke admin.',
   'contoh: !jawab Saya join karena ingin belajar dan siap mengikuti aturan.'
 ].join('\n');
 
@@ -47,36 +48,7 @@ function createRegisterHandler({ registerStore, roleId, inboxChannelId }) {
 
   async function handleDmAnswer(msg, content) {
     if (!/^!jawab\b/i.test(content)) return false;
-
-    const answer = content.replace(/^!jawab\b/i, '').trim();
-    if (!answer) {
-      await msg.reply('Format: `!jawab <pesan>`').catch(() => null);
-      return true;
-    }
-
-    await registerStore.init(msg.client);
-
-    const channel = await msg.client.channels.fetch(inboxChannelId).catch(() => null);
-    if (!channel || !channel.isTextBased()) {
-      await msg.reply('Channel admin tidak ditemukan.').catch(() => null);
-      return true;
-    }
-
-    const entry = registerStore.getUser(msg.author.id);
-    const payload = buildAnswerPayload({
-      user: msg.author,
-      gamertag: entry?.gamertag || '',
-      answer
-    });
-
-    const sent = await channel.send({ content: payload }).catch(() => null);
-    if (!sent) {
-      await msg.reply('Gagal mengirim pesan ke admin. Coba lagi nanti.').catch(() => null);
-      return true;
-    }
-
-    await registerStore.markAnswered(msg.author.id).catch(() => null);
-    await msg.react('✅').catch(() => null);
+    await msg.reply('Silakan jawab di channel server dengan `!jawab <pesan>`.').catch(() => null);
     return true;
   }
 
@@ -163,6 +135,52 @@ function createRegisterHandler({ registerStore, roleId, inboxChannelId }) {
       return true;
     }
 
+    const jawabMatch = content.match(/^!jawab\s+(.+)/i);
+    if (/^!jawab\b/i.test(content) && !jawabMatch) {
+      await msg.reply('Format: `!jawab <pesan>`').catch(() => null);
+      return true;
+    }
+    if (jawabMatch) {
+      const answer = jawabMatch[1].trim();
+      if (!answer) {
+        await msg.reply('Format: `!jawab <pesan>`').catch(() => null);
+        return true;
+      }
+
+      await registerStore.init(msg.client);
+      const entry = registerStore.getUser(msg.author.id);
+      if (!entry) {
+        await msg.reply('Kamu belum terdaftar. Gunakan `!reg <gamertag>` terlebih dahulu.').catch(() => null);
+        return true;
+      }
+
+      const channel = await msg.client.channels.fetch(inboxChannelId).catch(() => null);
+      if (!channel || !channel.isTextBased()) {
+        await msg.reply('Channel admin tidak ditemukan.').catch(() => null);
+        return true;
+      }
+
+      const payload = buildAnswerPayload({
+        user: msg.author,
+        gamertag: entry?.gamertag || '',
+        answer
+      });
+
+      const sent = await channel.send({ content: payload }).catch(() => null);
+      if (!sent) {
+        await msg.reply('Gagal mengirim pesan ke admin. Coba lagi nanti.').catch(() => null);
+        return true;
+      }
+
+      await registerStore.markAnswered(msg.author.id).catch(() => null);
+      await msg.delete().catch(() => null);
+      const notice = await msg.channel
+        .send(`${msg.author} jawaban kamu sudah terkirim ✅`)
+        .catch(() => null);
+      if (notice) setTimeout(() => notice.delete().catch(() => {}), 5000);
+      return true;
+    }
+
     const regMatch = content.match(/^!reg\s+(.+)/i);
     if (/^!reg\b/i.test(content) && !regMatch) {
       await msg.reply('Format: `!reg <gamertag>`').catch(() => null);
@@ -188,15 +206,8 @@ function createRegisterHandler({ registerStore, roleId, inboxChannelId }) {
       await addRoleIfMissing(member, roleId);
 
       await msg.reply(`Registrasi berhasil. Gamertag kamu: ${gamertag}`).catch(() => null);
-      const dmSent = await msg.author.send(REGISTER_PROMPT).catch(() => null);
-      if (!dmSent) {
-        await msg.reply('Aku tidak bisa mengirim DM. Tolong buka DM kamu.').catch(() => null);
-      }
-      return true;
-    }
-
-    if (/^!jawab\b/i.test(content)) {
-      await msg.reply('Silakan jawab lewat DM bot.').catch(() => null);
+      const prompt = await msg.reply(REGISTER_PROMPT).catch(() => null);
+      if (prompt) setTimeout(() => prompt.delete().catch(() => {}), 60000);
       return true;
     }
 
