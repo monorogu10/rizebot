@@ -1,4 +1,9 @@
+const { EmbedBuilder } = require('discord.js');
 const { isAdmin } = require('../utils/permissions');
+
+const LIST_PAGE_SIZE = 10;
+const ANSWERED_ICON = '✅';
+const PENDING_ICON = '❌';
 
 const REGISTER_PROMPT = [
   '1. tujuan join starlight?',
@@ -18,6 +23,48 @@ function buildAnswerPayload({ user, gamertag, answer }) {
     ? `${answer.slice(0, Math.max(0, maxLength - 3))}...`
     : answer;
   return `${base}\n${trimmed}`;
+}
+
+function buildListEmbed({ entries, page, totalPages, total }) {
+  const description = entries.length
+    ? entries
+      .map(entry => (
+        `${entry.rank}. ${entry.gamertag} - <@${entry.userId}> (${entry.answered ? ANSWERED_ICON : PENDING_ICON})`
+      ))
+      .join('\n')
+    : 'Belum ada yang terdaftar.';
+
+  return new EmbedBuilder()
+    .setColor(0x2b90d9)
+    .setTitle('Daftar Registrasi')
+    .setDescription(description)
+    .setFooter({ text: `Halaman ${page}/${totalPages} • Total ${total}` })
+    .setTimestamp();
+}
+
+function buildStatusEmbed({ user, entry }) {
+  if (!entry) {
+    return new EmbedBuilder()
+      .setColor(0xf39c12)
+      .setTitle('Status Registrasi')
+      .setDescription('Kamu belum terdaftar. Gunakan `!reg <gamertag>` terlebih dahulu.')
+      .setTimestamp();
+  }
+
+  const statusIcon = entry.answered ? ANSWERED_ICON : PENDING_ICON;
+  const statusText = entry.answered ? 'Sudah menjawab pertanyaan' : 'Belum menjawab pertanyaan';
+
+  return new EmbedBuilder()
+    .setColor(entry.answered ? 0x3bb273 : 0xf39c12)
+    .setTitle('Status Registrasi')
+    .setDescription(
+      [
+        `User: <@${user.id}>`,
+        `Gamertag: ${entry.gamertag}`,
+        `Status: ${statusIcon} ${statusText}`
+      ].join('\n')
+    )
+    .setTimestamp();
 }
 
 async function resolveMember(msg) {
@@ -87,17 +134,47 @@ function createRegisterHandler({ registerStore, roleId, inboxChannelId }) {
       return true;
     }
 
-    if (/^!list\b/i.test(content)) {
-      await registerStore.init(msg.client);
-      const entries = registerStore.getEntries();
-      if (!entries.length) {
-        await msg.reply('Belum ada yang terdaftar.').catch(() => null);
+    const listMatch = content.match(/^!list(?:\s+(\d+))?\b/i);
+    if (listMatch) {
+      if (!isAdmin(msg.member)) {
+        await msg.reply('Command ini hanya untuk admin.').catch(() => null);
         return true;
       }
-      const lines = entries.map(entry => (
-        `${entry.rank}. ${entry.gamertag} - <@${entry.userId}> (${entry.answered ? '✅' : '❌'})`
-      ));
-      await msg.reply(lines.join('\n')).catch(() => null);
+      const page = Math.max(1, Number.parseInt(listMatch[1], 10) || 1);
+      await registerStore.init(msg.client);
+      const entries = registerStore.getEntries();
+      const totalPages = Math.max(1, Math.ceil(entries.length / LIST_PAGE_SIZE));
+      if (!entries.length) {
+        const embed = buildListEmbed({
+          entries: [],
+          page: 1,
+          totalPages: 1,
+          total: 0
+        });
+        await msg.reply({ embeds: [embed] }).catch(() => null);
+        return true;
+      }
+      if (page > totalPages) {
+        await msg.reply(`Halaman tidak tersedia. Total halaman: ${totalPages}.`).catch(() => null);
+        return true;
+      }
+      const start = (page - 1) * LIST_PAGE_SIZE;
+      const paged = entries.slice(start, start + LIST_PAGE_SIZE);
+      const embed = buildListEmbed({
+        entries: paged,
+        page,
+        totalPages,
+        total: entries.length
+      });
+      await msg.reply({ embeds: [embed] }).catch(() => null);
+      return true;
+    }
+
+    if (/^!status\b/i.test(content)) {
+      await registerStore.init(msg.client);
+      const entry = registerStore.getUser(msg.author.id);
+      const embed = buildStatusEmbed({ user: msg.author, entry });
+      await msg.reply({ embeds: [embed] }).catch(() => null);
       return true;
     }
 
