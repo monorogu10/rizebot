@@ -2,34 +2,12 @@ const { EmbedBuilder } = require('discord.js');
 const { isAdmin } = require('../utils/permissions');
 
 const LIST_PAGE_SIZE = 10;
-const ANSWERED_ICON = '✅';
-const PENDING_ICON = '❌';
-
-const REGISTER_PROMPT = [
-  '1. tujuan join starlight?',
-  '2. janji tidak akan rusuh,berkata-kata toxic dan hal buruk lainnya?',
-  '3. bisa bertanggung jawab jika mengalami kesalahan?',
-  'jawab dengan cara ketik !jawab dan isi pesan selanjutnya dengan jawaban di channel ini.',
-  'pesan jawaban kamu akan otomatis dihapus dan dikirim langsung ke admin.',
-  'contoh: !jawab Saya join karena ingin belajar dan siap mengikuti aturan.'
-].join('\n');
-
-function buildAnswerPayload({ user, gamertag, answer }) {
-  const header = `Jawaban registrasi dari <@${user.id}> (${user.tag})`;
-  const gamertagLine = gamertag ? `Gamertag: ${gamertag}` : 'Gamertag: -';
-  const base = `${header}\n${gamertagLine}\nPesan:`;
-  const maxLength = 1900 - base.length;
-  const trimmed = maxLength > 0 && answer.length > maxLength
-    ? `${answer.slice(0, Math.max(0, maxLength - 3))}...`
-    : answer;
-  return `${base}\n${trimmed}`;
-}
 
 function buildListEmbed({ entries, page, totalPages, total }) {
   const description = entries.length
     ? entries
       .map(entry => (
-        `${entry.rank}. ${entry.gamertag} - <@${entry.userId}> (${entry.answered ? ANSWERED_ICON : PENDING_ICON})`
+        `${entry.rank}. ${entry.gamertag} - <@${entry.userId}>`
       ))
       .join('\n')
     : 'Belum ada yang terdaftar.';
@@ -51,17 +29,14 @@ function buildStatusEmbed({ user, entry }) {
       .setTimestamp();
   }
 
-  const statusIcon = entry.answered ? ANSWERED_ICON : PENDING_ICON;
-  const statusText = entry.answered ? 'Sudah menjawab pertanyaan' : 'Belum menjawab pertanyaan';
-
   return new EmbedBuilder()
-    .setColor(entry.answered ? 0x3bb273 : 0xf39c12)
+    .setColor(0x3bb273)
     .setTitle('Status Registrasi')
     .setDescription(
       [
         `User: <@${user.id}>`,
         `Gamertag: ${entry.gamertag}`,
-        `Status: ${statusIcon} ${statusText}`
+        'Status: Terdaftar'
       ].join('\n')
     )
     .setTimestamp();
@@ -90,14 +65,8 @@ async function removeRoleIfPresent(member, roleId) {
   return true;
 }
 
-function createRegisterHandler({ registerStore, roleId, inboxChannelId }) {
+function createRegisterHandler({ registerStore, roleId }) {
   if (!registerStore) throw new Error('registerStore is required');
-
-  async function handleDmAnswer(msg, content) {
-    if (!/^!jawab\b/i.test(content)) return false;
-    await msg.reply('Silakan jawab di channel server dengan `!jawab <pesan>`.').catch(() => null);
-    return true;
-  }
 
   async function handleRegisterCommands(msg, content) {
     if (/^!reg-total\b/i.test(content)) {
@@ -212,52 +181,6 @@ function createRegisterHandler({ registerStore, roleId, inboxChannelId }) {
       return true;
     }
 
-    const jawabMatch = content.match(/^!jawab\s+(.+)/i);
-    if (/^!jawab\b/i.test(content) && !jawabMatch) {
-      await msg.reply('Format: `!jawab <pesan>`').catch(() => null);
-      return true;
-    }
-    if (jawabMatch) {
-      const answer = jawabMatch[1].trim();
-      if (!answer) {
-        await msg.reply('Format: `!jawab <pesan>`').catch(() => null);
-        return true;
-      }
-
-      await registerStore.init(msg.client);
-      const entry = registerStore.getUser(msg.author.id);
-      if (!entry) {
-        await msg.reply('Kamu belum terdaftar. Gunakan `!reg <gamertag>` terlebih dahulu.').catch(() => null);
-        return true;
-      }
-
-      const channel = await msg.client.channels.fetch(inboxChannelId).catch(() => null);
-      if (!channel || !channel.isTextBased()) {
-        await msg.reply('Channel admin tidak ditemukan.').catch(() => null);
-        return true;
-      }
-
-      const payload = buildAnswerPayload({
-        user: msg.author,
-        gamertag: entry?.gamertag || '',
-        answer
-      });
-
-      const sent = await channel.send({ content: payload }).catch(() => null);
-      if (!sent) {
-        await msg.reply('Gagal mengirim pesan ke admin. Coba lagi nanti.').catch(() => null);
-        return true;
-      }
-
-      await registerStore.markAnswered(msg.author.id).catch(() => null);
-      await msg.delete().catch(() => null);
-      const notice = await msg.channel
-        .send(`${msg.author} jawaban kamu sudah terkirim ✅`)
-        .catch(() => null);
-      if (notice) setTimeout(() => notice.delete().catch(() => {}), 5000);
-      return true;
-    }
-
     const regMatch = content.match(/^!reg\s+(.+)/i);
     if (/^!reg\b/i.test(content) && !regMatch) {
       await msg.reply('Format: `!reg <gamertag>`').catch(() => null);
@@ -283,8 +206,6 @@ function createRegisterHandler({ registerStore, roleId, inboxChannelId }) {
       await addRoleIfMissing(member, roleId);
 
       await msg.reply(`Registrasi berhasil. Gamertag kamu: ${gamertag}`).catch(() => null);
-      const prompt = await msg.reply(REGISTER_PROMPT).catch(() => null);
-      if (prompt) setTimeout(() => prompt.delete().catch(() => {}), 60000);
       return true;
     }
 
@@ -297,9 +218,7 @@ function createRegisterHandler({ registerStore, roleId, inboxChannelId }) {
       const content = (msg.content || '').trim();
       if (!content.startsWith('!')) return false;
 
-      if (!msg.guild) {
-        return await handleDmAnswer(msg, content);
-      }
+      if (!msg.guild) return false;
 
       return await handleRegisterCommands(msg, content);
     } catch (err) {
