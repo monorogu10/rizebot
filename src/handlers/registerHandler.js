@@ -67,6 +67,11 @@ async function sendNotice(msg, text) {
   if (notice) setTimeout(() => notice.delete().catch(() => null), 5000);
 }
 
+async function deleteWithNotice(msg, text) {
+  await msg.delete().catch(() => null);
+  await sendNotice(msg, text);
+}
+
 function hasBotReaction(message, emoji) {
   if (!message?.reactions?.cache) return false;
   const reaction = message.reactions.cache.find(item => item.emoji?.name === emoji);
@@ -103,7 +108,7 @@ async function handleSubmissionMessage(msg, options) {
   const hasPrivateRole = Boolean(roleId && member.roles.cache.has(roleId));
 
   if (!isValidSubmissionMessage(msg, ratingPrefix)) {
-    await sendNotice(
+    await deleteWithNotice(
       msg,
       `Format wajib: \`${ratingPrefix} ini adalah karya gue\` + lampiran gambar (hanya gambar).`
     );
