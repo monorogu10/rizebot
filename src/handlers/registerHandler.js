@@ -160,6 +160,34 @@ async function handleStatusCommand(msg, options) {
   return true;
 }
 
+async function handleHelpCommand(msg, options) {
+  const {
+    submissionChannelId,
+    ratingPrefix,
+    minApprovals
+  } = options;
+  const content = (msg.content || '').trim();
+  if (!/^!help\b/i.test(content)) return false;
+  if (!msg.guild) return false;
+
+  const channelHint = submissionChannelId ? `<#${submissionChannelId}>` : 'channel karya';
+  const prefixHint = ratingPrefix ? `\`${ratingPrefix} ini adalah karya gue\`` : '`[rate] ini adalah karya gue`';
+  const approvalsText = Number.isFinite(minApprovals) ? `${minApprovals}` : '11';
+
+  const lines = [
+    '**Panduan Singkat**',
+    `- Kirim karya di ${channelHint} dengan format ${prefixHint} + lampiran gambar.`,
+    `- Voting: ✅ setuju / ❌ tidak setuju. Jika ✅ >= ${approvalsText} (di atas 10), otomatis masuk private dan karya dihapus.`,
+    '- Cek status: `!status`.',
+    '- Petisi timeout (khusus member private): `!timeout @user` (butuh 17 vote dalam 1 jam).',
+    '- Veto admin: `!freedom @user`.',
+    '- Moderasi cepat: react 🗑️ 5x dari member private → pesan dihapus.'
+  ];
+
+  await msg.reply(lines.join('\n')).catch(() => null);
+  return true;
+}
+
 async function getNonBotReactionCount(reaction) {
   try {
     const users = await reaction.users.fetch();
@@ -350,6 +378,13 @@ function createRegisterHandler({
         submissionStore
       });
       if (handledSubmission) return true;
+
+      const handledHelp = await handleHelpCommand(msg, {
+        submissionChannelId,
+        ratingPrefix,
+        minApprovals: RATING_MIN_APPROVALS
+      });
+      if (handledHelp) return true;
 
       const handledStatus = await handleStatusCommand(msg, {
         roleId,
