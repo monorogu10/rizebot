@@ -5,20 +5,26 @@ const { maybeBlockLink } = require('./src/features/linkBlocker');
 const { maybeReplyKeyword } = require('./src/features/keywordReply');
 const { createMessageHandler } = require('./src/handlers/messageHandler');
 const { registerMemberEvents } = require('./src/handlers/memberEvents');
-const { createRegisterStore } = require('./src/services/registerStore');
-const { createRegisterHandler } = require('./src/handlers/registerHandler');
-const { REGISTER_ROLE_ID, REGISTRATION_INBOX_CHANNEL_ID } = require('./src/config');
+const { createRegisterHandler, createSubmissionReactionHandler } = require('./src/handlers/registerHandler');
+const { REGISTER_ROLE_ID } = require('./src/config');
 
 const client = new Client({
-  intents: [I.Guilds, I.GuildMessages, I.MessageContent, I.GuildMembers, I.DirectMessages],
-  partials: [T.Message, T.Channel]
+  intents: [
+    I.Guilds,
+    I.GuildMessages,
+    I.MessageContent,
+    I.GuildMembers,
+    I.DirectMessages,
+    I.GuildMessageReactions
+  ],
+  partials: [T.Message, T.Channel, T.Reaction, T.User]
 });
 
-const registerStore = createRegisterStore();
 const registerHandler = createRegisterHandler({
-  registerStore,
-  roleId: REGISTER_ROLE_ID,
-  inboxChannelId: REGISTRATION_INBOX_CHANNEL_ID
+  roleId: REGISTER_ROLE_ID
+});
+const submissionReactionHandler = createSubmissionReactionHandler({
+  roleId: REGISTER_ROLE_ID
 });
 
 const baseHandleMessage = createMessageHandler({
@@ -29,10 +35,7 @@ const baseHandleMessage = createMessageHandler({
 
 registerMemberEvents(client);
 
-client.once('ready', async () => {
-  await registerStore.init(client).catch(err => {
-    console.error('Failed to init register store:', err);
-  });
+client.once('ready', () => {
   console.log(`バ. Bot ready as ${client.user.tag}`);
 });
 
@@ -46,6 +49,9 @@ client.on('messageUpdate', async (_old, n) => {
     try { await n.fetch(); } catch { /* ignore */ }
   }
   await handleMessage(n);
+});
+client.on('messageReactionAdd', async (reaction, user) => {
+  await submissionReactionHandler(reaction, user);
 });
 
 client.login(process.env.DISCORD_TOKEN);
