@@ -5,7 +5,10 @@ const {
   RATING_PREFIX,
   RATING_APPROVE_EMOJI,
   RATING_REJECT_EMOJI,
-  RATING_MIN_APPROVALS
+  RATING_MIN_APPROVALS,
+  SUBMISSION_SCAN_LIMIT,
+  SUBMISSION_SCAN_MAX_AGE_DAYS,
+  SUBMISSION_SCAN_DELAY_MS
 } = require('../config');
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
@@ -82,7 +85,8 @@ async function handleSubmissionMessage(msg, options) {
     submitterRoleId,
     ratingPrefix,
     approveEmoji,
-    rejectEmoji
+    rejectEmoji,
+    submissionStore
   } = options;
 
   if (!msg?.guild) return false;
@@ -111,6 +115,48 @@ async function handleSubmissionMessage(msg, options) {
   }
 
   await seedReactions(msg, approveEmoji, rejectEmoji);
+
+  if (submissionStore) {
+    await submissionStore.init(msg.client);
+    await submissionStore.upsertSubmission({
+      messageId: msg.id,
+      authorId: msg.author?.id || null,
+      channelId: String(msg.channelId),
+      createdAt: msg.createdAt ? msg.createdAt.toISOString() : new Date().toISOString(),
+      approvals: 0
+    });
+  }
+  return true;
+}
+
+async function handleStatusCommand(msg, options) {
+  const { roleId, submissionStore, submissionChannelId, ratingPrefix } = options;
+  const content = (msg.content || '').trim();
+  if (!/^!status\b/i.test(content)) return false;
+
+  const member = await resolveMember(msg);
+  const hasRole = Boolean(roleId && member?.roles?.cache?.has(roleId));
+  let isRegistered = hasRole;
+
+  if (submissionStore) {
+    await submissionStore.init(msg.client);
+    if (!isRegistered) {
+      isRegistered = submissionStore.isApprovedMember(msg.author.id) ||
+        submissionStore.isPermanentMember(msg.author.id);
+    }
+    if (hasRole) {
+      await submissionStore.markApprovedMember(msg.author.id, 'role');
+    }
+  }
+
+  if (isRegistered) {
+    await msg.reply('Status: kamu sudah terdaftar di private.').catch(() => null);
+    return true;
+  }
+
+  const channelHint = submissionChannelId ? ` di <#${submissionChannelId}>` : '';
+  const prefixHint = ratingPrefix ? ` dengan format \`${ratingPrefix} ini adalah karya gue\`` : '';
+  await msg.reply(`Status: belum terdaftar. Kirim karya${channelHint}${prefixHint} + lampiran gambar.`).catch(() => null);
   return true;
 }
 
@@ -121,6 +167,83 @@ async function getNonBotReactionCount(reaction) {
   } catch {
     return reaction.count || 0;
   }
+}
+
+function isWithinAgeWindow(iso, maxAgeMs) {
+  if (!iso) return true;
+  const time = new Date(iso).getTime();
+  if (Number.isNaN(time)) return true;
+  return Date.now() - time <= maxAgeMs;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function scanSubmissionApprovals(client, submissionStore, {
+  roleId = REGISTER_ROLE_ID,
+  submissionChannelId = SUBMISSION_CHANNEL_ID,
+  ratingPrefix = RATING_PREFIX,
+  ratingApproveEmoji = RATING_APPROVE_EMOJI,
+  minApprovals = RATING_MIN_APPROVALS,
+  scanLimit = SUBMISSION_SCAN_LIMIT,
+  maxAgeDays = SUBMISSION_SCAN_MAX_AGE_DAYS,
+  scanDelayMs = SUBMISSION_SCAN_DELAY_MS
+} = {}) {
+  if (!client || !submissionStore) return { scanned: 0, approved: 0 };
+  await submissionStore.init(client);
+
+  const maxAgeMs = maxAgeDays > 0 ? maxAgeDays * 24 * 60 * 60 * 1000 : 0;
+  const submissions = submissionStore.getSubmissions()
+    .filter(entry => !entry.approvedAt)
+    .filter(entry => entry.channelId && entry.messageId)
+    .filter(entry => (maxAgeMs ? isWithinAgeWindow(entry.createdAt, maxAgeMs) : true))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, Math.max(0, scanLimit));
+
+  let scanned = 0;
+  let approved = 0;
+
+  for (const entry of submissions) {
+    const channel = await client.channels.fetch(entry.channelId).catch(() => null);
+    if (!channel || !channel.isTextBased()) continue;
+    if (submissionChannelId && String(channel.id) !== String(submissionChannelId)) continue;
+
+    const message = await channel.messages.fetch(entry.messageId).catch(() => null);
+    scanned += 1;
+    if (!message) continue;
+    if (!isValidSubmissionMessage(message, ratingPrefix)) continue;
+
+    const reaction = message.reactions.cache.find(item => item.emoji?.name === ratingApproveEmoji);
+    if (!reaction) continue;
+
+    let approvals = reaction.count || 0;
+    if (approvals < minApprovals) {
+      await submissionStore.updateSubmissionApprovals(message.id, approvals);
+      if (scanDelayMs > 0) await sleep(scanDelayMs);
+      continue;
+    }
+
+    approvals = await getNonBotReactionCount(reaction);
+    await submissionStore.updateSubmissionApprovals(message.id, approvals);
+    if (approvals < minApprovals) {
+      if (scanDelayMs > 0) await sleep(scanDelayMs);
+      continue;
+    }
+
+    const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+    if (member) {
+      await addRoleIfMissing(member, roleId);
+      await submissionStore.markApprovedMember(member.id, 'vote');
+    }
+    await submissionStore.markSubmissionApproved(message.id);
+    await message.delete().catch(() => null);
+    approved += 1;
+
+    if (scanDelayMs > 0) await sleep(scanDelayMs);
+  }
+
+  return { scanned, approved };
 }
 
 async function resolveReaction(reaction) {
@@ -149,7 +272,8 @@ function createSubmissionReactionHandler({
   submitterRoleId = SUBMISSION_ROLE_ID,
   ratingPrefix = RATING_PREFIX,
   ratingApproveEmoji = RATING_APPROVE_EMOJI,
-  minApprovals = RATING_MIN_APPROVALS
+  minApprovals = RATING_MIN_APPROVALS,
+  submissionStore
 } = {}) {
   return async function handleSubmissionReaction(reaction, user) {
     try {
@@ -170,9 +294,31 @@ function createSubmissionReactionHandler({
       if (submitterRoleId && !member.roles.cache.has(submitterRoleId)) return;
 
       const approvals = await getNonBotReactionCount(resolved);
+
+      if (submissionStore) {
+        await submissionStore.init(message.client);
+        const existing = submissionStore.getSubmission(message.id);
+        if (existing) {
+          await submissionStore.updateSubmissionApprovals(message.id, approvals);
+        } else {
+          await submissionStore.upsertSubmission({
+            messageId: message.id,
+            authorId: message.author?.id || null,
+            channelId: String(message.channelId),
+            createdAt: message.createdAt ? message.createdAt.toISOString() : new Date().toISOString(),
+            approvals
+          });
+        }
+      }
+
       if (approvals < minApprovals) return;
 
       await addRoleIfMissing(member, roleId);
+      if (submissionStore) {
+        await submissionStore.markApprovedMember(member.id, 'vote');
+        await submissionStore.markSubmissionApproved(message.id);
+      }
+      await message.delete().catch(() => null);
     } catch (err) {
       console.error('Submission reaction handler error:', err);
     }
@@ -185,7 +331,8 @@ function createRegisterHandler({
   submitterRoleId = SUBMISSION_ROLE_ID,
   ratingPrefix = RATING_PREFIX,
   ratingApproveEmoji = RATING_APPROVE_EMOJI,
-  ratingRejectEmoji = RATING_REJECT_EMOJI
+  ratingRejectEmoji = RATING_REJECT_EMOJI,
+  submissionStore
 }) {
 
   return async function handleRegisterMessage(msg) {
@@ -199,9 +346,18 @@ function createRegisterHandler({
         submitterRoleId,
         ratingPrefix,
         approveEmoji: ratingApproveEmoji,
-        rejectEmoji: ratingRejectEmoji
+        rejectEmoji: ratingRejectEmoji,
+        submissionStore
       });
       if (handledSubmission) return true;
+
+      const handledStatus = await handleStatusCommand(msg, {
+        roleId,
+        submissionStore,
+        submissionChannelId,
+        ratingPrefix
+      });
+      if (handledStatus) return true;
 
       return false;
     } catch (err) {
@@ -211,6 +367,6 @@ function createRegisterHandler({
   };
 }
 
-module.exports = { createRegisterHandler, createSubmissionReactionHandler };
+module.exports = { createRegisterHandler, createSubmissionReactionHandler, scanSubmissionApprovals };
 
 
