@@ -5,7 +5,7 @@ const {
   RATING_PREFIX,
   RATING_APPROVE_EMOJI,
   RATING_REJECT_EMOJI,
-  RATING_MIN_APPROVALS,
+  RATING_NEUTRAL_EMOJI,
   SUBMISSION_SCAN_LIMIT,
   SUBMISSION_SCAN_MAX_AGE_DAYS,
   SUBMISSION_SCAN_DELAY_MS,
@@ -13,6 +13,11 @@ const {
 } = require('../config');
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
+const DEFAULT_RATING_EMOJIS = [
+  RATING_APPROVE_EMOJI,
+  RATING_REJECT_EMOJI,
+  RATING_NEUTRAL_EMOJI
+].filter(Boolean);
 
 
 async function resolveMember(msg) {
@@ -22,11 +27,12 @@ async function resolveMember(msg) {
 
 async function addRoleIfMissing(member, roleId) {
   if (!member || !roleId) return false;
-  if (member.roles.cache.has(roleId)) return false;
+  if (member.roles.cache.has(roleId)) return true;
   const role = member.guild.roles.cache.get(roleId);
   if (!role) return false;
-  await member.roles.add(role).catch(() => null);
-  return true;
+  const updated = await member.roles.add(role).catch(() => null);
+  if (updated?.roles?.cache?.has(roleId)) return true;
+  return member.roles.cache.has(roleId);
 }
 
 function getAttachments(msg) {
@@ -57,8 +63,7 @@ function isValidSubmissionMessage(msg, prefix) {
   return hasRatePrefix(msg?.content || '', prefix);
 }
 
-async function deleteWithNotice(msg, text) {
-  await msg.delete().catch(() => null);
+async function sendNotice(msg, text) {
   const notice = await msg.channel?.send(`${msg.author}, ${text}`).catch(() => null);
   if (notice) setTimeout(() => notice.delete().catch(() => null), 5000);
 }
@@ -69,13 +74,13 @@ function hasBotReaction(message, emoji) {
   return Boolean(reaction?.me);
 }
 
-async function seedReactions(message, approveEmoji, rejectEmoji) {
+async function seedReactions(message, emojis = []) {
   if (!message) return;
-  if (approveEmoji && !hasBotReaction(message, approveEmoji)) {
-    await message.react(approveEmoji).catch(() => null);
-  }
-  if (rejectEmoji && !hasBotReaction(message, rejectEmoji)) {
-    await message.react(rejectEmoji).catch(() => null);
+  for (const emoji of emojis) {
+    if (!emoji) continue;
+    if (!hasBotReaction(message, emoji)) {
+      await message.react(emoji).catch(() => null);
+    }
   }
 }
 
@@ -85,8 +90,7 @@ async function handleSubmissionMessage(msg, options) {
     submissionChannelId,
     submitterRoleId,
     ratingPrefix,
-    approveEmoji,
-    rejectEmoji,
+    ratingEmojis = DEFAULT_RATING_EMOJIS,
     submissionStore
   } = options;
 
@@ -97,25 +101,22 @@ async function handleSubmissionMessage(msg, options) {
   const member = await resolveMember(msg);
   if (!member) return false;
 
-  if (roleId && member.roles.cache.has(roleId)) {
-    await deleteWithNotice(msg, 'Kamu sudah punya role private, tidak bisa kirim karya di channel ini.');
-    return true;
-  }
-
-  if (submitterRoleId && !member.roles.cache.has(submitterRoleId)) {
-    await deleteWithNotice(msg, 'Hanya role yang diizinkan yang boleh kirim karya di channel ini.');
+  const hasPrivateRole = Boolean(roleId && member.roles.cache.has(roleId));
+  if (submitterRoleId && !member.roles.cache.has(submitterRoleId) && !hasPrivateRole) {
+    await sendNotice(msg, 'Hanya role yang diizinkan yang boleh kirim karya di channel ini.');
     return true;
   }
 
   if (!isValidSubmissionMessage(msg, ratingPrefix)) {
-    await deleteWithNotice(
+    await sendNotice(
       msg,
       `Format wajib: \`${ratingPrefix} ini adalah karya gue\` + lampiran gambar (hanya gambar).`
     );
     return true;
   }
 
-  await seedReactions(msg, approveEmoji, rejectEmoji);
+  await seedReactions(msg, ratingEmojis);
+  const roleGranted = roleId ? await addRoleIfMissing(member, roleId) : true;
 
   if (submissionStore) {
     await submissionStore.init(msg.client);
@@ -126,6 +127,10 @@ async function handleSubmissionMessage(msg, options) {
       createdAt: msg.createdAt ? msg.createdAt.toISOString() : new Date().toISOString(),
       approvals: 0
     });
+    if (roleGranted) {
+      await submissionStore.markApprovedMember(msg.author.id, 'submit');
+      await submissionStore.markSubmissionApproved(msg.id);
+    }
   }
   return true;
 }
@@ -157,7 +162,9 @@ async function handleStatusCommand(msg, options) {
 
   const channelHint = submissionChannelId ? ` di <#${submissionChannelId}>` : '';
   const prefixHint = ratingPrefix ? ` dengan format \`${ratingPrefix} ini adalah karya gue\`` : '';
-  await msg.reply(`Status: belum terdaftar. Kirim karya${channelHint}${prefixHint} + lampiran gambar.`).catch(() => null);
+  await msg.reply(
+    `Status: belum terdaftar. Kirim karya${channelHint}${prefixHint} + lampiran gambar. Role private otomatis.`
+  ).catch(() => null);
   return true;
 }
 
@@ -165,7 +172,7 @@ async function handleHelpCommand(msg, options) {
   const {
     submissionChannelId,
     ratingPrefix,
-    minApprovals,
+    ratingEmojis,
     privateChatChannelId
   } = options;
   const content = (msg.content || '').trim();
@@ -174,13 +181,15 @@ async function handleHelpCommand(msg, options) {
 
   const channelHint = submissionChannelId ? `<#${submissionChannelId}>` : 'channel karya';
   const prefixHint = ratingPrefix ? `\`${ratingPrefix} ini adalah karya gue\`` : '`[rate] ini adalah karya gue`';
-  const approvalsText = Number.isFinite(minApprovals) ? `${minApprovals}` : '11';
+  const emojiText = Array.isArray(ratingEmojis) && ratingEmojis.length
+    ? ratingEmojis.join(' ')
+    : '\uD83D\uDD25 \uD83D\uDC80 \uD83D\uDDFF';
 
   const privateChatHint = privateChatChannelId ? `<#${privateChatChannelId}>` : 'channel private chat';
   const lines = [
     '**Panduan Singkat**',
-    `- Kirim karya di ${channelHint} dengan format ${prefixHint} + lampiran gambar.`,
-    `- Voting: ✅ setuju / ❌ tidak setuju. Jika ✅ >= ${approvalsText} (di atas 10), otomatis masuk private dan karya dihapus.`,
+    `- Kirim karya di ${channelHint} dengan format ${prefixHint} + lampiran gambar. Role private otomatis.`,
+    `- Rating: react ${emojiText}. Pesan tidak dihapus.`,
     '- Cek status: `!status`.',
     '- Petisi timeout (khusus member private): `!timeout @user` (butuh 17 vote dalam 1 jam).',
     '- Veto admin: `!freedom @user`.',
@@ -189,15 +198,6 @@ async function handleHelpCommand(msg, options) {
 
   await msg.reply(lines.join('\n')).catch(() => null);
   return true;
-}
-
-async function getNonBotReactionCount(reaction) {
-  try {
-    const users = await reaction.users.fetch();
-    return users.filter(user => !user.bot).size;
-  } catch {
-    return reaction.count || 0;
-  }
 }
 
 function isWithinAgeWindow(iso, maxAgeMs) {
@@ -215,8 +215,7 @@ async function scanSubmissionApprovals(client, submissionStore, {
   roleId = REGISTER_ROLE_ID,
   submissionChannelId = SUBMISSION_CHANNEL_ID,
   ratingPrefix = RATING_PREFIX,
-  ratingApproveEmoji = RATING_APPROVE_EMOJI,
-  minApprovals = RATING_MIN_APPROVALS,
+  ratingEmojis = DEFAULT_RATING_EMOJIS,
   scanLimit = SUBMISSION_SCAN_LIMIT,
   maxAgeDays = SUBMISSION_SCAN_MAX_AGE_DAYS,
   scanDelayMs = SUBMISSION_SCAN_DELAY_MS
@@ -245,31 +244,17 @@ async function scanSubmissionApprovals(client, submissionStore, {
     if (!message) continue;
     if (!isValidSubmissionMessage(message, ratingPrefix)) continue;
 
-    const reaction = message.reactions.cache.find(item => item.emoji?.name === ratingApproveEmoji);
-    if (!reaction) continue;
-
-    let approvals = reaction.count || 0;
-    if (approvals < minApprovals) {
-      await submissionStore.updateSubmissionApprovals(message.id, approvals);
-      if (scanDelayMs > 0) await sleep(scanDelayMs);
-      continue;
-    }
-
-    approvals = await getNonBotReactionCount(reaction);
-    await submissionStore.updateSubmissionApprovals(message.id, approvals);
-    if (approvals < minApprovals) {
-      if (scanDelayMs > 0) await sleep(scanDelayMs);
-      continue;
-    }
+    await seedReactions(message, ratingEmojis);
 
     const member = await message.guild.members.fetch(message.author.id).catch(() => null);
     if (member) {
-      await addRoleIfMissing(member, roleId);
-      await submissionStore.markApprovedMember(member.id, 'vote');
+      const roleGranted = roleId ? await addRoleIfMissing(member, roleId) : true;
+      if (roleGranted) {
+        await submissionStore.markApprovedMember(member.id, 'submit');
+        await submissionStore.markSubmissionApproved(message.id);
+        approved += 1;
+      }
     }
-    await submissionStore.markSubmissionApproved(message.id);
-    await message.delete().catch(() => null);
-    approved += 1;
 
     if (scanDelayMs > 0) await sleep(scanDelayMs);
   }
@@ -298,58 +283,23 @@ async function resolveReaction(reaction) {
 }
 
 function createSubmissionReactionHandler({
-  roleId = REGISTER_ROLE_ID,
   submissionChannelId = SUBMISSION_CHANNEL_ID,
-  submitterRoleId = SUBMISSION_ROLE_ID,
   ratingPrefix = RATING_PREFIX,
-  ratingApproveEmoji = RATING_APPROVE_EMOJI,
-  minApprovals = RATING_MIN_APPROVALS,
-  submissionStore
+  ratingEmojis = DEFAULT_RATING_EMOJIS
 } = {}) {
+  const trackedEmojis = new Set((ratingEmojis || []).filter(Boolean));
   return async function handleSubmissionReaction(reaction, user) {
     try {
       if (!reaction || !user || user.bot) return;
+      if (!reaction.partial && trackedEmojis.size && !trackedEmojis.has(reaction.emoji?.name)) return;
       const resolved = await resolveReaction(reaction);
       if (!resolved) return;
 
       const message = resolved.message;
       if (!message?.guild) return;
       if (String(message.channelId) !== String(submissionChannelId)) return;
-
-      if (resolved.emoji?.name !== ratingApproveEmoji) return;
+      if (trackedEmojis.size && !trackedEmojis.has(resolved.emoji?.name)) return;
       if (!isValidSubmissionMessage(message, ratingPrefix)) return;
-
-      const member = await message.guild.members.fetch(message.author.id).catch(() => null);
-      if (!member) return;
-      if (roleId && member.roles.cache.has(roleId)) return;
-      if (submitterRoleId && !member.roles.cache.has(submitterRoleId)) return;
-
-      const approvals = await getNonBotReactionCount(resolved);
-
-      if (submissionStore) {
-        await submissionStore.init(message.client);
-        const existing = submissionStore.getSubmission(message.id);
-        if (existing) {
-          await submissionStore.updateSubmissionApprovals(message.id, approvals);
-        } else {
-          await submissionStore.upsertSubmission({
-            messageId: message.id,
-            authorId: message.author?.id || null,
-            channelId: String(message.channelId),
-            createdAt: message.createdAt ? message.createdAt.toISOString() : new Date().toISOString(),
-            approvals
-          });
-        }
-      }
-
-      if (approvals < minApprovals) return;
-
-      await addRoleIfMissing(member, roleId);
-      if (submissionStore) {
-        await submissionStore.markApprovedMember(member.id, 'vote');
-        await submissionStore.markSubmissionApproved(message.id);
-      }
-      await message.delete().catch(() => null);
     } catch (err) {
       console.error('Submission reaction handler error:', err);
     }
@@ -361,8 +311,7 @@ function createRegisterHandler({
   submissionChannelId = SUBMISSION_CHANNEL_ID,
   submitterRoleId = SUBMISSION_ROLE_ID,
   ratingPrefix = RATING_PREFIX,
-  ratingApproveEmoji = RATING_APPROVE_EMOJI,
-  ratingRejectEmoji = RATING_REJECT_EMOJI,
+  ratingEmojis = DEFAULT_RATING_EMOJIS,
   submissionStore
 }) {
 
@@ -376,8 +325,7 @@ function createRegisterHandler({
         submissionChannelId,
         submitterRoleId,
         ratingPrefix,
-        approveEmoji: ratingApproveEmoji,
-        rejectEmoji: ratingRejectEmoji,
+        ratingEmojis,
         submissionStore
       });
       if (handledSubmission) return true;
@@ -385,7 +333,7 @@ function createRegisterHandler({
       const handledHelp = await handleHelpCommand(msg, {
         submissionChannelId,
         ratingPrefix,
-        minApprovals: RATING_MIN_APPROVALS,
+        ratingEmojis,
         privateChatChannelId: PRIVATE_CHAT_CHANNEL_ID
       });
       if (handledHelp) return true;
