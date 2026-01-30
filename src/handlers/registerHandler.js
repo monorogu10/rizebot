@@ -98,7 +98,7 @@ async function handleSubmissionMessage(msg, options) {
   }
 
   if (submitterRoleId && !member.roles.cache.has(submitterRoleId)) {
-    await deleteWithNotice(msg, `Hanya role <@&${submitterRoleId}> yang boleh kirim karya di channel ini.`);
+    await deleteWithNotice(msg, 'Hanya role yang diizinkan yang boleh kirim karya di channel ini.');
     return true;
   }
 
