@@ -1,6 +1,7 @@
 const { isAdmin } = require('../utils/permissions');
 const {
   REGISTER_ROLE_ID,
+  PRIVATE_CHAT_CHANNEL_ID,
   TRASH_EMOJI,
   TRASH_MIN_COUNT,
   PETITION_VOTE_EMOJI,
@@ -264,7 +265,7 @@ async function handlePetitionVote(reaction, user, options) {
 }
 
 async function handleTrashReaction(reaction, user, options) {
-  const { privateRoleId, trashEmoji, trashMinCount } = options;
+  const { privateRoleId, trashEmoji, trashMinCount, privateChatChannelId } = options;
   if (!reaction || !user || user.bot) return false;
 
   const resolved = await resolveReaction(reaction);
@@ -274,6 +275,7 @@ async function handleTrashReaction(reaction, user, options) {
 
   const message = resolved.message;
   if (!message?.guild) return false;
+  if (privateChatChannelId && String(message.channelId) !== String(privateChatChannelId)) return false;
   if (message.author?.bot) return false;
 
   const authorMember = await message.guild.members.fetch(message.author.id).catch(() => null);
@@ -344,7 +346,8 @@ function createModerationReactionHandler({
   petitionWindowMs = PETITION_WINDOW_MS,
   timeoutDurationMs = TIMEOUT_DURATION_MS,
   trashEmoji = TRASH_EMOJI,
-  trashMinCount = TRASH_MIN_COUNT
+  trashMinCount = TRASH_MIN_COUNT,
+  privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID
 } = {}) {
   if (!moderationStore) throw new Error('moderationStore is required');
 
@@ -366,7 +369,8 @@ function createModerationReactionHandler({
       const handledTrash = await handleTrashReaction(reaction, user, {
         privateRoleId,
         trashEmoji,
-        trashMinCount
+        trashMinCount,
+        privateChatChannelId
       });
       if (handledTrash) return true;
 

@@ -8,7 +8,8 @@ const {
   RATING_MIN_APPROVALS,
   SUBMISSION_SCAN_LIMIT,
   SUBMISSION_SCAN_MAX_AGE_DAYS,
-  SUBMISSION_SCAN_DELAY_MS
+  SUBMISSION_SCAN_DELAY_MS,
+  PRIVATE_CHAT_CHANNEL_ID
 } = require('../config');
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'];
@@ -164,7 +165,8 @@ async function handleHelpCommand(msg, options) {
   const {
     submissionChannelId,
     ratingPrefix,
-    minApprovals
+    minApprovals,
+    privateChatChannelId
   } = options;
   const content = (msg.content || '').trim();
   if (!/^!help\b/i.test(content)) return false;
@@ -174,6 +176,7 @@ async function handleHelpCommand(msg, options) {
   const prefixHint = ratingPrefix ? `\`${ratingPrefix} ini adalah karya gue\`` : '`[rate] ini adalah karya gue`';
   const approvalsText = Number.isFinite(minApprovals) ? `${minApprovals}` : '11';
 
+  const privateChatHint = privateChatChannelId ? `<#${privateChatChannelId}>` : 'channel private chat';
   const lines = [
     '**Panduan Singkat**',
     `- Kirim karya di ${channelHint} dengan format ${prefixHint} + lampiran gambar.`,
@@ -181,7 +184,7 @@ async function handleHelpCommand(msg, options) {
     '- Cek status: `!status`.',
     '- Petisi timeout (khusus member private): `!timeout @user` (butuh 17 vote dalam 1 jam).',
     '- Veto admin: `!freedom @user`.',
-    '- Moderasi cepat: react 🗑️ 5x dari member private → pesan dihapus.'
+    `- Moderasi cepat (khusus ${privateChatHint}): react 🗑️ 5x dari member private → pesan dihapus.`
   ];
 
   await msg.reply(lines.join('\n')).catch(() => null);
@@ -382,7 +385,8 @@ function createRegisterHandler({
       const handledHelp = await handleHelpCommand(msg, {
         submissionChannelId,
         ratingPrefix,
-        minApprovals: RATING_MIN_APPROVALS
+        minApprovals: RATING_MIN_APPROVALS,
+        privateChatChannelId: PRIVATE_CHAT_CHANNEL_ID
       });
       if (handledHelp) return true;
 
