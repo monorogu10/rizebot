@@ -2,31 +2,22 @@ const {
   REGISTER_ROLE_ID,
   PRIVATE_CHAT_CHANNEL_ID,
   REGISTRATION_INBOX_CHANNEL_ID,
-  EVENT_REGISTRATION_CHANNEL_ID
+  EVENT_REGISTRATION_CHANNEL_ID,
+  MODERATOR_CHANNEL_ID,
+  EVENT_ROLE_FILM_ID,
+  EVENT_ROLE_BUILD_ID,
+  EVENT_ROLE_TALENT_ID
 } = require('../config');
 const { isAdmin } = require('../utils/permissions');
 
 const EVENT_MAIN_CHOICES = {
   '1': {
     key: '1',
-    name: 'Build',
-    prompt: [
-      '**Kategori Build**',
-      'Pilih subkategori:',
-      '- `!reg 1.1` -> Build Gedung',
-      '- `!reg 1.2` -> Build Ruko',
-      '- `!reg 1.3` -> Build Rumah'
-    ].join('\n')
+    name: 'Build'
   },
   '2': {
     key: '2',
-    name: 'Mono Got Talent',
-    prompt: [
-      '**Kategori Mono Got Talent**',
-      'Pilih subkategori:',
-      '- `!reg 2.1` -> Fanart 2D',
-      '- `!reg 2.2` -> Fanart 3D'
-    ].join('\n')
+    name: 'Mono Got Talent'
   },
   '3': {
     key: '3',
@@ -85,6 +76,21 @@ const EVENT_ALIAS = {
   film: '3'
 };
 
+const EVENT_MAIN_ORDER = ['1', '2', '3'];
+const EVENT_FINAL_ORDER = ['1.1', '1.2', '1.3', '2.1', '2.2', '3'];
+const EVENT_LIST_PAGE_SIZE = 15;
+
+const EVENT_CATEGORY_ROLE_BY_MAIN_CODE = {
+  '1': EVENT_ROLE_BUILD_ID,
+  '2': EVENT_ROLE_TALENT_ID,
+  '3': EVENT_ROLE_FILM_ID
+};
+
+const EVENT_FINAL_INDEX = EVENT_FINAL_ORDER.reduce((acc, code, index) => {
+  acc[code] = index;
+  return acc;
+}, {});
+
 function normalizeChoiceInput(raw) {
   return (raw || '')
     .trim()
@@ -98,9 +104,22 @@ function resolveEventChoice(input) {
   if (!normalized) return { kind: 'none', value: '' };
 
   const mapped = EVENT_ALIAS[normalized] || normalized;
+  if (mapped === '3' && EVENT_FINAL_CHOICES[mapped]) return { kind: 'final', value: mapped };
   if (EVENT_MAIN_CHOICES[mapped]) return { kind: 'main', value: mapped };
   if (EVENT_FINAL_CHOICES[mapped]) return { kind: 'final', value: mapped };
   return { kind: 'invalid', value: input };
+}
+
+function getMainCodeFromCategoryCode(code) {
+  const normalized = normalizeChoiceInput(code);
+  if (!normalized) return '';
+  if (!normalized.includes('.')) return normalized;
+  return normalized.split('.')[0];
+}
+
+function getCategoryRoleIdByCategoryCode(code) {
+  const mainCode = getMainCodeFromCategoryCode(code);
+  return EVENT_CATEGORY_ROLE_BY_MAIN_CODE[mainCode] || null;
 }
 
 function formatEventSelection(entry) {
@@ -123,34 +142,9 @@ function formatDateId(iso) {
   }
 }
 
-function splitIntoChunks(lines, maxLength = 1800) {
-  const chunks = [];
-  let current = '';
-
-  for (const line of lines) {
-    const candidate = current ? `${current}\n${line}` : line;
-    if (candidate.length <= maxLength) {
-      current = candidate;
-      continue;
-    }
-
-    if (current) chunks.push(current);
-
-    if (line.length <= maxLength) {
-      current = line;
-      continue;
-    }
-
-    let remaining = line;
-    while (remaining.length > maxLength) {
-      chunks.push(remaining.slice(0, maxLength));
-      remaining = remaining.slice(maxLength);
-    }
-    current = remaining;
-  }
-
-  if (current) chunks.push(current);
-  return chunks.length ? chunks : ['-'];
+function sanitizeUserText(text) {
+  if (!text) return '-';
+  return String(text).replace(/@/g, '@\u200b');
 }
 
 async function resolveMember(msg) {
@@ -168,21 +162,107 @@ async function addRoleIfMissing(member, roleId) {
   return member.roles.cache.has(roleId);
 }
 
+async function removeRoleIfPresent(member, roleId) {
+  if (!member || !roleId) return true;
+  if (!member.roles.cache.has(roleId)) return true;
+  const role = member.guild.roles.cache.get(roleId);
+  if (!role) return true;
+  const updated = await member.roles.remove(role).catch(() => null);
+  if (updated?.roles?.cache && !updated.roles.cache.has(roleId)) return true;
+  return !member.roles.cache.has(roleId);
+}
+
+function getEventCategoryRoleIds() {
+  return Array.from(new Set(Object.values(EVENT_CATEGORY_ROLE_BY_MAIN_CODE).filter(Boolean)));
+}
+
+async function syncEventCategoryRoles(member, targetRoleId) {
+  if (!member) return false;
+  const allEventRoleIds = getEventCategoryRoleIds();
+  if (!allEventRoleIds.length) return false;
+
+  let ok = true;
+  for (const roleId of allEventRoleIds) {
+    if (targetRoleId && roleId === targetRoleId) {
+      const added = await addRoleIfMissing(member, roleId);
+      if (!added) ok = false;
+      continue;
+    }
+    const removed = await removeRoleIfPresent(member, roleId);
+    if (!removed) ok = false;
+  }
+
+  return ok;
+}
+
+async function clearEventCategoryRoles(member) {
+  return syncEventCategoryRoles(member, null);
+}
+
 async function markApprovedIfPossible(submissionStore, client, userId, source) {
   if (!submissionStore || !userId) return;
   await submissionStore.init(client);
   await submissionStore.markApprovedMember(userId, source);
 }
 
-function buildEventMainMenu(currentEntry) {
+function formatOpenStatus(open) {
+  return open ? 'OPEN' : 'CLOSED';
+}
+
+function buildRegistrationStatusLines(eventRegistrationStore) {
+  if (!eventRegistrationStore) return ['- Status pendaftaran tidak tersedia.'];
+  const lines = [];
+  lines.push(`- Global: ${formatOpenStatus(eventRegistrationStore.isRegistrationOpen())}`);
+
+  for (const mainCode of EVENT_MAIN_ORDER) {
+    const main = EVENT_MAIN_CHOICES[mainCode];
+    lines.push(`- ${mainCode}. ${main.name}: ${formatOpenStatus(eventRegistrationStore.isRegistrationOpen(mainCode))}`);
+
+    const subChoices = EVENT_FINAL_ORDER.filter(code => {
+      return getMainCodeFromCategoryCode(code) === mainCode && code !== '3';
+    });
+    for (const code of subChoices) {
+      lines.push(
+        `  - ${code}. ${EVENT_FINAL_CHOICES[code].categoryName}: ${formatOpenStatus(eventRegistrationStore.isRegistrationOpen(code))}`
+      );
+    }
+  }
+
+  return lines;
+}
+
+function buildMainCategoryPrompt(mainCode, eventRegistrationStore) {
+  const main = EVENT_MAIN_CHOICES[mainCode];
+  if (!main) return 'Kategori tidak ditemukan.';
+
+  const lines = [`**Kategori ${main.name}**`, 'Pilih subkategori:'];
+  const subChoices = EVENT_FINAL_ORDER.filter(code => {
+    return getMainCodeFromCategoryCode(code) === mainCode && code !== '3';
+  });
+  for (const code of subChoices) {
+    const open = eventRegistrationStore?.isRegistrationOpen(code);
+    lines.push(
+      `- \`!reg ${code}\` -> ${EVENT_FINAL_CHOICES[code].categoryName} [${formatOpenStatus(Boolean(open))}]`
+    );
+  }
+
+  if (!subChoices.length) lines.push('Belum ada subkategori tersedia.');
+  return lines.join('\n');
+}
+
+function buildEventMainMenu(currentEntry, eventRegistrationStore) {
   const currentText = currentEntry
     ? `Status kamu saat ini: **${formatEventSelection(currentEntry)}**`
     : 'Status kamu saat ini: belum terdaftar.';
 
+  const statusLines = buildRegistrationStatusLines(eventRegistrationStore);
   return [
     '**MonoDeco Event 2 - Pendaftaran**',
     currentText,
     'Aturan: 1 user hanya 1 pilihan aktif. Kalau pilih lagi, pilihan lama otomatis diganti.',
+    '',
+    '**Status Pendaftaran Saat Ini**',
+    ...statusLines,
     '',
     'Pilih kategori dengan command berikut:',
     '- `!reg 1` -> Build',
@@ -200,6 +280,11 @@ function buildEventMainMenu(currentEntry) {
 function ensureRegChannel(msg, registrationChannelId) {
   if (!registrationChannelId) return true;
   return String(msg.channelId) === String(registrationChannelId);
+}
+
+function ensureModeratorChannel(msg, moderatorChannelId) {
+  if (!moderatorChannelId) return true;
+  return String(msg.channelId) === String(moderatorChannelId);
 }
 
 async function ensureEventStore(eventRegistrationStore, client) {
@@ -227,24 +312,347 @@ async function handleEventRegistrationCore(msg, options, choiceCode) {
     return true;
   }
 
+  const member = await resolveMember(msg);
+  const roleTargetId = getCategoryRoleIdByCategoryCode(choice.code);
+  const roleSyncOk = await syncEventCategoryRoles(member, roleTargetId);
+  const roleNote = roleSyncOk ? '' : '\nCatatan: role kategori belum berhasil diperbarui otomatis.';
+
   const { created, previous, entry } = result;
   const nowText = formatEventSelection(entry);
   const registerText = formatDateId(entry.registeredAt);
 
   if (created) {
     await msg.reply(
-      `Pendaftaran MonoDeco Event 2 berhasil dicatat: **${nowText}**.\nWaktu daftar: ${registerText}.`
+      `Pendaftaran MonoDeco Event 2 berhasil dicatat: **${nowText}**.\nWaktu daftar: ${registerText}.${roleNote}`
     ).catch(() => null);
     return true;
   }
 
   const prevText = previous ? formatEventSelection(previous) : '-';
   if (previous?.categoryCode === entry.categoryCode) {
-    await msg.reply(`Pilihan kamu tetap **${nowText}** (sudah tercatat sebelumnya).`).catch(() => null);
+    await msg.reply(`Pilihan kamu tetap **${nowText}** (sudah tercatat sebelumnya).${roleNote}`).catch(() => null);
     return true;
   }
 
-  await msg.reply(`Pilihan pendaftaran kamu diperbarui dari **${prevText}** ke **${nowText}**.`).catch(() => null);
+  await msg.reply(`Pilihan pendaftaran kamu diperbarui dari **${prevText}** ke **${nowText}**.${roleNote}`).catch(() => null);
+  return true;
+}
+
+function parseRegListRequest(content) {
+  const raw = (content || '').trim();
+  if (!/^!reg-list(?:\b|-)/i.test(raw)) return null;
+
+  const suffix = raw.slice('!reg-list'.length).trim();
+  if (!suffix) {
+    return { selector: null, page: 1, error: null };
+  }
+
+  const tokens = suffix.startsWith('-')
+    ? suffix.slice(1).split('-').filter(Boolean)
+    : suffix.split(/\s+/).filter(Boolean);
+
+  if (!tokens.length) {
+    return { selector: null, page: 1, error: null };
+  }
+
+  if (tokens.length > 2) {
+    return {
+      selector: null,
+      page: 1,
+      error: 'Format salah. Gunakan `!reg-list`, `!reg-list-1`, atau `!reg-list-1-2`.'
+    };
+  }
+
+  const firstToken = tokens[0];
+  const secondToken = tokens[1] || '';
+  let selector = null;
+  let pageToken = secondToken;
+
+  const resolved = resolveEventChoice(firstToken);
+  if (resolved.kind === 'main' || resolved.kind === 'final') {
+    selector = resolved;
+  } else if (/^\d+$/.test(firstToken) && !secondToken) {
+    pageToken = firstToken;
+  } else {
+    return {
+      selector: null,
+      page: 1,
+      error: `Filter \`${firstToken}\` tidak dikenali. Gunakan kode kategori seperti \`1\`, \`2\`, \`1.1\`, \`2.2\`, atau \`3\`.`
+    };
+  }
+
+  const page = pageToken ? parseInt(pageToken, 10) : 1;
+  if (!Number.isFinite(page) || page <= 0) {
+    return {
+      selector,
+      page: 1,
+      error: `Nomor halaman \`${pageToken}\` tidak valid.`
+    };
+  }
+
+  return { selector, page, error: null };
+}
+
+function sortEventEntries(entries) {
+  return [...entries].sort((a, b) => {
+    const aCode = normalizeChoiceInput(a.categoryCode);
+    const bCode = normalizeChoiceInput(b.categoryCode);
+    const aIndex = Number.isFinite(EVENT_FINAL_INDEX[aCode]) ? EVENT_FINAL_INDEX[aCode] : 9999;
+    const bIndex = Number.isFinite(EVENT_FINAL_INDEX[bCode]) ? EVENT_FINAL_INDEX[bCode] : 9999;
+    if (aIndex !== bIndex) return aIndex - bIndex;
+
+    const aTime = new Date(a.registeredAt).getTime();
+    const bTime = new Date(b.registeredAt).getTime();
+    if (aTime !== bTime) return aTime - bTime;
+    return String(a.userId).localeCompare(String(b.userId));
+  });
+}
+
+function filterEventEntries(entries, selector) {
+  if (!selector) return entries;
+  const selectedCode = normalizeChoiceInput(selector.value);
+  if (selector.kind === 'main') {
+    return entries.filter(entry => getMainCodeFromCategoryCode(entry.categoryCode) === selectedCode);
+  }
+  return entries.filter(entry => normalizeChoiceInput(entry.categoryCode) === selectedCode);
+}
+
+function paginateEntries(entries, page, pageSize = EVENT_LIST_PAGE_SIZE) {
+  const totalItems = entries.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const safePage = Math.min(Math.max(page, 1), totalPages);
+  const start = (safePage - 1) * pageSize;
+  const end = start + pageSize;
+  const items = entries.slice(start, end);
+  return {
+    items,
+    totalItems,
+    totalPages,
+    page: safePage,
+    startIndex: start
+  };
+}
+
+function describeRegListSelector(selector) {
+  if (!selector) return 'Semua kategori';
+  if (selector.kind === 'main') {
+    const main = EVENT_MAIN_CHOICES[selector.value];
+    return main ? `${selector.value} - ${main.name}` : selector.value;
+  }
+  const finalChoice = EVENT_FINAL_CHOICES[selector.value];
+  return finalChoice ? `${selector.value} - ${finalChoice.categoryName}` : selector.value;
+}
+
+function summarizeMainTotals(entries) {
+  const totals = { '1': 0, '2': 0, '3': 0 };
+  for (const entry of entries) {
+    const mainCode = getMainCodeFromCategoryCode(entry.categoryCode);
+    if (totals[mainCode] === undefined) continue;
+    totals[mainCode] += 1;
+  }
+  return totals;
+}
+
+function formatRegistrationIdentity(entry) {
+  const name = sanitizeUserText(entry.username || `user-${String(entry.userId).slice(-4)}`);
+  return `${name} (\`${entry.userId}\`)`;
+}
+
+function buildAdminControlSummary(eventRegistrationStore) {
+  if (!eventRegistrationStore) {
+    return 'Status pendaftaran tidak tersedia.';
+  }
+  return [
+    '**Panel Kontrol Pendaftaran Event**',
+    ...buildRegistrationStatusLines(eventRegistrationStore),
+    '',
+    'Command admin:',
+    '- `!reg-open` -> buka pendaftaran global',
+    '- `!reg-close` -> tutup pendaftaran global',
+    '- `!reg-open <kode>` -> buka kategori/subkategori tertentu',
+    '- `!reg-close <kode>` -> tutup kategori/subkategori tertentu',
+    '- `!reg-panel` -> lihat status buka/tutup',
+    '- `!reg-announce <kode> | <pesan opsional>` -> kirim announcement ke channel event'
+  ].join('\n');
+}
+
+async function handleEventRegAdminPanelCommand(msg, options) {
+  const { moderatorChannelId, eventRegistrationStore } = options;
+  const content = (msg.content || '').trim();
+  if (!/^!reg-panel\b/i.test(content)) return false;
+  if (!msg.guild) return false;
+
+  if (!ensureModeratorChannel(msg, moderatorChannelId)) {
+    await msg.reply(`Command admin ini hanya dipakai di <#${moderatorChannelId}>.`).catch(() => null);
+    return true;
+  }
+
+  const member = await resolveMember(msg);
+  if (!isAdmin(member)) {
+    await msg.reply('Command ini hanya untuk admin.').catch(() => null);
+    return true;
+  }
+
+  const ready = await ensureEventStore(eventRegistrationStore, msg.client);
+  if (!ready) {
+    await msg.reply('Sistem pendaftaran event belum aktif. Hubungi admin.').catch(() => null);
+    return true;
+  }
+
+  await msg.reply(buildAdminControlSummary(eventRegistrationStore)).catch(() => null);
+  return true;
+}
+
+async function handleEventRegAdminOpenCloseCommand(msg, options) {
+  const { moderatorChannelId, eventRegistrationStore } = options;
+  const content = (msg.content || '').trim();
+  const match = content.match(/^!reg-(open|close)(?:\s+(.+))?$/i);
+  if (!match) return false;
+  if (!msg.guild) return false;
+
+  if (!ensureModeratorChannel(msg, moderatorChannelId)) {
+    await msg.reply(`Command admin ini hanya dipakai di <#${moderatorChannelId}>.`).catch(() => null);
+    return true;
+  }
+
+  const member = await resolveMember(msg);
+  if (!isAdmin(member)) {
+    await msg.reply('Command ini hanya untuk admin.').catch(() => null);
+    return true;
+  }
+
+  const ready = await ensureEventStore(eventRegistrationStore, msg.client);
+  if (!ready) {
+    await msg.reply('Sistem pendaftaran event belum aktif. Hubungi admin.').catch(() => null);
+    return true;
+  }
+
+  const action = (match[1] || '').toLowerCase();
+  const open = action === 'open';
+  const rawTarget = (match[2] || '').trim();
+
+  if (!rawTarget || /^all$/i.test(rawTarget)) {
+    await eventRegistrationStore.setGlobalRegistrationOpen(open, msg.author.id);
+    await msg.reply(
+      `${open ? 'Pendaftaran global dibuka.' : 'Pendaftaran global ditutup.'}\n\n${buildAdminControlSummary(eventRegistrationStore)}`
+    ).catch(() => null);
+    return true;
+  }
+
+  const selected = resolveEventChoice(rawTarget);
+  if (selected.kind === 'invalid' || selected.kind === 'none') {
+    await msg.reply(
+      `Kategori \`${rawTarget}\` tidak dikenali.\nGunakan contoh: \`!reg-close 1\`, \`!reg-open 2.1\`, atau \`!reg-open film\`.`
+    ).catch(() => null);
+    return true;
+  }
+
+  await eventRegistrationStore.setCategoryRegistrationOpen(selected.value, open, msg.author.id);
+
+  let targetLabel = selected.value;
+  if (selected.kind === 'main') {
+    targetLabel = `${selected.value} - ${EVENT_MAIN_CHOICES[selected.value]?.name || selected.value}`;
+  } else {
+    targetLabel = `${selected.value} - ${EVENT_FINAL_CHOICES[selected.value]?.categoryName || selected.value}`;
+  }
+
+  await msg.reply(
+    `${open ? 'Dibuka' : 'Ditutup'}: **${targetLabel}**.\n\n${buildAdminControlSummary(eventRegistrationStore)}`
+  ).catch(() => null);
+  return true;
+}
+
+async function handleEventRegAnnouncementCommand(msg, options) {
+  const { moderatorChannelId, eventRegistrationStore, eventRegistrationChannelId } = options;
+  const content = (msg.content || '').trim();
+  if (!/^!reg-announce\b/i.test(content)) return false;
+  if (!msg.guild) return false;
+
+  if (!ensureModeratorChannel(msg, moderatorChannelId)) {
+    await msg.reply(`Command admin ini hanya dipakai di <#${moderatorChannelId}>.`).catch(() => null);
+    return true;
+  }
+
+  const member = await resolveMember(msg);
+  if (!isAdmin(member)) {
+    await msg.reply('Command ini hanya untuk admin.').catch(() => null);
+    return true;
+  }
+
+  const ready = await ensureEventStore(eventRegistrationStore, msg.client);
+  if (!ready) {
+    await msg.reply('Sistem pendaftaran event belum aktif. Hubungi admin.').catch(() => null);
+    return true;
+  }
+
+  const rawArgs = content.replace(/^!reg-announce\b/i, '').trim();
+  if (!rawArgs) {
+    await msg.reply(
+      'Format: `!reg-announce <kode> | <pesan opsional>`\nContoh: `!reg-announce 1 | Build mulai 20.00 WIB`'
+    ).catch(() => null);
+    return true;
+  }
+
+  let codeInput = rawArgs;
+  let note = '';
+  const pipeIndex = rawArgs.indexOf('|');
+  if (pipeIndex >= 0) {
+    codeInput = rawArgs.slice(0, pipeIndex).trim();
+    note = rawArgs.slice(pipeIndex + 1).trim();
+  } else {
+    const tokens = rawArgs.split(/\s+/);
+    codeInput = tokens.shift() || '';
+    note = tokens.join(' ').trim();
+  }
+
+  const selected = resolveEventChoice(codeInput);
+  if (selected.kind === 'invalid' || selected.kind === 'none') {
+    await msg.reply(
+      `Kategori \`${codeInput}\` tidak dikenali.\nGunakan contoh: \`1\`, \`2\`, \`1.1\`, \`2.2\`, atau \`3\`.`
+    ).catch(() => null);
+    return true;
+  }
+
+  const categoryCode = selected.value;
+  const categoryName = selected.kind === 'main'
+    ? (EVENT_MAIN_CHOICES[categoryCode]?.name || categoryCode)
+    : (EVENT_FINAL_CHOICES[categoryCode]?.categoryName || categoryCode);
+  const roleId = getCategoryRoleIdByCategoryCode(categoryCode);
+
+  const targetChannel = await msg.guild.channels.fetch(eventRegistrationChannelId).catch(() => null);
+  if (!targetChannel || !targetChannel.isTextBased()) {
+    await msg.reply('Channel announcement event tidak ditemukan atau tidak bisa dipakai.').catch(() => null);
+    return true;
+  }
+
+  const lines = [];
+  if (roleId) lines.push(`<@&${roleId}>`);
+  lines.push(`**Pengumuman Event: ${categoryCode} - ${categoryName}**`);
+  lines.push(`Kategori **${categoryName}** akan segera dimulai. Mohon peserta bersiap.`);
+  if (note) lines.push(`Catatan admin: ${sanitizeUserText(note)}`);
+  lines.push(`Admin: ${sanitizeUserText(msg.author?.tag || msg.author?.username || msg.author?.id || '-')}`);
+
+  const sent = await targetChannel.send({
+    content: lines.join('\n'),
+    allowedMentions: roleId ? { roles: [roleId] } : { parse: [] }
+  }).catch(() => null);
+
+  if (!sent) {
+    await msg.reply('Gagal mengirim announcement. Cek permission bot di channel event.').catch(() => null);
+    return true;
+  }
+
+  await eventRegistrationStore.addAnnouncementLog({
+    categoryCode,
+    categoryName,
+    announcedBy: msg.author.id,
+    announcedAt: new Date().toISOString(),
+    channelId: sent.channelId,
+    messageId: sent.id,
+    note: note || null
+  }).catch(() => null);
+
+  await msg.reply(`Announcement terkirim ke <#${targetChannel.id}> untuk **${categoryCode} - ${categoryName}**.`).catch(() => null);
   return true;
 }
 
@@ -271,27 +679,40 @@ async function handleEventRegCommand(msg, options) {
   const resolved = resolveEventChoice(input);
 
   if (resolved.kind === 'none') {
-    await msg.reply(buildEventMainMenu(currentEntry)).catch(() => null);
+    await msg.reply(buildEventMainMenu(currentEntry, eventRegistrationStore)).catch(() => null);
+    return true;
+  }
+
+  if (!eventRegistrationStore.isRegistrationOpen()) {
+    await msg.reply(
+      'Pendaftaran event sedang ditutup admin untuk sementara.\nCek lagi nanti atau pantau update dari admin.'
+    ).catch(() => null);
     return true;
   }
 
   if (resolved.kind === 'main') {
-    if (resolved.value === '3') {
-      return handleEventRegistrationCore(msg, options, '3');
-    }
-    const prompt = EVENT_MAIN_CHOICES[resolved.value]?.prompt;
-    if (prompt) {
-      await msg.reply(prompt).catch(() => null);
+    if (!eventRegistrationStore.isRegistrationOpen(resolved.value)) {
+      await msg.reply(
+        `Pendaftaran kategori **${EVENT_MAIN_CHOICES[resolved.value]?.name || resolved.value}** sedang ditutup.`
+      ).catch(() => null);
       return true;
     }
+    await msg.reply(buildMainCategoryPrompt(resolved.value, eventRegistrationStore)).catch(() => null);
+    return true;
   }
 
   if (resolved.kind === 'final') {
+    if (!eventRegistrationStore.isRegistrationOpen(resolved.value)) {
+      await msg.reply(
+        `Pendaftaran kategori **${EVENT_FINAL_CHOICES[resolved.value]?.categoryName || resolved.value}** sedang ditutup.`
+      ).catch(() => null);
+      return true;
+    }
     return handleEventRegistrationCore(msg, options, resolved.value);
   }
 
   await msg.reply(
-    `Pilihan \`${input}\` tidak dikenali.\n\n${buildEventMainMenu(currentEntry)}`
+    `Pilihan \`${input}\` tidak dikenali.\n\n${buildEventMainMenu(currentEntry, eventRegistrationStore)}`
   ).catch(() => null);
   return true;
 }
@@ -359,24 +780,22 @@ async function handleEventRegCancelCommand(msg, options) {
     return true;
   }
 
-  await msg.reply(`Pendaftaran event kamu dibatalkan: **${formatEventSelection(entry)}**.`).catch(() => null);
+  const member = await resolveMember(msg);
+  const roleSyncOk = await clearEventCategoryRoles(member);
+  const roleNote = roleSyncOk ? '' : '\nCatatan: role kategori belum berhasil dilepas otomatis.';
+  await msg.reply(`Pendaftaran event kamu dibatalkan: **${formatEventSelection(entry)}**.${roleNote}`).catch(() => null);
   return true;
 }
 
 async function handleEventRegListCommand(msg, options) {
   const { eventRegistrationChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
-  if (!/^!reg-list\b/i.test(content)) return false;
+  const parsed = parseRegListRequest(content);
+  if (!parsed) return false;
   if (!msg.guild) return false;
 
   if (!ensureRegChannel(msg, eventRegistrationChannelId)) {
     await msg.reply(`Command ini dipakai di <#${eventRegistrationChannelId}>.`).catch(() => null);
-    return true;
-  }
-
-  const member = await resolveMember(msg);
-  if (!isAdmin(member)) {
-    await msg.reply('Command ini hanya untuk admin.').catch(() => null);
     return true;
   }
 
@@ -386,39 +805,59 @@ async function handleEventRegListCommand(msg, options) {
     return true;
   }
 
-  const entries = eventRegistrationStore.getRegistrations();
-  if (!entries.length) {
+  if (parsed.error) {
+    await msg.reply(parsed.error).catch(() => null);
+    return true;
+  }
+
+  const allEntries = sortEventEntries(eventRegistrationStore.getRegistrations());
+  if (!allEntries.length) {
     await msg.reply('Belum ada data pendaftaran MonoDeco Event 2.').catch(() => null);
     return true;
   }
 
-  const totals = {
-    build: entries.filter(item => item.mainCategory === 'Build').length,
-    talent: entries.filter(item => item.mainCategory === 'Mono Got Talent').length,
-    film: entries.filter(item => item.categoryCode === '3').length
-  };
+  const filteredEntries = filterEventEntries(allEntries, parsed.selector);
+  if (!filteredEntries.length) {
+    await msg.reply(
+      `Belum ada pendaftar untuk filter **${describeRegListSelector(parsed.selector)}**.`
+    ).catch(() => null);
+    return true;
+  }
+
+  const pagination = paginateEntries(filteredEntries, parsed.page, EVENT_LIST_PAGE_SIZE);
+  if (parsed.page > pagination.totalPages) {
+    await msg.reply(
+      `Halaman ${parsed.page} tidak tersedia. Maksimal halaman: ${pagination.totalPages}.`
+    ).catch(() => null);
+    return true;
+  }
+
+  const totals = summarizeMainTotals(allEntries);
 
   const lines = [
     '**Rekap Pendaftaran MonoDeco Event 2**',
-    `Total pendaftar: ${entries.length}`,
-    `Build: ${totals.build} | Mono Got Talent: ${totals.talent} | Film Pendek: ${totals.film}`,
+    `Filter: ${describeRegListSelector(parsed.selector)}`,
+    `Halaman: ${pagination.page}/${pagination.totalPages} (maks ${EVENT_LIST_PAGE_SIZE} data per halaman)`,
+    `Total pendaftar (filter): ${pagination.totalItems}`,
+    `Total event: Build ${totals['1']} | Mono Got Talent ${totals['2']} | Film Pendek ${totals['3']}`,
     ''
   ];
 
-  entries.forEach((entry, idx) => {
+  pagination.items.forEach((entry, idx) => {
     lines.push(
-      `${idx + 1}. <@${entry.userId}> | ${formatEventSelection(entry)} | daftar: ${formatDateId(entry.registeredAt)}`
+      `${pagination.startIndex + idx + 1}. ${formatRegistrationIdentity(entry)} | ${formatEventSelection(entry)} | daftar: ${formatDateId(entry.registeredAt)}`
     );
   });
 
-  const chunks = splitIntoChunks(lines);
-  for (let i = 0; i < chunks.length; i += 1) {
-    if (i === 0) {
-      await msg.reply(chunks[i]).catch(() => null);
-      continue;
-    }
-    await msg.channel.send(chunks[i]).catch(() => null);
+  if (pagination.totalPages > 1) {
+    const filterHint = parsed.selector ? `-${parsed.selector.value}` : '';
+    lines.push('');
+    lines.push(
+      `Lanjut halaman lain: \`!reg-list${filterHint}-<nomor_halaman>\` (contoh: \`!reg-list${filterHint}-2\`).`
+    );
   }
+
+  await msg.reply(lines.join('\n')).catch(() => null);
   return true;
 }
 
@@ -503,7 +942,12 @@ async function handleStatusCommand(msg, options) {
 }
 
 async function handleHelpCommand(msg, options) {
-  const { registrationChannelId, eventRegistrationChannelId, privateChatChannelId } = options;
+  const {
+    registrationChannelId,
+    eventRegistrationChannelId,
+    privateChatChannelId,
+    moderatorChannelId
+  } = options;
   const content = (msg.content || '').trim();
   if (!/^!help\b/i.test(content)) return false;
   if (!msg.guild) return false;
@@ -513,6 +957,7 @@ async function handleHelpCommand(msg, options) {
     ? `<#${eventRegistrationChannelId}>`
     : registerHint;
   const privateChatHint = privateChatChannelId ? `<#${privateChatChannelId}>` : 'channel private chat';
+  const moderatorHint = moderatorChannelId ? `<#${moderatorChannelId}>` : 'channel moderator';
   const lines = [
     '**Panduan Singkat**',
     `- Daftar private: kirim \`!daftar\` di ${registerHint}.`,
@@ -521,7 +966,10 @@ async function handleHelpCommand(msg, options) {
     '- Event 2: 1 user hanya 1 pilihan aktif; jika daftar ulang, pilihan lama otomatis terganti.',
     '- Cek event: `!reg-status`.',
     '- Batalkan event: `!reg-cancel`.',
-    '- Rekap event (admin): `!reg-list`.',
+    '- Rekap event semua kategori: `!reg-list`.',
+    '- Rekap filter kategori/subkategori: `!reg-list-1`, `!reg-list-2`, `!reg-list-1.1`.',
+    '- Rekap halaman lanjutan: `!reg-list-1-2` (kategori build, halaman 2).',
+    `- Admin only di ${moderatorHint}: \`!reg-open\`, \`!reg-close\`, \`!reg-panel\`, \`!reg-announce\`.`,
     '- Petisi timeout (khusus member private): `!timeout @user` (butuh 17 vote dalam 1 jam).',
     '- Veto admin: `!freedom @user`.',
     `- Moderasi cepat (khusus ${privateChatHint}): react \uD83D\uDDD1\uFE0F 5x dari member private -> pesan dihapus.`
@@ -537,12 +985,32 @@ function createRegisterHandler({
   eventRegistrationStore,
   registrationChannelId = REGISTRATION_INBOX_CHANNEL_ID,
   eventRegistrationChannelId = EVENT_REGISTRATION_CHANNEL_ID,
-  privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID
+  privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID,
+  moderatorChannelId = MODERATOR_CHANNEL_ID
 }) {
   return async function handleRegisterMessage(msg) {
     try {
       if (!msg || msg.author?.bot) return false;
       if (!msg.guild) return false;
+
+      const handledEventAdminPanel = await handleEventRegAdminPanelCommand(msg, {
+        moderatorChannelId,
+        eventRegistrationStore
+      });
+      if (handledEventAdminPanel) return true;
+
+      const handledEventAdminToggle = await handleEventRegAdminOpenCloseCommand(msg, {
+        moderatorChannelId,
+        eventRegistrationStore
+      });
+      if (handledEventAdminToggle) return true;
+
+      const handledEventAnnouncement = await handleEventRegAnnouncementCommand(msg, {
+        moderatorChannelId,
+        eventRegistrationStore,
+        eventRegistrationChannelId
+      });
+      if (handledEventAnnouncement) return true;
 
       const eventHandledList = await handleEventRegListCommand(msg, {
         eventRegistrationChannelId,
@@ -579,7 +1047,8 @@ function createRegisterHandler({
       const handledHelp = await handleHelpCommand(msg, {
         registrationChannelId,
         eventRegistrationChannelId,
-        privateChatChannelId
+        privateChatChannelId,
+        moderatorChannelId
       });
       if (handledHelp) return true;
 

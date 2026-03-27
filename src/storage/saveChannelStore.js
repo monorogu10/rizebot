@@ -20,6 +20,7 @@ function downloadAttachment(url) {
 function createSaveChannelStore({ channelId, fileName }) {
   let channelCache = null;
   let lastMessageId = null;
+  let saveQueue = Promise.resolve();
 
   async function resolveChannel(client) {
     if (channelCache) return channelCache;
@@ -53,7 +54,7 @@ function createSaveChannelStore({ channelId, fileName }) {
     }
   }
 
-  async function save(client, data) {
+  async function performSave(client, data) {
     const channel = await resolveChannel(client);
     const payload = Buffer.from(JSON.stringify(data, null, 2), 'utf8');
     const attachment = new AttachmentBuilder(payload, { name: fileName });
@@ -74,6 +75,13 @@ function createSaveChannelStore({ channelId, fileName }) {
 
     lastMessageId = sent.id;
     return sent;
+  }
+
+  function save(client, data) {
+    saveQueue = saveQueue
+      .catch(() => null)
+      .then(() => performSave(client, data));
+    return saveQueue;
   }
 
   return {
