@@ -7,7 +7,10 @@ const { createMessageHandler } = require('./src/handlers/messageHandler');
 const { registerMemberEvents } = require('./src/handlers/memberEvents');
 const { registerPrivateRoleEvents } = require('./src/handlers/privateRoleHandler');
 const {
-  createRegisterHandler
+  createRegisterHandler,
+  createRegisterInteractionHandler,
+  syncEventCategoryRolesFromStore,
+  syncEventRoleForMember
 } = require('./src/handlers/registerHandler');
 const {
   createModerationHandler,
@@ -37,6 +40,9 @@ const eventRegistrationStore = createEventRegistrationStore();
 const registerHandler = createRegisterHandler({
   roleId: REGISTER_ROLE_ID,
   submissionStore,
+  eventRegistrationStore
+});
+const registerInteractionHandler = createRegisterInteractionHandler({
   eventRegistrationStore
 });
 const moderationHandler = createModerationHandler({
@@ -72,6 +78,15 @@ client.once('ready', async () => {
   await eventRegistrationStore.init(client).catch(err => {
     console.error('Failed to init event registration store:', err);
   });
+  await syncEventCategoryRolesFromStore(client, eventRegistrationStore)
+    .then(stats => {
+      console.log(
+        `Event role sync selesai. scanned=${stats.scanned}, synced=${stats.synced}, failed=${stats.failed}, skipped=${stats.skipped}`
+      );
+    })
+    .catch(err => {
+      console.error('Failed to sync event category roles:', err);
+    });
   await privateRoleEvents.sync().catch(err => {
     console.error('Failed to sync private roles:', err);
   });
@@ -91,6 +106,14 @@ client.on('messageUpdate', async (_old, n) => {
     try { await n.fetch(); } catch { /* ignore */ }
   }
   await handleMessage(n);
+});
+client.on('interactionCreate', async interaction => {
+  await registerInteractionHandler(interaction);
+});
+client.on('guildMemberAdd', async member => {
+  await syncEventRoleForMember(member, eventRegistrationStore).catch(err => {
+    console.error('Failed to sync event role for joined member:', err);
+  });
 });
 client.on('messageReactionAdd', async (reaction, user) => {
   await moderationReactionHandler(reaction, user);

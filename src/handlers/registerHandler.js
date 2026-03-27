@@ -1,4 +1,10 @@
 const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder
+} = require('discord.js');
+const {
   REGISTER_ROLE_ID,
   PRIVATE_CHAT_CHANNEL_ID,
   REGISTRATION_INBOX_CHANNEL_ID,
@@ -79,6 +85,7 @@ const EVENT_ALIAS = {
 const EVENT_MAIN_ORDER = ['1', '2', '3'];
 const EVENT_FINAL_ORDER = ['1.1', '1.2', '1.3', '2.1', '2.2', '3'];
 const EVENT_LIST_PAGE_SIZE = 15;
+const REG_LIST_BUTTON_PREFIX = 'reglist';
 
 const EVENT_CATEGORY_ROLE_BY_MAIN_CODE = {
   '1': EVENT_ROLE_BUILD_ID,
@@ -149,7 +156,9 @@ function sanitizeUserText(text) {
 
 async function resolveMember(msg) {
   if (msg.member) return msg.member;
-  return msg.guild?.members.fetch(msg.author.id).catch(() => null);
+  const userId = msg.author?.id || msg.user?.id;
+  if (!userId) return null;
+  return msg.guild?.members.fetch(userId).catch(() => null);
 }
 
 async function addRoleIfMissing(member, roleId) {
@@ -197,6 +206,64 @@ async function syncEventCategoryRoles(member, targetRoleId) {
 
 async function clearEventCategoryRoles(member) {
   return syncEventCategoryRoles(member, null);
+}
+
+async function syncEventRoleForMember(member, eventRegistrationStore) {
+  if (!member || member.user?.bot || !eventRegistrationStore) return false;
+  await eventRegistrationStore.init(member.client).catch(() => null);
+  const entry = eventRegistrationStore.getRegistration(member.id);
+  if (!entry) return false;
+  const roleTargetId = getCategoryRoleIdByCategoryCode(entry.categoryCode);
+  if (!roleTargetId) return false;
+  return syncEventCategoryRoles(member, roleTargetId);
+}
+
+async function findMemberAcrossGuilds(client, userId, guilds) {
+  if (!client || !userId || !Array.isArray(guilds) || !guilds.length) return null;
+  for (const guild of guilds) {
+    if (!guild) continue;
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (member) return member;
+  }
+  return null;
+}
+
+async function syncEventCategoryRolesFromStore(client, eventRegistrationStore) {
+  if (!client || !eventRegistrationStore) {
+    return { scanned: 0, synced: 0, failed: 0, skipped: 0 };
+  }
+
+  await eventRegistrationStore.init(client);
+  const entries = eventRegistrationStore.getRegistrations();
+  if (!entries.length) {
+    return { scanned: 0, synced: 0, failed: 0, skipped: 0 };
+  }
+
+  const guilds = Array.from(client.guilds.cache.values());
+  const stats = { scanned: entries.length, synced: 0, failed: 0, skipped: 0 };
+
+  for (const entry of entries) {
+    const roleTargetId = getCategoryRoleIdByCategoryCode(entry.categoryCode);
+    if (!roleTargetId) {
+      stats.skipped += 1;
+      continue;
+    }
+
+    const member = await findMemberAcrossGuilds(client, entry.userId, guilds);
+    if (!member) {
+      stats.skipped += 1;
+      continue;
+    }
+
+    const ok = await syncEventCategoryRoles(member, roleTargetId);
+    if (ok) {
+      stats.synced += 1;
+    } else {
+      stats.failed += 1;
+    }
+  }
+
+  return stats;
 }
 
 async function markApprovedIfPossible(submissionStore, client, userId, source) {
@@ -292,6 +359,28 @@ function ensureRegChannel(msg, registrationChannelId) {
 
 function ensureModeratorChannel(msg, moderatorChannelId) {
   return isTargetChannelOrThread(msg, moderatorChannelId);
+}
+
+function formatEventChannelHint(eventRegistrationChannelId, moderatorChannelId) {
+  if (moderatorChannelId) {
+    return `<#${eventRegistrationChannelId}> atau <#${moderatorChannelId}>`;
+  }
+  return `<#${eventRegistrationChannelId}>`;
+}
+
+async function resolveEventCommandAccess(msg, eventRegistrationChannelId, moderatorChannelId) {
+  const inEventChannel = ensureRegChannel(msg, eventRegistrationChannelId);
+  const inModeratorChannel = moderatorChannelId
+    ? ensureModeratorChannel(msg, moderatorChannelId)
+    : false;
+  const member = await resolveMember(msg);
+  const admin = isAdmin(member);
+  return {
+    inEventChannel,
+    inModeratorChannel,
+    member,
+    isAdmin: admin
+  };
 }
 
 async function ensureEventStore(eventRegistrationStore, client) {
@@ -465,6 +554,124 @@ function formatRegistrationIdentity(entry) {
   return `${name} (\`${entry.userId}\`)`;
 }
 
+function selectorToToken(selector) {
+  if (!selector) return 'all';
+  return selector.value;
+}
+
+function resolveSelectorFromToken(token) {
+  const raw = String(token || '').trim();
+  if (!raw || raw === 'all') return { selector: null, error: null };
+  const resolved = resolveEventChoice(raw);
+  if (resolved.kind === 'main' || resolved.kind === 'final') {
+    return { selector: resolved, error: null };
+  }
+  return {
+    selector: null,
+    error: `Filter \`${sanitizeUserText(raw)}\` tidak valid.`
+  };
+}
+
+function buildRegListButtonId(selectorToken, page, ownerId) {
+  return `${REG_LIST_BUTTON_PREFIX}:${selectorToken}:${page}:${ownerId || '0'}`;
+}
+
+function parseRegListButtonId(customId) {
+  const raw = String(customId || '').trim();
+  if (!raw.startsWith(`${REG_LIST_BUTTON_PREFIX}:`)) return null;
+  const parts = raw.split(':');
+  if (parts.length < 4) return null;
+  const [, selectorToken, pageToken, ownerId] = parts;
+  const page = parseInt(pageToken, 10);
+  if (!Number.isFinite(page) || page <= 0) return null;
+  return {
+    selectorToken,
+    page,
+    ownerId: ownerId || null
+  };
+}
+
+function createRegListButtons({ selector, page, totalPages, ownerId }) {
+  const selectorToken = selectorToToken(selector);
+  const prevPage = Math.max(1, page - 1);
+  const nextPage = Math.min(totalPages, page + 1);
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(buildRegListButtonId(selectorToken, prevPage, ownerId))
+      .setLabel('Sebelumnya')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page <= 1),
+    new ButtonBuilder()
+      .setCustomId(buildRegListButtonId(selectorToken, nextPage, ownerId))
+      .setLabel('Berikutnya')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(page >= totalPages)
+  );
+}
+
+function buildRegListEmbed({ allEntries, filteredEntries, pagination, selector }) {
+  const totals = summarizeMainTotals(allEntries);
+  const summaryLines = [
+    `Filter: **${describeRegListSelector(selector)}**`,
+    `Halaman: **${pagination.page}/${pagination.totalPages}**`,
+    `Total pendaftar (filter): **${pagination.totalItems}**`,
+    `Total event: Build **${totals['1']}** | Mono Got Talent **${totals['2']}** | Film Pendek **${totals['3']}**`
+  ];
+
+  const itemLines = pagination.items.map((entry, idx) => {
+    const rank = pagination.startIndex + idx + 1;
+    return [
+      `**${rank}. ${formatRegistrationIdentity(entry)}**`,
+      `Kategori: ${formatEventSelection(entry)}`,
+      `Daftar: ${formatDateId(entry.registeredAt)}`
+    ].join('\n');
+  });
+
+  const embed = new EmbedBuilder()
+    .setColor(0x2b8a3e)
+    .setTitle('Rekap Pendaftaran MonoDeco Event 2')
+    .setDescription([...summaryLines, '', ...itemLines].join('\n'))
+    .setFooter({
+      text: `Gunakan !reg-list-1 / !reg-list-2 / !reg-list-1.1 untuk filter cepat`
+    });
+
+  if (!filteredEntries.length) {
+    embed.setDescription([
+      `Filter: **${describeRegListSelector(selector)}**`,
+      '',
+      'Belum ada pendaftar untuk filter ini.'
+    ].join('\n'));
+  }
+
+  return embed;
+}
+
+function buildRegListResponseData({
+  allEntries,
+  filteredEntries,
+  pagination,
+  selector,
+  ownerId
+}) {
+  const embed = buildRegListEmbed({
+    allEntries,
+    filteredEntries,
+    pagination,
+    selector
+  });
+  const row = createRegListButtons({
+    selector,
+    page: pagination.page,
+    totalPages: pagination.totalPages,
+    ownerId
+  });
+  return {
+    embeds: [embed],
+    components: [row],
+    allowedMentions: { parse: [], repliedUser: false }
+  };
+}
+
 function buildAdminControlSummary(eventRegistrationStore) {
   if (!eventRegistrationStore) {
     return 'Status pendaftaran tidak tersedia.';
@@ -484,18 +691,24 @@ function buildAdminControlSummary(eventRegistrationStore) {
 }
 
 async function handleEventRegAdminPanelCommand(msg, options) {
-  const { moderatorChannelId, eventRegistrationStore } = options;
+  const { moderatorChannelId, eventRegistrationChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
   if (!/^!reg-panel\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  if (!ensureModeratorChannel(msg, moderatorChannelId)) {
-    await msg.reply(`Command admin ini hanya dipakai di <#${moderatorChannelId}>.`).catch(() => null);
+  const access = await resolveEventCommandAccess(
+    msg,
+    eventRegistrationChannelId,
+    moderatorChannelId
+  );
+  if (!access.inEventChannel && !access.inModeratorChannel) {
+    await msg.reply(
+      `Command admin ini dipakai di ${formatEventChannelHint(eventRegistrationChannelId, moderatorChannelId)}.`
+    ).catch(() => null);
     return true;
   }
 
-  const member = await resolveMember(msg);
-  if (!isAdmin(member)) {
+  if (!access.isAdmin) {
     await msg.reply('Command ini hanya untuk admin.').catch(() => null);
     return true;
   }
@@ -511,19 +724,25 @@ async function handleEventRegAdminPanelCommand(msg, options) {
 }
 
 async function handleEventRegAdminOpenCloseCommand(msg, options) {
-  const { moderatorChannelId, eventRegistrationStore } = options;
+  const { moderatorChannelId, eventRegistrationChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
   const match = content.match(/^!reg-(open|close)(?:\s+(.+))?$/i);
   if (!match) return false;
   if (!msg.guild) return false;
 
-  if (!ensureModeratorChannel(msg, moderatorChannelId)) {
-    await msg.reply(`Command admin ini hanya dipakai di <#${moderatorChannelId}>.`).catch(() => null);
+  const access = await resolveEventCommandAccess(
+    msg,
+    eventRegistrationChannelId,
+    moderatorChannelId
+  );
+  if (!access.inEventChannel && !access.inModeratorChannel) {
+    await msg.reply(
+      `Command admin ini dipakai di ${formatEventChannelHint(eventRegistrationChannelId, moderatorChannelId)}.`
+    ).catch(() => null);
     return true;
   }
 
-  const member = await resolveMember(msg);
-  if (!isAdmin(member)) {
+  if (!access.isAdmin) {
     await msg.reply('Command ini hanya untuk admin.').catch(() => null);
     return true;
   }
@@ -575,13 +794,19 @@ async function handleEventRegAnnouncementCommand(msg, options) {
   if (!/^!reg-announce\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  if (!ensureModeratorChannel(msg, moderatorChannelId)) {
-    await msg.reply(`Command admin ini hanya dipakai di <#${moderatorChannelId}>.`).catch(() => null);
+  const access = await resolveEventCommandAccess(
+    msg,
+    eventRegistrationChannelId,
+    moderatorChannelId
+  );
+  if (!access.inEventChannel && !access.inModeratorChannel) {
+    await msg.reply(
+      `Command admin ini dipakai di ${formatEventChannelHint(eventRegistrationChannelId, moderatorChannelId)}.`
+    ).catch(() => null);
     return true;
   }
 
-  const member = await resolveMember(msg);
-  if (!isAdmin(member)) {
+  if (!access.isAdmin) {
     await msg.reply('Command ini hanya untuk admin.').catch(() => null);
     return true;
   }
@@ -664,14 +889,25 @@ async function handleEventRegAnnouncementCommand(msg, options) {
 }
 
 async function handleEventRegCommand(msg, options) {
-  const { eventRegistrationChannelId, eventRegistrationStore } = options;
+  const { eventRegistrationChannelId, moderatorChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
   const match = content.match(/^!reg(?:\s+(.+))?$/i);
   if (!match) return false;
   if (!msg.guild) return false;
 
-  if (!ensureRegChannel(msg, eventRegistrationChannelId)) {
-    await msg.reply(`Command ini dipakai di <#${eventRegistrationChannelId}>.`).catch(() => null);
+  const access = await resolveEventCommandAccess(
+    msg,
+    eventRegistrationChannelId,
+    moderatorChannelId
+  );
+  if (!access.inEventChannel && !access.inModeratorChannel) {
+    await msg.reply(
+      `Command ini dipakai di ${formatEventChannelHint(eventRegistrationChannelId, moderatorChannelId)}.`
+    ).catch(() => null);
+    return true;
+  }
+  if (access.inModeratorChannel && !access.isAdmin) {
+    await msg.reply(`Di <#${moderatorChannelId}>, command ini hanya untuk admin.`).catch(() => null);
     return true;
   }
 
@@ -725,13 +961,24 @@ async function handleEventRegCommand(msg, options) {
 }
 
 async function handleEventRegStatusCommand(msg, options) {
-  const { eventRegistrationChannelId, eventRegistrationStore } = options;
+  const { eventRegistrationChannelId, moderatorChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
   if (!/^!reg-status\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  if (!ensureRegChannel(msg, eventRegistrationChannelId)) {
-    await msg.reply(`Command ini dipakai di <#${eventRegistrationChannelId}>.`).catch(() => null);
+  const access = await resolveEventCommandAccess(
+    msg,
+    eventRegistrationChannelId,
+    moderatorChannelId
+  );
+  if (!access.inEventChannel && !access.inModeratorChannel) {
+    await msg.reply(
+      `Command ini dipakai di ${formatEventChannelHint(eventRegistrationChannelId, moderatorChannelId)}.`
+    ).catch(() => null);
+    return true;
+  }
+  if (access.inModeratorChannel && !access.isAdmin) {
+    await msg.reply(`Di <#${moderatorChannelId}>, command ini hanya untuk admin.`).catch(() => null);
     return true;
   }
 
@@ -759,13 +1006,24 @@ async function handleEventRegStatusCommand(msg, options) {
 }
 
 async function handleEventRegCancelCommand(msg, options) {
-  const { eventRegistrationChannelId, eventRegistrationStore } = options;
+  const { eventRegistrationChannelId, moderatorChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
   if (!/^!reg-cancel\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  if (!ensureRegChannel(msg, eventRegistrationChannelId)) {
-    await msg.reply(`Command ini dipakai di <#${eventRegistrationChannelId}>.`).catch(() => null);
+  const access = await resolveEventCommandAccess(
+    msg,
+    eventRegistrationChannelId,
+    moderatorChannelId
+  );
+  if (!access.inEventChannel && !access.inModeratorChannel) {
+    await msg.reply(
+      `Command ini dipakai di ${formatEventChannelHint(eventRegistrationChannelId, moderatorChannelId)}.`
+    ).catch(() => null);
+    return true;
+  }
+  if (access.inModeratorChannel && !access.isAdmin) {
+    await msg.reply(`Di <#${moderatorChannelId}>, command ini hanya untuk admin.`).catch(() => null);
     return true;
   }
 
@@ -795,14 +1053,26 @@ async function handleEventRegCancelCommand(msg, options) {
 }
 
 async function handleEventRegListCommand(msg, options) {
-  const { eventRegistrationChannelId, eventRegistrationStore } = options;
+  const { eventRegistrationChannelId, moderatorChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
   const parsed = parseRegListRequest(content);
   if (!parsed) return false;
   if (!msg.guild) return false;
 
-  if (!ensureRegChannel(msg, eventRegistrationChannelId)) {
-    await msg.reply(`Command ini dipakai di <#${eventRegistrationChannelId}>.`).catch(() => null);
+  const access = await resolveEventCommandAccess(
+    msg,
+    eventRegistrationChannelId,
+    moderatorChannelId
+  );
+  if (!access.inEventChannel && !access.inModeratorChannel) {
+    await msg.reply(
+      `Command ini dipakai di ${formatEventChannelHint(eventRegistrationChannelId, moderatorChannelId)}.`
+    ).catch(() => null);
+    return true;
+  }
+
+  if (access.inModeratorChannel && !access.isAdmin) {
+    await msg.reply(`Di <#${moderatorChannelId}>, command ini hanya untuk admin.`).catch(() => null);
     return true;
   }
 
@@ -839,32 +1109,15 @@ async function handleEventRegListCommand(msg, options) {
     return true;
   }
 
-  const totals = summarizeMainTotals(allEntries);
-
-  const lines = [
-    '**Rekap Pendaftaran MonoDeco Event 2**',
-    `Filter: ${describeRegListSelector(parsed.selector)}`,
-    `Halaman: ${pagination.page}/${pagination.totalPages} (maks ${EVENT_LIST_PAGE_SIZE} data per halaman)`,
-    `Total pendaftar (filter): ${pagination.totalItems}`,
-    `Total event: Build ${totals['1']} | Mono Got Talent ${totals['2']} | Film Pendek ${totals['3']}`,
-    ''
-  ];
-
-  pagination.items.forEach((entry, idx) => {
-    lines.push(
-      `${pagination.startIndex + idx + 1}. ${formatRegistrationIdentity(entry)} | ${formatEventSelection(entry)} | daftar: ${formatDateId(entry.registeredAt)}`
-    );
+  const responseData = buildRegListResponseData({
+    allEntries,
+    filteredEntries,
+    pagination,
+    selector: parsed.selector,
+    ownerId: msg.author?.id || null
   });
 
-  if (pagination.totalPages > 1) {
-    const filterHint = parsed.selector ? `-${parsed.selector.value}` : '';
-    lines.push('');
-    lines.push(
-      `Lanjut halaman lain: \`!reg-list${filterHint}-<nomor_halaman>\` (contoh: \`!reg-list${filterHint}-2\`).`
-    );
-  }
-
-  await msg.reply(lines.join('\n')).catch(() => null);
+  await msg.reply(responseData).catch(() => null);
   return true;
 }
 
@@ -976,7 +1229,8 @@ async function handleHelpCommand(msg, options) {
     '- Rekap event semua kategori: `!reg-list`.',
     '- Rekap filter kategori/subkategori: `!reg-list-1`, `!reg-list-2`, `!reg-list-1.1`.',
     '- Rekap halaman lanjutan: `!reg-list-1-2` (kategori build, halaman 2).',
-    `- Admin only di ${moderatorHint}: \`!reg-open\`, \`!reg-close\`, \`!reg-panel\`, \`!reg-announce\`.`,
+    `- Admin bisa pakai command event di ${eventRegisterHint} dan ${moderatorHint}.`,
+    '- Command admin event: `!reg-open`, `!reg-close`, `!reg-panel`, `!reg-announce`.',
     '- Petisi timeout (khusus member private): `!timeout @user` (butuh 17 vote dalam 1 jam).',
     '- Veto admin: `!freedom @user`.',
     `- Moderasi cepat (khusus ${privateChatHint}): react \uD83D\uDDD1\uFE0F 5x dari member private -> pesan dihapus.`
@@ -1001,12 +1255,14 @@ function createRegisterHandler({
       if (!msg.guild) return false;
 
       const handledEventAdminPanel = await handleEventRegAdminPanelCommand(msg, {
+        eventRegistrationChannelId,
         moderatorChannelId,
         eventRegistrationStore
       });
       if (handledEventAdminPanel) return true;
 
       const handledEventAdminToggle = await handleEventRegAdminOpenCloseCommand(msg, {
+        eventRegistrationChannelId,
         moderatorChannelId,
         eventRegistrationStore
       });
@@ -1021,24 +1277,28 @@ function createRegisterHandler({
 
       const eventHandledList = await handleEventRegListCommand(msg, {
         eventRegistrationChannelId,
+        moderatorChannelId,
         eventRegistrationStore
       });
       if (eventHandledList) return true;
 
       const eventHandledStatus = await handleEventRegStatusCommand(msg, {
         eventRegistrationChannelId,
+        moderatorChannelId,
         eventRegistrationStore
       });
       if (eventHandledStatus) return true;
 
       const eventHandledCancel = await handleEventRegCancelCommand(msg, {
         eventRegistrationChannelId,
+        moderatorChannelId,
         eventRegistrationStore
       });
       if (eventHandledCancel) return true;
 
       const eventHandledReg = await handleEventRegCommand(msg, {
         eventRegistrationChannelId,
+        moderatorChannelId,
         eventRegistrationStore
       });
       if (eventHandledReg) return true;
@@ -1074,6 +1334,106 @@ function createRegisterHandler({
   };
 }
 
+function createRegisterInteractionHandler({
+  eventRegistrationStore,
+  eventRegistrationChannelId = EVENT_REGISTRATION_CHANNEL_ID,
+  moderatorChannelId = MODERATOR_CHANNEL_ID
+}) {
+  return async function handleRegisterInteraction(interaction) {
+    try {
+      if (!interaction || !interaction.isButton?.()) return false;
+      const payload = parseRegListButtonId(interaction.customId);
+      if (!payload) return false;
+      if (!interaction.guild) {
+        await interaction.reply({
+          content: 'Command ini hanya bisa dipakai di server.',
+          ephemeral: true
+        }).catch(() => null);
+        return true;
+      }
+
+      const access = await resolveEventCommandAccess(
+        interaction,
+        eventRegistrationChannelId,
+        moderatorChannelId
+      );
+      if (!access.inEventChannel && !access.inModeratorChannel) {
+        await interaction.reply({
+          content: `List ini hanya aktif di ${formatEventChannelHint(eventRegistrationChannelId, moderatorChannelId)}.`,
+          ephemeral: true
+        }).catch(() => null);
+        return true;
+      }
+      if (access.inModeratorChannel && !access.isAdmin) {
+        await interaction.reply({
+          content: `Di <#${moderatorChannelId}>, command ini hanya untuk admin.`,
+          ephemeral: true
+        }).catch(() => null);
+        return true;
+      }
+      if (payload.ownerId && payload.ownerId !== '0' && payload.ownerId !== interaction.user?.id && !access.isAdmin) {
+        await interaction.reply({
+          content: 'Hanya pembuat list atau admin yang bisa mengubah halaman ini.',
+          ephemeral: true
+        }).catch(() => null);
+        return true;
+      }
+
+      const ready = await ensureEventStore(eventRegistrationStore, interaction.client);
+      if (!ready) {
+        await interaction.reply({
+          content: 'Sistem pendaftaran event belum aktif.',
+          ephemeral: true
+        }).catch(() => null);
+        return true;
+      }
+
+      const selectorParse = resolveSelectorFromToken(payload.selectorToken);
+      if (selectorParse.error) {
+        await interaction.reply({ content: selectorParse.error, ephemeral: true }).catch(() => null);
+        return true;
+      }
+
+      const allEntries = sortEventEntries(eventRegistrationStore.getRegistrations());
+      if (!allEntries.length) {
+        await interaction.update({
+          content: 'Belum ada data pendaftaran MonoDeco Event 2.',
+          embeds: [],
+          components: []
+        }).catch(() => null);
+        return true;
+      }
+
+      const filteredEntries = filterEventEntries(allEntries, selectorParse.selector);
+      if (!filteredEntries.length) {
+        await interaction.update({
+          content: `Belum ada pendaftar untuk filter **${describeRegListSelector(selectorParse.selector)}**.`,
+          embeds: [],
+          components: []
+        }).catch(() => null);
+        return true;
+      }
+
+      const pagination = paginateEntries(filteredEntries, payload.page, EVENT_LIST_PAGE_SIZE);
+      const responseData = buildRegListResponseData({
+        allEntries,
+        filteredEntries,
+        pagination,
+        selector: selectorParse.selector,
+        ownerId: payload.ownerId && payload.ownerId !== '0'
+          ? payload.ownerId
+          : (interaction.user?.id || null)
+      });
+
+      await interaction.update(responseData).catch(() => null);
+      return true;
+    } catch (err) {
+      console.error('Register interaction handler error:', err);
+      return false;
+    }
+  };
+}
+
 function createSubmissionReactionHandler() {
   return async function handleSubmissionReaction() {
     return false;
@@ -1084,4 +1444,11 @@ async function scanSubmissionApprovals() {
   return { scanned: 0, approved: 0 };
 }
 
-module.exports = { createRegisterHandler, createSubmissionReactionHandler, scanSubmissionApprovals };
+module.exports = {
+  createRegisterHandler,
+  createRegisterInteractionHandler,
+  syncEventCategoryRolesFromStore,
+  syncEventRoleForMember,
+  createSubmissionReactionHandler,
+  scanSubmissionApprovals
+};
