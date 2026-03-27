@@ -2,7 +2,10 @@ const { PermissionsBitField } = require('discord.js');
 
 function isAdmin(member) {
   try {
-    return member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+    const perms = member?.permissions;
+    if (!perms) return false;
+    return perms.has(PermissionsBitField.Flags.Administrator) ||
+      perms.has(PermissionsBitField.Flags.ManageGuild);
   } catch {
     return false;
   }

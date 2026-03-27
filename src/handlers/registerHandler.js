@@ -277,14 +277,21 @@ function buildEventMainMenu(currentEntry, eventRegistrationStore) {
   ].join('\n');
 }
 
+function isTargetChannelOrThread(msg, targetChannelId) {
+  if (!targetChannelId) return true;
+  const targetId = String(targetChannelId);
+  const channelId = String(msg.channelId || '');
+  if (channelId === targetId) return true;
+  const parentId = msg.channel?.parentId ? String(msg.channel.parentId) : '';
+  return parentId === targetId;
+}
+
 function ensureRegChannel(msg, registrationChannelId) {
-  if (!registrationChannelId) return true;
-  return String(msg.channelId) === String(registrationChannelId);
+  return isTargetChannelOrThread(msg, registrationChannelId);
 }
 
 function ensureModeratorChannel(msg, moderatorChannelId) {
-  if (!moderatorChannelId) return true;
-  return String(msg.channelId) === String(moderatorChannelId);
+  return isTargetChannelOrThread(msg, moderatorChannelId);
 }
 
 async function ensureEventStore(eventRegistrationStore, client) {
