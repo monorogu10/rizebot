@@ -7,9 +7,7 @@ const { createMessageHandler } = require('./src/handlers/messageHandler');
 const { registerMemberEvents } = require('./src/handlers/memberEvents');
 const { registerPrivateRoleEvents } = require('./src/handlers/privateRoleHandler');
 const {
-  createRegisterHandler,
-  createSubmissionReactionHandler,
-  scanSubmissionApprovals
+  createRegisterHandler
 } = require('./src/handlers/registerHandler');
 const {
   createModerationHandler,
@@ -18,6 +16,7 @@ const {
 } = require('./src/handlers/moderationHandler');
 const { createSubmissionStore } = require('./src/services/submissionStore');
 const { createModerationStore } = require('./src/services/moderationStore');
+const { createEventRegistrationStore } = require('./src/services/eventRegistrationStore');
 const { REGISTER_ROLE_ID, LEGACY_ROLE_ID } = require('./src/config');
 
 const client = new Client({
@@ -34,13 +33,11 @@ const client = new Client({
 
 const submissionStore = createSubmissionStore();
 const moderationStore = createModerationStore();
+const eventRegistrationStore = createEventRegistrationStore();
 const registerHandler = createRegisterHandler({
   roleId: REGISTER_ROLE_ID,
-  submissionStore
-});
-const submissionReactionHandler = createSubmissionReactionHandler({
-  roleId: REGISTER_ROLE_ID,
-  submissionStore
+  submissionStore,
+  eventRegistrationStore
 });
 const moderationHandler = createModerationHandler({
   moderationStore,
@@ -72,14 +69,14 @@ client.once('ready', async () => {
   await moderationStore.init(client).catch(err => {
     console.error('Failed to init moderation store:', err);
   });
+  await eventRegistrationStore.init(client).catch(err => {
+    console.error('Failed to init event registration store:', err);
+  });
   await privateRoleEvents.sync().catch(err => {
     console.error('Failed to sync private roles:', err);
   });
   await syncActivePetitions(client, moderationStore).catch(err => {
     console.error('Failed to sync petitions:', err);
-  });
-  scanSubmissionApprovals(client, submissionStore).catch(err => {
-    console.error('Failed to scan submissions:', err);
   });
   console.log(`バ. Bot ready as ${client.user.tag}`);
 });
@@ -96,7 +93,6 @@ client.on('messageUpdate', async (_old, n) => {
   await handleMessage(n);
 });
 client.on('messageReactionAdd', async (reaction, user) => {
-  await submissionReactionHandler(reaction, user);
   await moderationReactionHandler(reaction, user);
 });
 
