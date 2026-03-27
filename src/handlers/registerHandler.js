@@ -1,7 +1,8 @@
 const {
   REGISTER_ROLE_ID,
   PRIVATE_CHAT_CHANNEL_ID,
-  REGISTRATION_INBOX_CHANNEL_ID
+  REGISTRATION_INBOX_CHANNEL_ID,
+  EVENT_REGISTRATION_CHANNEL_ID
 } = require('../config');
 const { isAdmin } = require('../utils/permissions');
 
@@ -181,6 +182,7 @@ function buildEventMainMenu(currentEntry) {
   return [
     '**MonoDeco Event 2 - Pendaftaran**',
     currentText,
+    'Aturan: 1 user hanya 1 pilihan aktif. Kalau pilih lagi, pilihan lama otomatis diganti.',
     '',
     'Pilih kategori dengan command berikut:',
     '- `!reg 1` -> Build',
@@ -247,14 +249,14 @@ async function handleEventRegistrationCore(msg, options, choiceCode) {
 }
 
 async function handleEventRegCommand(msg, options) {
-  const { registrationChannelId, eventRegistrationStore } = options;
+  const { eventRegistrationChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
   const match = content.match(/^!reg(?:\s+(.+))?$/i);
   if (!match) return false;
   if (!msg.guild) return false;
 
-  if (!ensureRegChannel(msg, registrationChannelId)) {
-    await msg.reply(`Command ini dipakai di <#${registrationChannelId}>.`).catch(() => null);
+  if (!ensureRegChannel(msg, eventRegistrationChannelId)) {
+    await msg.reply(`Command ini dipakai di <#${eventRegistrationChannelId}>.`).catch(() => null);
     return true;
   }
 
@@ -295,13 +297,13 @@ async function handleEventRegCommand(msg, options) {
 }
 
 async function handleEventRegStatusCommand(msg, options) {
-  const { registrationChannelId, eventRegistrationStore } = options;
+  const { eventRegistrationChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
   if (!/^!reg-status\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  if (!ensureRegChannel(msg, registrationChannelId)) {
-    await msg.reply(`Command ini dipakai di <#${registrationChannelId}>.`).catch(() => null);
+  if (!ensureRegChannel(msg, eventRegistrationChannelId)) {
+    await msg.reply(`Command ini dipakai di <#${eventRegistrationChannelId}>.`).catch(() => null);
     return true;
   }
 
@@ -329,13 +331,13 @@ async function handleEventRegStatusCommand(msg, options) {
 }
 
 async function handleEventRegCancelCommand(msg, options) {
-  const { registrationChannelId, eventRegistrationStore } = options;
+  const { eventRegistrationChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
   if (!/^!reg-cancel\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  if (!ensureRegChannel(msg, registrationChannelId)) {
-    await msg.reply(`Command ini dipakai di <#${registrationChannelId}>.`).catch(() => null);
+  if (!ensureRegChannel(msg, eventRegistrationChannelId)) {
+    await msg.reply(`Command ini dipakai di <#${eventRegistrationChannelId}>.`).catch(() => null);
     return true;
   }
 
@@ -362,13 +364,13 @@ async function handleEventRegCancelCommand(msg, options) {
 }
 
 async function handleEventRegListCommand(msg, options) {
-  const { registrationChannelId, eventRegistrationStore } = options;
+  const { eventRegistrationChannelId, eventRegistrationStore } = options;
   const content = (msg.content || '').trim();
   if (!/^!reg-list\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  if (!ensureRegChannel(msg, registrationChannelId)) {
-    await msg.reply(`Command ini dipakai di <#${registrationChannelId}>.`).catch(() => null);
+  if (!ensureRegChannel(msg, eventRegistrationChannelId)) {
+    await msg.reply(`Command ini dipakai di <#${eventRegistrationChannelId}>.`).catch(() => null);
     return true;
   }
 
@@ -501,18 +503,22 @@ async function handleStatusCommand(msg, options) {
 }
 
 async function handleHelpCommand(msg, options) {
-  const { registrationChannelId, privateChatChannelId } = options;
+  const { registrationChannelId, eventRegistrationChannelId, privateChatChannelId } = options;
   const content = (msg.content || '').trim();
   if (!/^!help\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
   const registerHint = registrationChannelId ? `<#${registrationChannelId}>` : 'channel registrasi';
+  const eventRegisterHint = eventRegistrationChannelId
+    ? `<#${eventRegistrationChannelId}>`
+    : registerHint;
   const privateChatHint = privateChatChannelId ? `<#${privateChatChannelId}>` : 'channel private chat';
   const lines = [
     '**Panduan Singkat**',
     `- Daftar private: kirim \`!daftar\` di ${registerHint}.`,
     '- Cek status pendaftaran private: `!status`.',
-    `- Daftar MonoDeco Event 2: \`!reg\` di ${registerHint}.`,
+    `- Daftar MonoDeco Event 2: \`!reg\` di ${eventRegisterHint}.`,
+    '- Event 2: 1 user hanya 1 pilihan aktif; jika daftar ulang, pilihan lama otomatis terganti.',
     '- Cek event: `!reg-status`.',
     '- Batalkan event: `!reg-cancel`.',
     '- Rekap event (admin): `!reg-list`.',
@@ -530,6 +536,7 @@ function createRegisterHandler({
   submissionStore,
   eventRegistrationStore,
   registrationChannelId = REGISTRATION_INBOX_CHANNEL_ID,
+  eventRegistrationChannelId = EVENT_REGISTRATION_CHANNEL_ID,
   privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID
 }) {
   return async function handleRegisterMessage(msg) {
@@ -538,25 +545,25 @@ function createRegisterHandler({
       if (!msg.guild) return false;
 
       const eventHandledList = await handleEventRegListCommand(msg, {
-        registrationChannelId,
+        eventRegistrationChannelId,
         eventRegistrationStore
       });
       if (eventHandledList) return true;
 
       const eventHandledStatus = await handleEventRegStatusCommand(msg, {
-        registrationChannelId,
+        eventRegistrationChannelId,
         eventRegistrationStore
       });
       if (eventHandledStatus) return true;
 
       const eventHandledCancel = await handleEventRegCancelCommand(msg, {
-        registrationChannelId,
+        eventRegistrationChannelId,
         eventRegistrationStore
       });
       if (eventHandledCancel) return true;
 
       const eventHandledReg = await handleEventRegCommand(msg, {
-        registrationChannelId,
+        eventRegistrationChannelId,
         eventRegistrationStore
       });
       if (eventHandledReg) return true;
@@ -571,6 +578,7 @@ function createRegisterHandler({
 
       const handledHelp = await handleHelpCommand(msg, {
         registrationChannelId,
+        eventRegistrationChannelId,
         privateChatChannelId
       });
       if (handledHelp) return true;
