@@ -10,9 +10,7 @@ const {
   REGISTRATION_INBOX_CHANNEL_ID,
   EVENT_REGISTRATION_CHANNEL_ID,
   MODERATOR_CHANNEL_ID,
-  EVENT_ROLE_FILM_ID,
-  EVENT_ROLE_BUILD_ID,
-  EVENT_ROLE_TALENT_ID
+  EVENT_ROLE_BUILD_ID
 } = require('../config');
 const { isAdmin } = require('../utils/permissions');
 
@@ -20,14 +18,6 @@ const EVENT_MAIN_CHOICES = {
   '1': {
     key: '1',
     name: 'Build'
-  },
-  '2': {
-    key: '2',
-    name: 'Mono Got Talent'
-  },
-  '3': {
-    key: '3',
-    name: 'Film Pendek Promosi MonoDeco'
   }
 };
 
@@ -40,57 +30,25 @@ const EVENT_FINAL_CHOICES = {
   },
   '1.2': {
     code: '1.2',
-    categoryName: 'Build Ruko',
-    mainCategory: 'Build',
-    subCategory: 'Ruko'
-  },
-  '1.3': {
-    code: '1.3',
     categoryName: 'Build Rumah',
     mainCategory: 'Build',
     subCategory: 'Rumah'
-  },
-  '2.1': {
-    code: '2.1',
-    categoryName: 'Fanart 2D',
-    mainCategory: 'Mono Got Talent',
-    subCategory: 'Fanart 2D'
-  },
-  '2.2': {
-    code: '2.2',
-    categoryName: 'Fanart 3D',
-    mainCategory: 'Mono Got Talent',
-    subCategory: 'Fanart 3D'
-  },
-  '3': {
-    code: '3',
-    categoryName: 'Film Pendek Promosi MonoDeco',
-    mainCategory: 'Film Pendek Promosi MonoDeco',
-    subCategory: null
   }
 };
 
 const EVENT_ALIAS = {
   build: '1',
   gedung: '1.1',
-  ruko: '1.2',
-  rumah: '1.3',
-  talent: '2',
-  monogottalent: '2',
-  fanart2d: '2.1',
-  fanart3d: '2.2',
-  film: '3'
+  rumah: '1.2'
 };
 
-const EVENT_MAIN_ORDER = ['1', '2', '3'];
-const EVENT_FINAL_ORDER = ['1.1', '1.2', '1.3', '2.1', '2.2', '3'];
+const EVENT_MAIN_ORDER = ['1'];
+const EVENT_FINAL_ORDER = ['1.1', '1.2'];
 const EVENT_LIST_PAGE_SIZE = 15;
 const REG_LIST_BUTTON_PREFIX = 'reglist';
 
 const EVENT_CATEGORY_ROLE_BY_MAIN_CODE = {
-  '1': EVENT_ROLE_BUILD_ID,
-  '2': EVENT_ROLE_TALENT_ID,
-  '3': EVENT_ROLE_FILM_ID
+  '1': EVENT_ROLE_BUILD_ID
 };
 
 const EVENT_FINAL_INDEX = EVENT_FINAL_ORDER.reduce((acc, code, index) => {
@@ -111,7 +69,6 @@ function resolveEventChoice(input) {
   if (!normalized) return { kind: 'none', value: '' };
 
   const mapped = EVENT_ALIAS[normalized] || normalized;
-  if (mapped === '3' && EVENT_FINAL_CHOICES[mapped]) return { kind: 'final', value: mapped };
   if (EVENT_MAIN_CHOICES[mapped]) return { kind: 'main', value: mapped };
   if (EVENT_FINAL_CHOICES[mapped]) return { kind: 'final', value: mapped };
   return { kind: 'invalid', value: input };
@@ -286,7 +243,7 @@ function buildRegistrationStatusLines(eventRegistrationStore) {
     lines.push(`- ${mainCode}. ${main.name}: ${formatOpenStatus(eventRegistrationStore.isRegistrationOpen(mainCode))}`);
 
     const subChoices = EVENT_FINAL_ORDER.filter(code => {
-      return getMainCodeFromCategoryCode(code) === mainCode && code !== '3';
+      return getMainCodeFromCategoryCode(code) === mainCode;
     });
     for (const code of subChoices) {
       lines.push(
@@ -304,7 +261,7 @@ function buildMainCategoryPrompt(mainCode, eventRegistrationStore) {
 
   const lines = [`**Kategori ${main.name}**`, 'Pilih subkategori:'];
   const subChoices = EVENT_FINAL_ORDER.filter(code => {
-    return getMainCodeFromCategoryCode(code) === mainCode && code !== '3';
+    return getMainCodeFromCategoryCode(code) === mainCode;
   });
   for (const code of subChoices) {
     const open = eventRegistrationStore?.isRegistrationOpen(code);
@@ -324,21 +281,16 @@ function buildEventMainMenu(currentEntry, eventRegistrationStore) {
 
   const statusLines = buildRegistrationStatusLines(eventRegistrationStore);
   return [
-    '**MonoDeco Event 2 - Pendaftaran**',
+    '**MonoDeco Event 2 — Build Competition - Pendaftaran**',
     currentText,
     'Aturan: 1 user hanya 1 pilihan aktif. Kalau pilih lagi, pilihan lama otomatis diganti.',
     '',
     '**Status Pendaftaran Saat Ini**',
     ...statusLines,
     '',
-    'Pilih kategori dengan command berikut:',
-    '- `!reg 1` -> Build',
-    '- `!reg 2` -> Mono Got Talent',
-    '- `!reg 3` -> Film Pendek Promosi MonoDeco',
-    '',
-    'Atau langsung pilih final:',
-    '- `!reg 1.1` Build Gedung | `!reg 1.2` Build Ruko | `!reg 1.3` Build Rumah',
-    '- `!reg 2.1` Fanart 2D | `!reg 2.2` Fanart 3D',
+    'Pilih subkategori:',
+    '- `!reg 1.1` → Build Gedung',
+    '- `!reg 1.2` → Build Rumah',
     '',
     'Cek data: `!reg-status` | Batalkan: `!reg-cancel`'
   ].join('\n');
@@ -419,7 +371,7 @@ async function handleEventRegistrationCore(msg, options, choiceCode) {
 
   if (created) {
     await msg.reply(
-      `Pendaftaran MonoDeco Event 2 berhasil dicatat: **${nowText}**.\nWaktu daftar: ${registerText}.${roleNote}`
+      `Pendaftaran MonoDeco Event 2 — Build Competition berhasil dicatat: **${nowText}**.\nWaktu daftar: ${registerText}.${roleNote}`
     ).catch(() => null);
     return true;
   }
@@ -540,7 +492,7 @@ function describeRegListSelector(selector) {
 }
 
 function summarizeMainTotals(entries) {
-  const totals = { '1': 0, '2': 0, '3': 0 };
+  const totals = { '1': 0 };
   for (const entry of entries) {
     const mainCode = getMainCodeFromCategoryCode(entry.categoryCode);
     if (totals[mainCode] === undefined) continue;
@@ -615,7 +567,7 @@ function buildRegListEmbed({ allEntries, filteredEntries, pagination, selector }
     `Filter: **${describeRegListSelector(selector)}**`,
     `Halaman: **${pagination.page}/${pagination.totalPages}**`,
     `Total pendaftar (filter): **${pagination.totalItems}**`,
-    `Total event: Build **${totals['1']}** | Mono Got Talent **${totals['2']}** | Film Pendek **${totals['3']}**`
+    `Total Build Competition: **${totals['1']}**`
   ];
 
   const itemLines = pagination.items.map((entry, idx) => {
@@ -629,10 +581,10 @@ function buildRegListEmbed({ allEntries, filteredEntries, pagination, selector }
 
   const embed = new EmbedBuilder()
     .setColor(0x2b8a3e)
-    .setTitle('Rekap Pendaftaran MonoDeco Event 2')
+    .setTitle('Rekap Pendaftaran MonoDeco Event 2 — Build Competition')
     .setDescription([...summaryLines, '', ...itemLines].join('\n'))
     .setFooter({
-      text: `Gunakan !reg-list-1 / !reg-list-2 / !reg-list-1.1 untuk filter cepat`
+      text: `Gunakan !reg-list-1.1 / !reg-list-1.2 untuk filter cepat`
     });
 
   if (!filteredEntries.length) {
@@ -990,13 +942,13 @@ async function handleEventRegStatusCommand(msg, options) {
 
   const entry = eventRegistrationStore.getRegistration(msg.author.id);
   if (!entry) {
-    await msg.reply('Kamu belum terdaftar di MonoDeco Event 2. Gunakan `!reg` untuk mulai.').catch(() => null);
+    await msg.reply('Kamu belum terdaftar di MonoDeco Event 2 — Build Competition. Gunakan `!reg` untuk mulai.').catch(() => null);
     return true;
   }
 
   await msg.reply(
     [
-      '**Status Pendaftaran MonoDeco Event 2**',
+      '**Status Pendaftaran MonoDeco Event 2 — Build Competition**',
       `- Pilihan: ${formatEventSelection(entry)}`,
       `- Pertama daftar: ${formatDateId(entry.registeredAt)}`,
       `- Update terakhir: ${formatDateId(entry.updatedAt)}`
@@ -1089,7 +1041,7 @@ async function handleEventRegListCommand(msg, options) {
 
   const allEntries = sortEventEntries(eventRegistrationStore.getRegistrations());
   if (!allEntries.length) {
-    await msg.reply('Belum ada data pendaftaran MonoDeco Event 2.').catch(() => null);
+    await msg.reply('Belum ada data pendaftaran MonoDeco Event 2 — Build Competition.').catch(() => null);
     return true;
   }
 
@@ -1222,13 +1174,12 @@ async function handleHelpCommand(msg, options) {
     '**Panduan Singkat**',
     `- Daftar private: kirim \`!daftar\` di ${registerHint}.`,
     '- Cek status pendaftaran private: `!status`.',
-    `- Daftar MonoDeco Event 2: \`!reg\` di ${eventRegisterHint}.`,
-    '- Event 2: 1 user hanya 1 pilihan aktif; jika daftar ulang, pilihan lama otomatis terganti.',
+    `- Daftar MonoDeco Event 2 — Build Competition: \`!reg\` di ${eventRegisterHint}.`,
+    '- Subkategori: `!reg 1.1` (Gedung) | `!reg 1.2` (Rumah).',
+    '- 1 user hanya 1 pilihan aktif; jika daftar ulang, pilihan lama otomatis terganti.',
     '- Cek event: `!reg-status`.',
     '- Batalkan event: `!reg-cancel`.',
-    '- Rekap event semua kategori: `!reg-list`.',
-    '- Rekap filter kategori/subkategori: `!reg-list-1`, `!reg-list-2`, `!reg-list-1.1`.',
-    '- Rekap halaman lanjutan: `!reg-list-1-2` (kategori build, halaman 2).',
+    '- Rekap event: `!reg-list` | Filter: `!reg-list-1.1`, `!reg-list-1.2`.',
     `- Admin bisa pakai command event di ${eventRegisterHint} dan ${moderatorHint}.`,
     '- Command admin event: `!reg-open`, `!reg-close`, `!reg-panel`, `!reg-announce`.',
     '- Petisi timeout (khusus member private): `!timeout @user` (butuh 17 vote dalam 1 jam).',
@@ -1397,7 +1348,7 @@ function createRegisterInteractionHandler({
       const allEntries = sortEventEntries(eventRegistrationStore.getRegistrations());
       if (!allEntries.length) {
         await interaction.update({
-          content: 'Belum ada data pendaftaran MonoDeco Event 2.',
+          content: 'Belum ada data pendaftaran MonoDeco Event 2 — Build Competition.',
           embeds: [],
           components: []
         }).catch(() => null);

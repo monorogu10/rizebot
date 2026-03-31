@@ -99,6 +99,56 @@ function normalizeCategoryCode(code) {
   return String(code).trim().toLowerCase();
 }
 
+const VALID_CATEGORY_CODES = new Set(['1.1', '1.2']);
+
+function migrateRegistrations(registrations) {
+  const migrated = {};
+  let changed = false;
+
+  for (const [userId, entry] of Object.entries(registrations)) {
+    const code = normalizeCategoryCode(entry.categoryCode);
+
+    // Old ruko (1.2) or old rumah (1.3) → new 1.2 (Build Rumah)
+    if (code === '1.3') {
+      migrated[userId] = {
+        ...entry,
+        categoryCode: '1.2',
+        categoryName: 'Build Rumah',
+        mainCategory: 'Build',
+        subCategory: 'Rumah',
+        updatedAt: entry.updatedAt || new Date().toISOString()
+      };
+      changed = true;
+      continue;
+    }
+
+    // Old ruko was 1.2 with subCategory 'Ruko' → migrate to Rumah
+    if (code === '1.2' && entry.subCategory === 'Ruko') {
+      migrated[userId] = {
+        ...entry,
+        categoryCode: '1.2',
+        categoryName: 'Build Rumah',
+        mainCategory: 'Build',
+        subCategory: 'Rumah',
+        updatedAt: entry.updatedAt || new Date().toISOString()
+      };
+      changed = true;
+      continue;
+    }
+
+    // Valid build codes (1.1 Gedung, 1.2 Rumah) → keep
+    if (VALID_CATEGORY_CODES.has(code)) {
+      migrated[userId] = entry;
+      continue;
+    }
+
+    // Everything else (2.1, 2.2, 3, etc.) → purge
+    changed = true;
+  }
+
+  return { registrations: migrated, changed };
+}
+
 function createEventRegistrationStore() {
   const saveChannelStore = createSaveChannelStore({
     channelId: SAVE_CHANNEL_ID,
@@ -133,11 +183,17 @@ function createEventRegistrationStore() {
     initPromise = (async () => {
       const loaded = await saveChannelStore.load(clientRef);
       if (!loaded) return;
-      state.registrations = normalizeRegistrations(loaded.registrations);
+      const rawRegistrations = normalizeRegistrations(loaded.registrations);
+      const migration = migrateRegistrations(rawRegistrations);
+      state.registrations = migration.registrations;
       state.settings = normalizeSettings(loaded.settings);
       state.announcementHistory = normalizeAnnouncementHistory(
         loaded.announcementHistory || loaded.announcements
       );
+      if (migration.changed) {
+        console.log('Event registration migration: kategori non-build dipurge, ruko→rumah.');
+        await persist();
+      }
     })();
     return initPromise;
   }
