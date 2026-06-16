@@ -6,6 +6,7 @@ const {
 } = require('discord.js');
 const {
   MINECRAFT_REGISTER_ROLE_ID,
+  MINECRAFT_REGISTER_RESET_ADMIN_ID,
   MINECRAFT_INFO_CHANNEL_ID,
   MINECRAFT_INFO_URL
 } = require('../config');
@@ -358,6 +359,65 @@ async function handleMinecraftOutCommand(msg, options) {
   return true;
 }
 
+async function handleMinecraftResetCommand(msg, options) {
+  const {
+    registerStore,
+    roleId = MINECRAFT_REGISTER_ROLE_ID,
+    resetAdminId = MINECRAFT_REGISTER_RESET_ADMIN_ID
+  } = options;
+  const content = String(msg.content || '').trim();
+  if (!/^!reset\s*$/i.test(content)) return false;
+  if (!msg.guild) return false;
+
+  if (msg.author?.id !== resetAdminId) {
+    await replyNoPing(msg, 'Command `!reset` khusus admin register.');
+    return true;
+  }
+
+  const ready = await ensureRegisterStore(registerStore, msg.client);
+  if (!ready) {
+    await replyNoPing(msg, 'Sistem registrasi belum aktif. Hubungi admin.');
+    return true;
+  }
+
+  const entries = registerStore.getEntries();
+  let rolesRemoved = 0;
+  let noRole = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const entry of entries) {
+    const member = await msg.guild.members.fetch(entry.userId).catch(() => null);
+    if (!member) {
+      skipped += 1;
+      continue;
+    }
+
+    const hadRole = Boolean(roleId && member.roles.cache.has(roleId));
+    const removed = await removeRoleIfPresent(member, roleId);
+    if (!removed) {
+      failed += 1;
+      continue;
+    }
+
+    if (hadRole) {
+      rolesRemoved += 1;
+    } else {
+      noRole += 1;
+    }
+  }
+
+  await registerStore.resetAll();
+  await replyNoPing(
+    msg,
+    [
+      `Register Minecraft direset. Data terhapus: ${entries.length}.`,
+      `Role dicabut: ${rolesRemoved}. Tanpa role: ${noRole}. Tidak ditemukan: ${skipped}. Gagal: ${failed}.`
+    ].join('\n')
+  );
+  return true;
+}
+
 async function handleMinecraftListCommand(msg, options) {
   const { registerStore } = options;
   const page = parseListPage(msg.content);
@@ -389,6 +449,7 @@ async function handleMinecraftListCommand(msg, options) {
 function createMinecraftRegisterHandler({
   registerStore,
   roleId = MINECRAFT_REGISTER_ROLE_ID,
+  resetAdminId = MINECRAFT_REGISTER_RESET_ADMIN_ID,
   infoChannelId = MINECRAFT_INFO_CHANNEL_ID,
   infoUrl = MINECRAFT_INFO_URL
 }) {
@@ -397,10 +458,13 @@ function createMinecraftRegisterHandler({
       if (!msg || msg.author?.bot) return false;
       if (!msg.guild) return false;
 
-      const options = { registerStore, roleId, infoChannelId, infoUrl };
+      const options = { registerStore, roleId, resetAdminId, infoChannelId, infoUrl };
 
       const handledEdit = await handleMinecraftEditRegCommand(msg, options);
       if (handledEdit) return true;
+
+      const handledReset = await handleMinecraftResetCommand(msg, options);
+      if (handledReset) return true;
 
       const handledOut = await handleMinecraftOutCommand(msg, options);
       if (handledOut) return true;
