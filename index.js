@@ -6,12 +6,7 @@ const { maybeReplyKeyword } = require('./src/features/keywordReply');
 const { createMessageHandler } = require('./src/handlers/messageHandler');
 const { registerMemberEvents } = require('./src/handlers/memberEvents');
 const { registerPrivateRoleEvents } = require('./src/handlers/privateRoleHandler');
-const {
-  createRegisterHandler,
-  createRegisterInteractionHandler,
-  syncEventCategoryRolesFromStore,
-  syncEventRoleForMember
-} = require('./src/handlers/registerHandler');
+const { createRegisterHandler } = require('./src/handlers/registerHandler');
 const {
   createMinecraftRegisterHandler,
   createMinecraftRegisterInteractionHandler,
@@ -26,7 +21,6 @@ const {
 const { createSubmissionStore } = require('./src/services/submissionStore');
 const { createRegisterStore } = require('./src/services/registerStore');
 const { createModerationStore } = require('./src/services/moderationStore');
-const { createEventRegistrationStore } = require('./src/services/eventRegistrationStore');
 const { REGISTER_ROLE_ID, LEGACY_ROLE_ID, MINECRAFT_REGISTER_ROLE_ID } = require('./src/config');
 
 const client = new Client({
@@ -44,7 +38,6 @@ const client = new Client({
 const submissionStore = createSubmissionStore();
 const minecraftRegisterStore = createRegisterStore();
 const moderationStore = createModerationStore();
-const eventRegistrationStore = createEventRegistrationStore();
 const minecraftRegisterHandler = createMinecraftRegisterHandler({
   roleId: MINECRAFT_REGISTER_ROLE_ID,
   registerStore: minecraftRegisterStore
@@ -54,11 +47,7 @@ const minecraftRegisterInteractionHandler = createMinecraftRegisterInteractionHa
 });
 const registerHandler = createRegisterHandler({
   roleId: REGISTER_ROLE_ID,
-  submissionStore,
-  eventRegistrationStore
-});
-const registerInteractionHandler = createRegisterInteractionHandler({
-  eventRegistrationStore
+  submissionStore
 });
 const moderationHandler = createModerationHandler({
   moderationStore,
@@ -94,18 +83,6 @@ client.once('ready', async () => {
   await moderationStore.init(client).catch(err => {
     console.error('Failed to init moderation store:', err);
   });
-  await eventRegistrationStore.init(client).catch(err => {
-    console.error('Failed to init event registration store:', err);
-  });
-  await syncEventCategoryRolesFromStore(client, eventRegistrationStore)
-    .then(stats => {
-      console.log(
-        `Event role sync selesai. scanned=${stats.scanned}, synced=${stats.synced}, failed=${stats.failed}, skipped=${stats.skipped}`
-      );
-    })
-    .catch(err => {
-      console.error('Failed to sync event category roles:', err);
-    });
   await privateRoleEvents.sync().catch(err => {
     console.error('Failed to sync private roles:', err);
   });
@@ -147,7 +124,6 @@ client.on('messageUpdate', async (_old, n) => {
 client.on('interactionCreate', async interaction => {
   const handledMinecraft = await minecraftRegisterInteractionHandler(interaction);
   if (handledMinecraft) return;
-  await registerInteractionHandler(interaction);
 });
 client.on('guildMemberAdd', async member => {
   await syncMinecraftRoleForMember(
@@ -156,9 +132,6 @@ client.on('guildMemberAdd', async member => {
     MINECRAFT_REGISTER_ROLE_ID
   ).catch(err => {
     console.error('Failed to sync minecraft role for joined member:', err);
-  });
-  await syncEventRoleForMember(member, eventRegistrationStore).catch(err => {
-    console.error('Failed to sync event role for joined member:', err);
   });
 });
 client.on('messageReactionAdd', async (reaction, user) => {

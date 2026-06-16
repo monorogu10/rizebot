@@ -14,19 +14,6 @@ const { isAdmin } = require('../utils/permissions');
 const GAMERTAG_REGEX = /^[A-Za-z0-9_]{3,16}$/;
 const LIST_PAGE_SIZE = 10;
 const LIST_BUTTON_PREFIX = 'mcreglist';
-const EVENT_REGISTRATION_TOKENS = new Set(['1', '1.1', '1.2']);
-
-function normalizeEventToken(raw) {
-  return String(raw || '')
-    .trim()
-    .toLowerCase()
-    .replace(/,/g, '.')
-    .replace(/\s+/g, '');
-}
-
-function shouldPassToEventRegistration(raw) {
-  return EVENT_REGISTRATION_TOKENS.has(normalizeEventToken(raw));
-}
 
 function parseSingleArgCommand(content, command) {
   const pattern = new RegExp(`^${command}(?:\\s+(.+))?$`, 'i');
@@ -222,8 +209,10 @@ async function handleMinecraftRegCommand(msg, options) {
   const parsed = parseSingleArgCommand(msg.content, '!reg');
   if (!parsed) return false;
   if (!msg.guild) return false;
-  if (!parsed.hasArg) return false;
-  if (shouldPassToEventRegistration(parsed.arg)) return false;
+  if (!parsed.hasArg) {
+    await replyNoPing(msg, gamertagFormatHelp('!reg'));
+    return true;
+  }
 
   const gamertag = parsed.arg;
   if (!isValidGamertag(gamertag)) {
