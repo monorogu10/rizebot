@@ -66,7 +66,7 @@ function createRegisterStore() {
   }
 
   async function persist() {
-    if (!clientRef) return;
+    if (!clientRef) throw new Error('Register store not initialized');
     await saveChannelStore.save(clientRef, serialize());
   }
 

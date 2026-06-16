@@ -72,7 +72,7 @@ function createEditableJsonMessageStore({ channelId, fileName }) {
   }
 
   async function findLatestDataMessage(channel) {
-    const messages = await channel.messages.fetch({ limit: 50 });
+    const messages = await channel.messages.fetch({ limit: 100 });
     return messages.find(isDataMessage) || null;
   }
 

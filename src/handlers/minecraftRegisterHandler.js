@@ -10,9 +10,8 @@ const {
   MINECRAFT_INFO_CHANNEL_ID,
   MINECRAFT_INFO_URL
 } = require('../config');
-const { isAdmin } = require('../utils/permissions');
 
-const GAMERTAG_REGEX = /^[A-Za-z0-9_]{3,16}$/;
+const GAMERTAG_REGEX = /^[A-Za-z0-9_ ]{3,32}$/;
 const LIST_PAGE_SIZE = 10;
 const LIST_BUTTON_PREFIX = 'mcreglist';
 
@@ -30,8 +29,12 @@ function isValidGamertag(gamertag) {
   return GAMERTAG_REGEX.test(gamertag);
 }
 
+function normalizeGamertag(gamertag) {
+  return String(gamertag || '').replace(/\s+/g, ' ').trim();
+}
+
 function gamertagFormatHelp(command = '!reg') {
-  return `Format: \`${command} <gamertag_minecraft>\` (3-16 huruf/angka/underscore, tanpa spasi).`;
+  return `Format: \`${command} <gamertag_minecraft>\` (3-32 huruf/angka/underscore/spasi).`;
 }
 
 function formatDateId(iso) {
@@ -131,30 +134,30 @@ function paginateEntries(entries, page, pageSize = LIST_PAGE_SIZE) {
   };
 }
 
-function buildListButtonId(page, ownerId) {
-  return `${LIST_BUTTON_PREFIX}:${page}:${ownerId || '0'}`;
+function buildListButtonId(page) {
+  return `${LIST_BUTTON_PREFIX}:${page}`;
 }
 
 function parseListButtonId(customId) {
   const raw = String(customId || '');
   if (!raw.startsWith(`${LIST_BUTTON_PREFIX}:`)) return null;
-  const [, pageToken, ownerId] = raw.split(':');
+  const [, pageToken] = raw.split(':');
   const page = parseInt(pageToken, 10);
   if (!Number.isFinite(page) || page <= 0) return null;
-  return { page, ownerId: ownerId || null };
+  return { page };
 }
 
-function buildListButtons(page, totalPages, ownerId) {
+function buildListButtons(page, totalPages) {
   const prevPage = Math.max(1, page - 1);
   const nextPage = Math.min(totalPages, page + 1);
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(prevPage, ownerId))
+      .setCustomId(buildListButtonId(prevPage))
       .setLabel('Sebelumnya')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 1),
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(nextPage, ownerId))
+      .setCustomId(buildListButtonId(nextPage))
       .setLabel('Berikutnya')
       .setStyle(ButtonStyle.Primary)
       .setDisabled(page >= totalPages)
@@ -185,11 +188,11 @@ function buildListEmbed(entries, pagination) {
   return embed;
 }
 
-function buildListResponse(entries, page, ownerId) {
+function buildListResponse(entries, page) {
   const pagination = paginateEntries(entries, page);
   return {
     embeds: [buildListEmbed(entries, pagination)],
-    components: [buildListButtons(pagination.page, pagination.totalPages, ownerId)],
+    components: [buildListButtons(pagination.page, pagination.totalPages)],
     allowedMentions: { parse: [], repliedUser: false }
   };
 }
@@ -215,7 +218,7 @@ async function handleMinecraftRegCommand(msg, options) {
     return true;
   }
 
-  const gamertag = parsed.arg;
+  const gamertag = normalizeGamertag(parsed.arg);
   if (!isValidGamertag(gamertag)) {
     await replyNoPing(msg, gamertagFormatHelp('!reg'));
     return true;
@@ -233,27 +236,47 @@ async function handleMinecraftRegCommand(msg, options) {
     return true;
   }
 
-  const roleOk = await addRoleIfMissing(member, roleId);
-  if (!roleOk) {
-    await replyNoPing(msg, 'Gagal memberi role registrasi. Cek permission dan posisi role bot.');
+  let result = null;
+  try {
+    result = await registerStore.registerUser(
+      msg.author.id,
+      gamertag,
+      msg.author?.tag || msg.author?.username || ''
+    );
+  } catch (err) {
+    console.error('Failed to save minecraft registration:', err);
+    await replyNoPing(msg, 'Gagal menyimpan data register ke channel save. Coba lagi atau hubungi admin.');
     return true;
   }
 
-  const result = await registerStore.registerUser(
-    msg.author.id,
-    gamertag,
-    msg.author?.tag || msg.author?.username || ''
-  );
-
   if (!result.created) {
+    const roleOk = await addRoleIfMissing(member, roleId);
+    const roleNote = roleOk
+      ? ''
+      : '\nCatatan: data kamu sudah ada, tapi role registrasi gagal diberikan otomatis.';
     await replyNoPing(
       msg,
       [
         'Kamu sudah terdaftar.',
         formatExistingRegistration(result.entry),
         `Untuk ganti gamertag, pakai \`!edit-reg ${gamertag}\`.`,
-        getInfoLine(infoChannelId, infoUrl)
+        getInfoLine(infoChannelId, infoUrl) + roleNote
       ].join('\n')
+    );
+    return true;
+  }
+
+  const roleOk = await addRoleIfMissing(member, roleId);
+  if (!roleOk) {
+    const rolledBack = await registerStore.removeUser(msg.author.id)
+      .then(() => true)
+      .catch(() => false);
+    const dataNote = rolledBack
+      ? 'Data baru sudah dibatalkan.'
+      : 'Data sempat tersimpan tapi gagal dibatalkan otomatis, hubungi admin.';
+    await replyNoPing(
+      msg,
+      `Gagal memberi role registrasi. ${dataNote} Cek permission dan posisi role bot.`
     );
     return true;
   }
@@ -280,7 +303,8 @@ async function handleMinecraftEditRegCommand(msg, options) {
   if (!parsed) return false;
   if (!msg.guild) return false;
 
-  if (!parsed.hasArg || !isValidGamertag(parsed.arg)) {
+  const gamertag = normalizeGamertag(parsed.arg);
+  if (!parsed.hasArg || !isValidGamertag(gamertag)) {
     await replyNoPing(msg, gamertagFormatHelp('!edit-reg'));
     return true;
   }
@@ -304,11 +328,18 @@ async function handleMinecraftEditRegCommand(msg, options) {
     return true;
   }
 
-  const updated = await registerStore.updateUser(
-    msg.author.id,
-    parsed.arg,
-    msg.author?.tag || msg.author?.username || ''
-  );
+  let updated = null;
+  try {
+    updated = await registerStore.updateUser(
+      msg.author.id,
+      gamertag,
+      msg.author?.tag || msg.author?.username || ''
+    );
+  } catch (err) {
+    console.error('Failed to save minecraft registration edit:', err);
+    await replyNoPing(msg, 'Gagal menyimpan perubahan gamertag ke channel save. Coba lagi atau hubungi admin.');
+    return true;
+  }
   if (!updated) {
     await replyNoPing(msg, 'Data registrasi tidak ditemukan. Pakai `!reg <gamertag_minecraft>` dulu.');
     return true;
@@ -352,7 +383,13 @@ async function handleMinecraftOutCommand(msg, options) {
   }
 
   if (hadData) {
-    await registerStore.removeUser(msg.author.id);
+    try {
+      await registerStore.removeUser(msg.author.id);
+    } catch (err) {
+      console.error('Failed to remove minecraft registration:', err);
+      await replyNoPing(msg, 'Role sudah dicabut, tapi data register gagal dihapus dari channel save. Hubungi admin.');
+      return true;
+    }
   }
 
   await replyNoPing(msg, 'Kamu sudah keluar dari registrasi Minecraft. Role dicabut dan data reg dihapus.');
@@ -407,7 +444,13 @@ async function handleMinecraftResetCommand(msg, options) {
     }
   }
 
-  await registerStore.resetAll();
+  try {
+    await registerStore.resetAll();
+  } catch (err) {
+    console.error('Failed to reset minecraft registration data:', err);
+    await replyNoPing(msg, 'Role sudah diproses, tapi data register gagal direset di channel save. Coba lagi atau cek permission bot.');
+    return true;
+  }
   await replyNoPing(
     msg,
     [
@@ -442,7 +485,7 @@ async function handleMinecraftListCommand(msg, options) {
     return true;
   }
 
-  await replyNoPing(msg, buildListResponse(entries, page, msg.author?.id || null));
+  await replyNoPing(msg, buildListResponse(entries, page));
   return true;
 }
 
@@ -500,19 +543,6 @@ function createMinecraftRegisterInteractionHandler({
         return true;
       }
 
-      if (
-        payload.ownerId &&
-        payload.ownerId !== '0' &&
-        payload.ownerId !== interaction.user?.id &&
-        !isAdmin(interaction.member)
-      ) {
-        await interaction.reply({
-          content: 'Hanya pembuat list atau admin yang bisa mengubah halaman ini.',
-          ephemeral: true
-        }).catch(() => null);
-        return true;
-      }
-
       const ready = await ensureRegisterStore(registerStore, interaction.client);
       if (!ready) {
         await interaction.reply({
@@ -535,10 +565,7 @@ function createMinecraftRegisterInteractionHandler({
 
       await interaction.update(buildListResponse(
         entries,
-        payload.page,
-        payload.ownerId && payload.ownerId !== '0'
-          ? payload.ownerId
-          : (interaction.user?.id || null)
+        payload.page
       )).catch(() => null);
       return true;
     } catch (err) {
