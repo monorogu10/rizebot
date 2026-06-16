@@ -13,14 +13,21 @@ const {
   syncEventRoleForMember
 } = require('./src/handlers/registerHandler');
 const {
+  createMinecraftRegisterHandler,
+  createMinecraftRegisterInteractionHandler,
+  syncMinecraftRegistrationRolesFromStore,
+  syncMinecraftRoleForMember
+} = require('./src/handlers/minecraftRegisterHandler');
+const {
   createModerationHandler,
   createModerationReactionHandler,
   syncActivePetitions
 } = require('./src/handlers/moderationHandler');
 const { createSubmissionStore } = require('./src/services/submissionStore');
+const { createRegisterStore } = require('./src/services/registerStore');
 const { createModerationStore } = require('./src/services/moderationStore');
 const { createEventRegistrationStore } = require('./src/services/eventRegistrationStore');
-const { REGISTER_ROLE_ID, LEGACY_ROLE_ID } = require('./src/config');
+const { REGISTER_ROLE_ID, LEGACY_ROLE_ID, MINECRAFT_REGISTER_ROLE_ID } = require('./src/config');
 
 const client = new Client({
   intents: [
@@ -35,8 +42,16 @@ const client = new Client({
 });
 
 const submissionStore = createSubmissionStore();
+const minecraftRegisterStore = createRegisterStore();
 const moderationStore = createModerationStore();
 const eventRegistrationStore = createEventRegistrationStore();
+const minecraftRegisterHandler = createMinecraftRegisterHandler({
+  roleId: MINECRAFT_REGISTER_ROLE_ID,
+  registerStore: minecraftRegisterStore
+});
+const minecraftRegisterInteractionHandler = createMinecraftRegisterInteractionHandler({
+  registerStore: minecraftRegisterStore
+});
 const registerHandler = createRegisterHandler({
   roleId: REGISTER_ROLE_ID,
   submissionStore,
@@ -57,6 +72,7 @@ const moderationReactionHandler = createModerationReactionHandler({
 const baseHandleMessage = createMessageHandler({
   linkBlocker: maybeBlockLink,
   keywordReply: maybeReplyKeyword,
+  minecraftRegisterHandler,
   registerHandler,
   moderationHandler
 });
@@ -71,6 +87,9 @@ const privateRoleEvents = registerPrivateRoleEvents(client, {
 client.once('ready', async () => {
   await submissionStore.init(client).catch(err => {
     console.error('Failed to init submission store:', err);
+  });
+  await minecraftRegisterStore.init(client).catch(err => {
+    console.error('Failed to init minecraft register store:', err);
   });
   await moderationStore.init(client).catch(err => {
     console.error('Failed to init moderation store:', err);
@@ -90,6 +109,19 @@ client.once('ready', async () => {
   await privateRoleEvents.sync().catch(err => {
     console.error('Failed to sync private roles:', err);
   });
+  await syncMinecraftRegistrationRolesFromStore(
+    client,
+    minecraftRegisterStore,
+    MINECRAFT_REGISTER_ROLE_ID
+  )
+    .then(stats => {
+      console.log(
+        `Minecraft role sync selesai. scanned=${stats.scanned}, synced=${stats.synced}, failed=${stats.failed}, skipped=${stats.skipped}`
+      );
+    })
+    .catch(err => {
+      console.error('Failed to sync minecraft registration roles:', err);
+    });
   await syncActivePetitions(client, moderationStore).catch(err => {
     console.error('Failed to sync petitions:', err);
   });
@@ -97,6 +129,11 @@ client.once('ready', async () => {
 });
 
 async function handleMessage(msg) {
+  const reloadedMinecraftData = await minecraftRegisterStore.reloadFromMessage(msg).catch(err => {
+    console.error('Failed to reload minecraft register data from message:', err);
+    return false;
+  });
+  if (reloadedMinecraftData) return;
   await baseHandleMessage(msg);
 }
 
@@ -108,9 +145,18 @@ client.on('messageUpdate', async (_old, n) => {
   await handleMessage(n);
 });
 client.on('interactionCreate', async interaction => {
+  const handledMinecraft = await minecraftRegisterInteractionHandler(interaction);
+  if (handledMinecraft) return;
   await registerInteractionHandler(interaction);
 });
 client.on('guildMemberAdd', async member => {
+  await syncMinecraftRoleForMember(
+    member,
+    minecraftRegisterStore,
+    MINECRAFT_REGISTER_ROLE_ID
+  ).catch(err => {
+    console.error('Failed to sync minecraft role for joined member:', err);
+  });
   await syncEventRoleForMember(member, eventRegistrationStore).catch(err => {
     console.error('Failed to sync event role for joined member:', err);
   });

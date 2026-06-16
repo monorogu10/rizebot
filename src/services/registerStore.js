@@ -1,4 +1,4 @@
-const { createSaveChannelStore } = require('../storage/saveChannelStore');
+const { createEditableJsonMessageStore } = require('../storage/editableJsonMessageStore');
 const { SAVE_CHANNEL_ID, REGISTER_STORAGE_FILE_NAME } = require('../config');
 
 function normalizeUsers(users = {}) {
@@ -13,9 +13,15 @@ function normalizeUsers(users = {}) {
     const answeredAt = typeof entry?.answeredAt === 'string' && entry.answeredAt
       ? entry.answeredAt
       : null;
+    const updatedAt = typeof entry?.updatedAt === 'string' && entry.updatedAt
+      ? entry.updatedAt
+      : registeredAt;
+    const username = typeof entry?.username === 'string' ? entry.username : '';
     normalized[userId] = {
       gamertag,
+      username,
       registeredAt,
+      updatedAt,
       answered,
       answeredAt
     };
@@ -42,7 +48,7 @@ function normalizeOrder(order, users) {
 }
 
 function createRegisterStore() {
-  const saveChannelStore = createSaveChannelStore({
+  const saveChannelStore = createEditableJsonMessageStore({
     channelId: SAVE_CHANNEL_ID,
     fileName: REGISTER_STORAGE_FILE_NAME
   });
@@ -69,10 +75,7 @@ function createRegisterStore() {
     clientRef = client;
     initPromise = (async () => {
       const loaded = await saveChannelStore.load(clientRef);
-      if (!loaded?.users) return;
-      const users = normalizeUsers(loaded.users);
-      state.users = users;
-      state.order = normalizeOrder(loaded.order, users);
+      applyLoadedData(loaded);
     })();
     return initPromise;
   }
@@ -94,7 +97,9 @@ function createRegisterStore() {
     return state.order.map((userId, idx) => ({
       userId,
       gamertag: state.users[userId]?.gamertag || '',
+      username: state.users[userId]?.username || '',
       registeredAt: state.users[userId]?.registeredAt || '',
+      updatedAt: state.users[userId]?.updatedAt || '',
       answered: Boolean(state.users[userId]?.answered),
       rank: idx + 1
     }));
@@ -104,14 +109,25 @@ function createRegisterStore() {
     return state.order.length;
   }
 
-  async function registerUser(userId, gamertag) {
+  function applyLoadedData(loaded) {
+    if (!loaded?.users) return false;
+    const users = normalizeUsers(loaded.users);
+    state.users = users;
+    state.order = normalizeOrder(loaded.order, users);
+    return true;
+  }
+
+  async function registerUser(userId, gamertag, username = '') {
     await ensureReady();
     if (state.users[userId]) {
       return { created: false, entry: state.users[userId] };
     }
+    const nowIso = new Date().toISOString();
     const entry = {
       gamertag,
-      registeredAt: new Date().toISOString(),
+      username,
+      registeredAt: nowIso,
+      updatedAt: nowIso,
       answered: false,
       answeredAt: null
     };
@@ -121,10 +137,12 @@ function createRegisterStore() {
     return { created: true, entry };
   }
 
-  async function updateUser(userId, gamertag) {
+  async function updateUser(userId, gamertag, username = '') {
     await ensureReady();
     if (!state.users[userId]) return null;
     state.users[userId].gamertag = gamertag;
+    state.users[userId].username = username || state.users[userId].username || '';
+    state.users[userId].updatedAt = new Date().toISOString();
     await persist();
     return state.users[userId];
   }
@@ -154,6 +172,17 @@ function createRegisterStore() {
     await persist();
   }
 
+  async function reloadFromMessage(message) {
+    if (!saveChannelStore.isDataMessage(message)) return false;
+    await ensureReady();
+    const loaded = await saveChannelStore.loadFromMessage(message);
+    return applyLoadedData(loaded);
+  }
+
+  function isStorageMessage(message) {
+    return saveChannelStore.isDataMessage(message);
+  }
+
   return {
     init,
     getUser,
@@ -163,7 +192,9 @@ function createRegisterStore() {
     updateUser,
     markAnswered,
     removeUser,
-    resetAll
+    resetAll,
+    reloadFromMessage,
+    isStorageMessage
   };
 }
 

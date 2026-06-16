@@ -1,4 +1,10 @@
-function createMessageHandler({ linkBlocker, keywordReply, registerHandler, moderationHandler }) {
+function createMessageHandler({
+  linkBlocker,
+  keywordReply,
+  minecraftRegisterHandler,
+  registerHandler,
+  moderationHandler
+}) {
   return async function handleMessage(msg) {
     if (!msg) return;
 
@@ -7,6 +13,11 @@ function createMessageHandler({ linkBlocker, keywordReply, registerHandler, mode
 
     if (moderationHandler) {
       const handled = await moderationHandler(msg);
+      if (handled) return;
+    }
+
+    if (minecraftRegisterHandler) {
+      const handled = await minecraftRegisterHandler(msg);
       if (handled) return;
     }
 
