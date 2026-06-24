@@ -83,19 +83,8 @@ function isMinecraftBotMessage(message) {
 }
 
 async function cleanupRecentMinecraftBotMessages(msg) {
-  const channel = msg?.channel;
-  const botId = msg?.client?.user?.id;
-  if (!channel?.messages?.fetch || !botId) return;
-
-  const messages = await channel.messages.fetch({ limit: BOT_CLEANUP_SCAN_LIMIT }).catch(() => null);
-  if (!messages) return;
-
-  for (const message of messages.values()) {
-    if (message.id === msg.id) continue;
-    if (message.author?.id !== botId) continue;
-    if (!isMinecraftBotMessage(message)) continue;
-    await message.delete().catch(() => {});
-  }
+  // Keep bot replies as permanent audit/history in Discord.
+  void msg;
 }
 
 function isValidGamertag(gamertag) {
@@ -140,7 +129,6 @@ async function replyNoPing(msg, payload) {
   const replyPayload = createNoPingPayload(payload);
   const reply = await msg.channel?.send(replyPayload).catch(() => null) ||
     await msg.reply(replyPayload).catch(() => null);
-  scheduleCommandCleanup(msg, reply);
   return reply;
 }
 
@@ -380,6 +368,7 @@ async function handleMinecraftRegCommand(msg, options) {
         'Kamu sudah terdaftar.',
         formatExistingRegistration(result.entry),
         `Untuk ganti gamertag, pakai \`!edit-reg ${gamertag}\`.`,
+        'Untuk mengunci akun ke Minecraft asli, pakai `!verifyme` lalu ketik kode di server.',
         getInfoLine(infoChannelId, infoUrl) + roleNote + nicknameNote
       ].join('\n')
     );
@@ -414,6 +403,7 @@ async function handleMinecraftRegCommand(msg, options) {
     [
       `Registrasi berhasil. Gamertag kamu: \`${gamertag}\`.`,
       'Role registrasi sudah diberikan.',
+      'Lanjutkan verifikasi dengan `!verifyme`, lalu ketik kode yang muncul di server Minecraft.',
       nicknameNote,
       getInfoLine(infoChannelId, infoUrl)
     ].join('\n')
@@ -518,6 +508,7 @@ async function handleMinecraftEditRegCommand(msg, options) {
     msg,
     [
       `Gamertag berhasil diubah dari \`${existing.gamertag}\` ke \`${updated.gamertag}\`.`,
+      'Jalankan `!verifyme` lagi agar gamertag baru terhubung ke akun Minecraft asli.',
       nicknameNote,
       getInfoLine(infoChannelId, infoUrl)
     ].join('\n')

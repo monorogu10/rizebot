@@ -17,13 +17,35 @@ function normalizeUsers(users = {}) {
       ? entry.updatedAt
       : registeredAt;
     const username = typeof entry?.username === 'string' ? entry.username : '';
+    const persistentId = typeof entry?.persistentId === 'string' ? entry.persistentId.trim() : '';
+    const verified = Boolean(entry?.verified && persistentId);
+    const verifiedAt = typeof entry?.verifiedAt === 'string' && entry.verifiedAt
+      ? entry.verifiedAt
+      : null;
+    const lastSeenAt = typeof entry?.lastSeenAt === 'string' && entry.lastSeenAt
+      ? entry.lastSeenAt
+      : null;
+    const lastSeenName = typeof entry?.lastSeenName === 'string' ? entry.lastSeenName.trim() : '';
+    const nameHistory = Array.isArray(entry?.nameHistory)
+      ? entry.nameHistory
+        .filter(item => typeof item === 'string')
+        .map(item => item.trim())
+        .filter(Boolean)
+        .slice(-10)
+      : [];
     normalized[userId] = {
       gamertag,
       username,
       registeredAt,
       updatedAt,
       answered,
-      answeredAt
+      answeredAt,
+      persistentId,
+      verified,
+      verifiedAt,
+      lastSeenAt,
+      lastSeenName,
+      nameHistory
     };
   }
   return normalized;
@@ -153,6 +175,14 @@ function createRegisterStore() {
       registeredAt: state.users[userId]?.registeredAt || '',
       updatedAt: state.users[userId]?.updatedAt || '',
       answered: Boolean(state.users[userId]?.answered),
+      verified: Boolean(state.users[userId]?.verified),
+      persistentId: state.users[userId]?.persistentId || '',
+      verifiedAt: state.users[userId]?.verifiedAt || null,
+      lastSeenAt: state.users[userId]?.lastSeenAt || null,
+      lastSeenName: state.users[userId]?.lastSeenName || '',
+      nameHistory: Array.isArray(state.users[userId]?.nameHistory)
+        ? [...state.users[userId].nameHistory]
+        : [],
       rank: idx + 1
     }));
   }
@@ -232,7 +262,13 @@ function createRegisterStore() {
       registeredAt: nowIso,
       updatedAt: nowIso,
       answered: false,
-      answeredAt: null
+      answeredAt: null,
+      persistentId: '',
+      verified: false,
+      verifiedAt: null,
+      lastSeenAt: null,
+      lastSeenName: '',
+      nameHistory: []
     };
     state.users[userId] = entry;
     state.order.push(userId);
@@ -254,8 +290,83 @@ function createRegisterStore() {
     state.users[userId].gamertag = gamertag;
     state.users[userId].username = username || state.users[userId].username || '';
     state.users[userId].updatedAt = new Date().toISOString();
+    if (normalizeGamertagKey(gamertag) !== normalizeGamertagKey(state.users[userId].lastSeenName || '')) {
+      state.users[userId].verified = false;
+      state.users[userId].persistentId = '';
+      state.users[userId].verifiedAt = null;
+    }
     await persist();
     return state.users[userId];
+  }
+
+  async function markVerified(userId, payload = {}) {
+    await ensureReady();
+    const entry = state.users[userId];
+    if (!entry) return null;
+
+    const persistentId = String(payload.persistentId || '').trim();
+    const gamertag = String(payload.gamertag || entry.gamertag || '').replace(/\s+/g, ' ').trim();
+    if (!persistentId || !gamertag) return null;
+
+    const nowIso = new Date().toISOString();
+    const history = Array.isArray(entry.nameHistory) ? entry.nameHistory : [];
+    const nextHistory = [...history];
+    if (!nextHistory.some(name => normalizeGamertagKey(name) === normalizeGamertagKey(gamertag))) {
+      nextHistory.push(gamertag);
+    }
+
+    entry.gamertag = gamertag;
+    entry.persistentId = persistentId;
+    entry.verified = true;
+    entry.verifiedAt = entry.verifiedAt || nowIso;
+    entry.updatedAt = nowIso;
+    entry.lastSeenAt = nowIso;
+    entry.lastSeenName = gamertag;
+    entry.nameHistory = nextHistory.slice(-10);
+    await persist();
+    return entry;
+  }
+
+  async function markSeenByPersistentId(persistentIdRaw, gamertagRaw = '') {
+    await ensureReady();
+    const persistentId = String(persistentIdRaw || '').trim();
+    if (!persistentId) return null;
+
+    const gamertag = String(gamertagRaw || '').replace(/\s+/g, ' ').trim();
+    const nowIso = new Date().toISOString();
+    for (const userId of state.order) {
+      const entry = state.users[userId];
+      if (!entry || entry.persistentId !== persistentId) continue;
+
+      const history = Array.isArray(entry.nameHistory) ? entry.nameHistory : [];
+      const nextHistory = [...history];
+      if (gamertag && !nextHistory.some(name => normalizeGamertagKey(name) === normalizeGamertagKey(gamertag))) {
+        nextHistory.push(gamertag);
+      }
+
+      entry.lastSeenAt = nowIso;
+      entry.lastSeenName = gamertag || entry.lastSeenName || entry.gamertag;
+      entry.nameHistory = nextHistory.slice(-10);
+      await persist();
+      return { userId, entry };
+    }
+
+    return null;
+  }
+
+  function findUserByPersistentId(persistentIdRaw) {
+    const persistentId = String(persistentIdRaw || '').trim();
+    if (!persistentId) return null;
+
+    for (const userId of state.order) {
+      const entry = state.users[userId];
+      if (!entry) continue;
+      if (entry.persistentId === persistentId) {
+        return { userId, entry };
+      }
+    }
+
+    return null;
   }
 
   async function markAnswered(userId) {
@@ -308,6 +419,9 @@ function createRegisterStore() {
     clearLastCleanup,
     registerUser,
     updateUser,
+    markVerified,
+    markSeenByPersistentId,
+    findUserByPersistentId,
     markAnswered,
     removeUser,
     resetAll,

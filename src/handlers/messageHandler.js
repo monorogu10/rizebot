@@ -2,6 +2,7 @@ function createMessageHandler({
   linkBlocker,
   keywordReply,
   topupHandler,
+  minecraftBridgeHandler,
   minecraftRegisterHandler,
   registerHandler,
   moderationHandler
@@ -14,6 +15,11 @@ function createMessageHandler({
 
     if (topupHandler) {
       const handled = await topupHandler(msg);
+      if (handled) return;
+    }
+
+    if (minecraftBridgeHandler) {
+      const handled = await minecraftBridgeHandler(msg);
       if (handled) return;
     }
 

@@ -27,6 +27,7 @@ const { createModerationStore } = require('./src/services/moderationStore');
 const { createTopupBridgeService } = require('./src/services/topupBridgeService');
 const { createTopupBridgeServer } = require('./src/services/topupBridgeServer');
 const { createTopupHandler } = require('./src/handlers/topupHandler');
+const { createMinecraftBridgeHandler } = require('./src/handlers/minecraftBridgeHandler');
 const { REGISTER_ROLE_ID, LEGACY_ROLE_ID, MINECRAFT_REGISTER_ROLE_ID } = require('./src/config');
 const { TOPUP_BRIDGE_HOST, TOPUP_BRIDGE_PORT, TOPUP_BRIDGE_TOKEN } = require('./src/config');
 const { isAllowedBotOutputChannel } = require('./src/utils/channelPolicy');
@@ -113,7 +114,8 @@ const submissionStore = createSubmissionStore();
 const minecraftRegisterStore = createRegisterStore();
 const moderationStore = createModerationStore();
 const topupBridge = createTopupBridgeService({
-  registerStore: minecraftRegisterStore
+  registerStore: minecraftRegisterStore,
+  client
 });
 const topupBridgeServer = createTopupBridgeServer({
   bridge: topupBridge,
@@ -143,11 +145,16 @@ const moderationReactionHandler = createModerationReactionHandler({
 const topupHandler = createTopupHandler({
   bridge: topupBridge
 });
+const minecraftBridgeHandler = createMinecraftBridgeHandler({
+  bridge: topupBridge,
+  registerStore: minecraftRegisterStore
+});
 
 const baseHandleMessage = createMessageHandler({
   linkBlocker: maybeBlockLink,
   keywordReply: maybeReplyKeyword,
   topupHandler,
+  minecraftBridgeHandler,
   minecraftRegisterHandler,
   registerHandler,
   moderationHandler

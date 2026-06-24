@@ -81,6 +81,17 @@ function createTopupBridgeServer({ bridge, host, port, token }) {
       return;
     }
 
+    if (req.method === 'POST' && url.pathname === '/api/minecraft/events') {
+      try {
+        const body = await readJsonBody(req);
+        const result = await bridge.handleMinecraftEvent(body);
+        sendJson(res, result.ok ? 200 : 400, result);
+      } catch (err) {
+        sendJson(res, 400, { ok: false, code: err?.message || 'bad-request' });
+      }
+      return;
+    }
+
     sendJson(res, 404, { ok: false, code: 'not-found' });
   });
 

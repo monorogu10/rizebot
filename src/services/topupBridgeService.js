@@ -1,8 +1,11 @@
 const crypto = require('node:crypto');
+const { MINECRAFT_CHAT_LOG_CHANNEL_ID } = require('../config');
 
 const JOB_LEASE_MS = 20 * 1000;
 const JOB_TTL_MS = 10 * 60 * 1000;
 const JOB_LIMIT = 100;
+const VERIFY_CODE_TTL_MS = 10 * 60 * 1000;
+const ONLINE_TTL_MS = 90 * 1000;
 
 function n(value) {
   return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -32,6 +35,17 @@ function createJobId() {
   return `tu_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
 }
 
+function createVerifyCode() {
+  return String(100000 + crypto.randomInt(900000));
+}
+
+function cleanText(value, maxLength = 1800) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
 function targetScore(entry, query) {
   const gamertag = n(entry.gamertag);
   const username = n(entry.username);
@@ -48,11 +62,35 @@ function normalizeTarget(entry) {
     userId: String(entry.userId || ''),
     gamertag: String(entry.gamertag || '').replace(/\s+/g, ' ').trim(),
     username: String(entry.username || '').replace(/\s+/g, ' ').trim(),
+    verified: Boolean(entry.verified),
+    persistentId: String(entry.persistentId || '').trim(),
+    lastSeenAt: entry.lastSeenAt || null,
+    lastSeenName: String(entry.lastSeenName || '').replace(/\s+/g, ' ').trim(),
   };
 }
 
-function createTopupBridgeService({ registerStore }) {
+function formatTargetLine(target, index = 0) {
+  const user = target.userId ? `<@${target.userId}>` : '-';
+  const status = target.verified ? 'verified' : 'legacy';
+  const online = target.online ? 'online' : 'offline';
+  const geon = target.wallet ? ` | Geon=${formatNumber(target.wallet.geon)}` : '';
+  return `${index + 1}. \`${target.gamertag || target.name || target.key || '-'}\` | ${user} | ${status} | ${online}${geon}`;
+}
+
+function formatServerTargetLine(target, index = 0) {
+  const name = target.name || target.gamertag || target.key || '-';
+  const online = target.online ? 'online' : 'offline';
+  const geon = target.wallet ? ` | Geon=${formatNumber(target.wallet.geon)}` : '';
+  const ether = target.wallet ? ` | Ether=${formatNumber(target.wallet.ether)}` : '';
+  const pid = target.persistentId ? ` | pid=${target.persistentId.slice(0, 10)}...` : '';
+  return `${index + 1}. \`${name}\` | ${online}${geon}${ether}${pid}`;
+}
+
+function createTopupBridgeService({ registerStore, client = null }) {
   const jobs = new Map();
+  const pendingVerifications = new Map();
+  const onlinePlayers = new Map();
+  let chatChannelPromise = null;
 
   function pruneJobs(now = Date.now()) {
     for (const [jobId, record] of jobs.entries()) {
@@ -66,6 +104,79 @@ function createTopupBridgeService({ registerStore }) {
       if (!first) break;
       jobs.delete(first);
     }
+  }
+
+  function pruneVerifications(now = Date.now()) {
+    for (const [code, record] of pendingVerifications.entries()) {
+      if (record.expiresAt <= now) pendingVerifications.delete(code);
+    }
+  }
+
+  function onlineKey(player) {
+    return String(player?.persistentId || player?.key || player?.name || '').trim().toLowerCase();
+  }
+
+  function normalizeOnlinePlayer(player = {}, now = Date.now()) {
+    return {
+      name: cleanText(player.name, 80),
+      key: cleanText(player.key || player.name, 80).toLowerCase(),
+      persistentId: cleanText(player.persistentId, 160),
+      online: player.online !== false,
+      wallet: player.wallet && typeof player.wallet === 'object'
+        ? {
+          geon: Math.max(0, Math.floor(Number(player.wallet.geon) || 0)),
+          ether: Math.max(0, Math.floor(Number(player.wallet.ether) || 0)),
+        }
+        : null,
+      updatedAt: now,
+    };
+  }
+
+  function rememberOnlinePlayer(player = {}) {
+    const normalized = normalizeOnlinePlayer(player);
+    const key = onlineKey(normalized);
+    if (!key) return null;
+    onlinePlayers.set(key, normalized);
+    return normalized;
+  }
+
+  function forgetOnlinePlayer(player = {}) {
+    const key = onlineKey(player);
+    if (!key) return;
+    const current = onlinePlayers.get(key);
+    if (current) {
+      onlinePlayers.set(key, {
+        ...current,
+        online: false,
+        updatedAt: Date.now(),
+      });
+    }
+  }
+
+  function applyOnlineSnapshot(players = []) {
+    const seen = new Set();
+    for (const player of players) {
+      const normalized = rememberOnlinePlayer(player);
+      const key = onlineKey(normalized);
+      if (key) seen.add(key);
+    }
+
+    for (const [key, value] of onlinePlayers.entries()) {
+      if (!seen.has(key)) {
+        onlinePlayers.set(key, {
+          ...value,
+          online: false,
+          updatedAt: Date.now(),
+        });
+      }
+    }
+  }
+
+  function getOnlinePlayers() {
+    const now = Date.now();
+    return [...onlinePlayers.values()]
+      .filter(player => player.online && now - player.updatedAt <= ONLINE_TTL_MS)
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   function searchTargets(rawQuery, limit = 10) {
@@ -143,6 +254,39 @@ function createTopupBridgeService({ registerStore }) {
     }, { message });
   }
 
+  function enqueueBridgeQuery(type, payload, context) {
+    return enqueueJob(type, payload, context);
+  }
+
+  function createVerification({ userId, gamertag, message }) {
+    pruneVerifications();
+    const safeUserId = String(userId || '');
+    const safeGamertag = cleanText(gamertag, 80);
+    if (!safeUserId || !safeGamertag) return null;
+
+    for (const [code, record] of pendingVerifications.entries()) {
+      if (record.userId === safeUserId) pendingVerifications.delete(code);
+    }
+
+    let code = createVerifyCode();
+    while (pendingVerifications.has(code)) code = createVerifyCode();
+    const expiresAt = Date.now() + VERIFY_CODE_TTL_MS;
+    pendingVerifications.set(code, {
+      code,
+      userId: safeUserId,
+      gamertag: safeGamertag,
+      message,
+      expiresAt,
+      createdAt: Date.now(),
+    });
+    return {
+      code,
+      gamertag: safeGamertag,
+      expiresAt,
+      expiresInMinutes: Math.floor(VERIFY_CODE_TTL_MS / 60_000),
+    };
+  }
+
   function takeJobs(limitRaw = 3) {
     pruneJobs();
     const limit = Math.min(Math.max(1, Math.floor(Number(limitRaw) || 3)), 10);
@@ -208,6 +352,82 @@ function createTopupBridgeService({ registerStore }) {
     }
   }
 
+  async function sendWalletResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    if (!result.ok) {
+      await message.reply(`Cek saldo gagal: \`${result.code || 'unknown'}\`.`).catch(() => {});
+      return;
+    }
+
+    const target = result.target || {};
+    const wallet = result.wallet || {};
+    const registered = target.persistentId
+      ? registerStore.findUserByPersistentId?.(target.persistentId)
+      : registerStore.findUserByGamertag?.(target.name || target.key);
+    const linked = registered
+      ? ` | Discord: <@${registered.userId}> | ${registered.entry?.verified ? 'verified' : 'legacy'}`
+      : '';
+
+    await message.reply(
+      `Saldo \`${target.name || target.key || '-'}\`: **${formatNumber(wallet.geon)} Geon** | ${formatNumber(wallet.ether)} Ether${linked}`
+    ).catch(() => {});
+  }
+
+  async function sendSearchServerResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    if (!result.ok) {
+      await message.reply(`Search server gagal: \`${result.code || 'unknown'}\`.`).catch(() => {});
+      return;
+    }
+
+    const targets = Array.isArray(result.targets) ? result.targets.slice(0, 15) : [];
+    const lines = targets.length
+      ? targets.map(formatServerTargetLine).join('\n')
+      : 'Tidak ada hasil dari data server.';
+    await message.reply(`Hasil server untuk \`${record.job.query || '-'}\`:\n${lines}`).catch(() => {});
+  }
+
+  async function sendPlayerInfoResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    if (!result.ok) {
+      await message.reply(`Data player gagal: \`${result.code || 'unknown'}\`.`).catch(() => {});
+      return;
+    }
+
+    const target = result.target || {};
+    const wallet = result.wallet || {};
+    const registered = target.persistentId
+      ? registerStore.findUserByPersistentId?.(target.persistentId)
+      : registerStore.findUserByGamertag?.(target.name || target.key);
+    const registerLine = registered
+      ? `Discord: <@${registered.userId}> | ${registered.entry?.verified ? 'verified' : 'legacy'}`
+      : 'Discord: belum terhubung/terverifikasi';
+
+    await message.reply([
+      `Player: \`${target.name || target.key || '-'}\``,
+      `Status: ${target.online ? 'online' : 'offline'}`,
+      `Saldo: ${formatNumber(wallet.geon)} Geon | ${formatNumber(wallet.ether)} Ether`,
+      registerLine,
+      `persistentId: \`${target.persistentId || '-'}\``,
+    ].join('\n')).catch(() => {});
+  }
+
+  async function sendQueryResult(record, result) {
+    if (record.job.type === 'wallet') {
+      await sendWalletResult(record, result);
+    } else if (record.job.type === 'search_server') {
+      await sendSearchServerResult(record, result);
+    } else if (record.job.type === 'player_info') {
+      await sendPlayerInfoResult(record, result);
+    }
+  }
+
   async function completeJob(resultRaw = {}) {
     const jobId = String(resultRaw.jobId || '');
     const record = jobs.get(jobId);
@@ -222,6 +442,8 @@ function createTopupBridgeService({ registerStore }) {
         await sendCouponResult(record, resultRaw);
       } else if (record.job.type === 'topup') {
         await sendTopupResult(record, resultRaw);
+      } else {
+        await sendQueryResult(record, resultRaw);
       }
     } catch (err) {
       console.error('Failed to send topup bridge result:', err);
@@ -231,18 +453,126 @@ function createTopupBridgeService({ registerStore }) {
     return { ok: true };
   }
 
+  async function resolveChatChannel() {
+    if (!client || !MINECRAFT_CHAT_LOG_CHANNEL_ID) return null;
+    if (!chatChannelPromise) {
+      chatChannelPromise = client.channels.fetch(MINECRAFT_CHAT_LOG_CHANNEL_ID).catch(err => {
+        chatChannelPromise = null;
+        console.error('Failed to fetch Minecraft chat log channel:', err);
+        return null;
+      });
+    }
+    return chatChannelPromise;
+  }
+
+  async function sendChatLog(event) {
+    const channel = await resolveChatChannel();
+    if (!channel?.send) return { ok: false, code: 'chat-channel-unavailable' };
+
+    const name = cleanText(event.name || 'unknown', 80);
+    const message = cleanText(event.message || '', 1600);
+    if (!message) return { ok: false, code: 'empty-message' };
+
+    await channel.send({
+      content: `**[MC] ${name}:** ${message}`,
+      allowedMentions: { parse: [] },
+    }).catch(err => {
+      throw err;
+    });
+    return { ok: true };
+  }
+
+  async function verifyFromMinecraft(event) {
+    pruneVerifications();
+    const code = String(event.code || '').replace(/[^\d]/g, '');
+    const record = pendingVerifications.get(code);
+    if (!record) return { ok: false, code: 'verify-code-not-found' };
+    if (record.expiresAt <= Date.now()) {
+      pendingVerifications.delete(code);
+      return { ok: false, code: 'verify-code-expired' };
+    }
+
+    const name = cleanText(event.name, 80);
+    const persistentId = cleanText(event.persistentId, 160);
+    if (!name || !persistentId) return { ok: false, code: 'invalid-player-identity' };
+    if (n(name) !== n(record.gamertag)) {
+      return {
+        ok: false,
+        code: 'gamertag-mismatch',
+        expected: record.gamertag,
+        actual: name,
+      };
+    }
+
+    const existingPersistent = registerStore.findUserByPersistentId?.(persistentId);
+    if (existingPersistent && existingPersistent.userId !== record.userId) {
+      return {
+        ok: false,
+        code: 'persistent-id-already-linked',
+      };
+    }
+
+    const entry = await registerStore.markVerified(record.userId, {
+      gamertag: name,
+      persistentId,
+    });
+    if (!entry) return { ok: false, code: 'register-entry-not-found' };
+
+    pendingVerifications.delete(code);
+    await record.message?.reply(
+      `Verifikasi Minecraft berhasil: \`${name}\` sekarang linked dan verified.`
+    ).catch(() => {});
+    return { ok: true, code: 'ok', userId: record.userId, gamertag: name };
+  }
+
+  async function handleMinecraftEvent(eventRaw = {}) {
+    const type = n(eventRaw.type);
+    if (type === 'chat') {
+      return sendChatLog(eventRaw);
+    }
+    if (type === 'verify') {
+      return verifyFromMinecraft(eventRaw);
+    }
+    if (type === 'player_join') {
+      const player = rememberOnlinePlayer(eventRaw.player || eventRaw);
+      if (player?.persistentId) {
+        await registerStore.markSeenByPersistentId?.(player.persistentId, player.name).catch(() => null);
+      }
+      const linked = player?.persistentId
+        ? registerStore.findUserByPersistentId?.(player.persistentId)
+        : null;
+      return {
+        ok: true,
+        verified: Boolean(linked?.entry?.verified),
+        discordUserId: linked?.userId || '',
+      };
+    }
+    if (type === 'player_leave') {
+      forgetOnlinePlayer(eventRaw.player || eventRaw);
+      return { ok: true };
+    }
+    if (type === 'snapshot') {
+      applyOnlineSnapshot(Array.isArray(eventRaw.players) ? eventRaw.players : []);
+      return { ok: true, online: getOnlinePlayers().length };
+    }
+    return { ok: false, code: 'unknown-event-type' };
+  }
+
   return {
     normalizePositiveInt,
     formatNumber,
     rupiahText,
     searchTargets,
     resolveTarget,
+    getOnlinePlayers,
+    createVerification,
     enqueueTopup,
     enqueueCoupon,
+    enqueueBridgeQuery,
     takeJobs,
     completeJob,
+    handleMinecraftEvent,
   };
 }
 
 module.exports = { createTopupBridgeService };
-

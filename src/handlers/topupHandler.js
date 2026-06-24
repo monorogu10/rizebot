@@ -49,7 +49,8 @@ function parseCouponArgs(args, bridge) {
 function formatTarget(target) {
   const user = target.userId ? `<@${target.userId}>` : '-';
   const username = target.username ? ` | discord=${target.username}` : '';
-  return `\`${target.gamertag}\` | ${user}${username}`;
+  const status = target.verified ? 'verified' : 'legacy';
+  return `\`${target.gamertag}\` | ${user} | ${status}${username}`;
 }
 
 function formatCandidates(candidates) {
@@ -147,4 +148,3 @@ function createTopupHandler({ bridge }) {
 }
 
 module.exports = { createTopupHandler };
-
