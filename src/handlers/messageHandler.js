@@ -1,6 +1,7 @@
 function createMessageHandler({
   linkBlocker,
   keywordReply,
+  topupHandler,
   minecraftRegisterHandler,
   registerHandler,
   moderationHandler
@@ -10,6 +11,11 @@ function createMessageHandler({
 
     const deleted = await linkBlocker(msg);
     if (deleted) return;
+
+    if (topupHandler) {
+      const handled = await topupHandler(msg);
+      if (handled) return;
+    }
 
     if (moderationHandler) {
       const handled = await moderationHandler(msg);

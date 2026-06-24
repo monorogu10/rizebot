@@ -24,7 +24,11 @@ const {
 const { createSubmissionStore } = require('./src/services/submissionStore');
 const { createRegisterStore } = require('./src/services/registerStore');
 const { createModerationStore } = require('./src/services/moderationStore');
+const { createTopupBridgeService } = require('./src/services/topupBridgeService');
+const { createTopupBridgeServer } = require('./src/services/topupBridgeServer');
+const { createTopupHandler } = require('./src/handlers/topupHandler');
 const { REGISTER_ROLE_ID, LEGACY_ROLE_ID, MINECRAFT_REGISTER_ROLE_ID } = require('./src/config');
+const { TOPUP_BRIDGE_HOST, TOPUP_BRIDGE_PORT, TOPUP_BRIDGE_TOKEN } = require('./src/config');
 const { isAllowedBotOutputChannel } = require('./src/utils/channelPolicy');
 
 const LOCK_FILE = process.env.RIZEBOT_LOCK_FILE || path.join(os.tmpdir(), 'rizebot.lock');
@@ -108,6 +112,15 @@ const client = new Client({
 const submissionStore = createSubmissionStore();
 const minecraftRegisterStore = createRegisterStore();
 const moderationStore = createModerationStore();
+const topupBridge = createTopupBridgeService({
+  registerStore: minecraftRegisterStore
+});
+const topupBridgeServer = createTopupBridgeServer({
+  bridge: topupBridge,
+  host: TOPUP_BRIDGE_HOST,
+  port: TOPUP_BRIDGE_PORT,
+  token: TOPUP_BRIDGE_TOKEN
+});
 const minecraftRegisterHandler = createMinecraftRegisterHandler({
   roleId: MINECRAFT_REGISTER_ROLE_ID,
   registerStore: minecraftRegisterStore
@@ -127,10 +140,14 @@ const moderationReactionHandler = createModerationReactionHandler({
   moderationStore,
   privateRoleId: REGISTER_ROLE_ID
 });
+const topupHandler = createTopupHandler({
+  bridge: topupBridge
+});
 
 const baseHandleMessage = createMessageHandler({
   linkBlocker: maybeBlockLink,
   keywordReply: maybeReplyKeyword,
+  topupHandler,
   minecraftRegisterHandler,
   registerHandler,
   moderationHandler
@@ -153,6 +170,13 @@ client.once('clientReady', async () => {
   await moderationStore.init(client).catch(err => {
     console.error('Failed to init moderation store:', err);
   });
+  await topupBridgeServer.start()
+    .then(() => {
+      console.log(`Topup bridge HTTP ready at http://${TOPUP_BRIDGE_HOST}:${TOPUP_BRIDGE_PORT}`);
+    })
+    .catch(err => {
+      console.error('Failed to start topup bridge HTTP server:', err);
+    });
   await privateRoleEvents.sync().catch(err => {
     console.error('Failed to sync private roles:', err);
   });
