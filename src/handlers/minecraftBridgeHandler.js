@@ -48,7 +48,7 @@ function formatOnlinePlayer(player, index = 0) {
 function helpText() {
   return [
     '**Minecraft bridge commands**',
-    '`!verifyme` - buat kode verify Minecraft untuk akun Discord kamu',
+    '`!verifyme` - buat kode verify Minecraft untuk akun Discord kamu; kode lama otomatis batal',
     '`!mcstatus` - admin: cek status bridge rizebot/BP',
     '`!mcping` - admin: test BP polling job',
     '`!online` - admin: lihat player online dari server',
@@ -112,8 +112,10 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         [
           `Kode verify Minecraft untuk \`${challenge.gamertag}\`: \`${challenge.code}\``,
           `Masuk ke server sebagai \`${challenge.gamertag}\`, lalu ketik:`,
-          `\`/verify ${challenge.code}\``,
+          `\`/secrules:verify ${challenge.code}\``,
+          `Atau fallback chat: \`!verify ${challenge.code}\``,
           `Kode expired dalam ${challenge.expiresInMinutes} menit.`,
+          'Jika kamu menjalankan `!verifyme` lagi, kode sebelumnya otomatis batal.',
         ].join('\n')
       );
       return true;
