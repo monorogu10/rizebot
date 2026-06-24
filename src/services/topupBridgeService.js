@@ -91,6 +91,17 @@ function createTopupBridgeService({ registerStore, client = null }) {
   const pendingVerifications = new Map();
   const onlinePlayers = new Map();
   let chatChannelPromise = null;
+  const bridgeStats = {
+    lastJobPollAt: null,
+    lastJobPollHadJobsAt: null,
+    lastResultAt: null,
+    lastEventAt: null,
+    lastEventType: '',
+    lastSnapshotAt: null,
+    lastSnapshotOnline: 0,
+    lastChatAt: null,
+    lastVerifyAt: null,
+  };
 
   function pruneJobs(now = Date.now()) {
     for (const [jobId, record] of jobs.entries()) {
@@ -289,6 +300,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
   function takeJobs(limitRaw = 3) {
     pruneJobs();
+    bridgeStats.lastJobPollAt = new Date().toISOString();
     const limit = Math.min(Math.max(1, Math.floor(Number(limitRaw) || 3)), 10);
     const now = Date.now();
     const result = [];
@@ -305,6 +317,9 @@ function createTopupBridgeService({ registerStore, client = null }) {
       result.push(record.job);
     }
 
+    if (result.length > 0) {
+      bridgeStats.lastJobPollHadJobsAt = new Date().toISOString();
+    }
     return result;
   }
 
@@ -418,6 +433,23 @@ function createTopupBridgeService({ registerStore, client = null }) {
     ].join('\n')).catch(() => {});
   }
 
+  async function sendPingResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    if (!result.ok) {
+      await message.reply(`Ping BP gagal: \`${result.code || 'unknown'}\`.`).catch(() => {});
+      return;
+    }
+
+    await message.reply([
+      'Ping BP sukses.',
+      `Online di BP: ${formatNumber(result.onlineCount)}`,
+      `Finance ready: ${result.financeReady ? 'ya' : 'tidak'}`,
+      `Server time: ${result.serverTime || '-'}`,
+    ].join('\n')).catch(() => {});
+  }
+
   async function sendQueryResult(record, result) {
     if (record.job.type === 'wallet') {
       await sendWalletResult(record, result);
@@ -425,6 +457,8 @@ function createTopupBridgeService({ registerStore, client = null }) {
       await sendSearchServerResult(record, result);
     } else if (record.job.type === 'player_info') {
       await sendPlayerInfoResult(record, result);
+    } else if (record.job.type === 'ping') {
+      await sendPingResult(record, result);
     }
   }
 
@@ -436,6 +470,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     record.status = 'done';
     record.updatedAt = Date.now();
     record.result = resultRaw;
+    bridgeStats.lastResultAt = new Date().toISOString();
 
     try {
       if (record.job.type === 'coupon') {
@@ -527,10 +562,14 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
   async function handleMinecraftEvent(eventRaw = {}) {
     const type = n(eventRaw.type);
+    bridgeStats.lastEventAt = new Date().toISOString();
+    bridgeStats.lastEventType = type;
     if (type === 'chat') {
+      bridgeStats.lastChatAt = bridgeStats.lastEventAt;
       return sendChatLog(eventRaw);
     }
     if (type === 'verify') {
+      bridgeStats.lastVerifyAt = bridgeStats.lastEventAt;
       return verifyFromMinecraft(eventRaw);
     }
     if (type === 'player_join') {
@@ -553,9 +592,28 @@ function createTopupBridgeService({ registerStore, client = null }) {
     }
     if (type === 'snapshot') {
       applyOnlineSnapshot(Array.isArray(eventRaw.players) ? eventRaw.players : []);
+      bridgeStats.lastSnapshotAt = bridgeStats.lastEventAt;
+      bridgeStats.lastSnapshotOnline = getOnlinePlayers().length;
       return { ok: true, online: getOnlinePlayers().length };
     }
     return { ok: false, code: 'unknown-event-type' };
+  }
+
+  function getBridgeStatus() {
+    pruneJobs();
+    pruneVerifications();
+    const counts = { queued: 0, leased: 0, done: 0 };
+    for (const record of jobs.values()) {
+      if (record.status === 'queued') counts.queued += 1;
+      else if (record.status === 'leased') counts.leased += 1;
+      else if (record.status === 'done') counts.done += 1;
+    }
+    return {
+      ...bridgeStats,
+      jobs: counts,
+      onlineCount: getOnlinePlayers().length,
+      pendingVerifyCount: pendingVerifications.size,
+    };
   }
 
   return {
@@ -572,6 +630,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     takeJobs,
     completeJob,
     handleMinecraftEvent,
+    getBridgeStatus,
   };
 }
 

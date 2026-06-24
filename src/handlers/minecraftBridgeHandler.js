@@ -10,7 +10,7 @@ function normalizeSpaces(value) {
 
 function parseCommand(content) {
   const raw = normalizeSpaces(content);
-  const match = raw.match(/^!(verifyme|mc-help|online|srcsrv|geon|player)(?:\s+(.+))?$/i);
+  const match = raw.match(/^!(verifyme|mc-help|mcstatus|mcping|online|srcsrv|geon|player)(?:\s+(.+))?$/i);
   if (!match) return null;
   return {
     command: match[1].toLowerCase(),
@@ -49,10 +49,32 @@ function helpText() {
   return [
     '**Minecraft bridge commands**',
     '`!verifyme` - buat kode verify Minecraft untuk akun Discord kamu',
+    '`!mcstatus` - admin: cek status bridge rizebot/BP',
+    '`!mcping` - admin: test BP polling job',
     '`!online` - admin: lihat player online dari server',
     '`!srcsrv <nama>` - admin: cari player dari data server Minecraft',
     '`!geon <nama>` - admin: cek saldo Geon/Ether player',
     '`!player <nama>` - admin: detail player dari server',
+  ].join('\n');
+}
+
+function timeOrDash(value) {
+  return value ? String(value) : '-';
+}
+
+function formatBridgeStatus(status) {
+  const jobs = status.jobs || {};
+  return [
+    '**Minecraft bridge status**',
+    `Job poll terakhir: ${timeOrDash(status.lastJobPollAt)}`,
+    `Job hasil terakhir: ${timeOrDash(status.lastResultAt)}`,
+    `Event terakhir: ${timeOrDash(status.lastEventAt)} (${status.lastEventType || '-'})`,
+    `Snapshot terakhir: ${timeOrDash(status.lastSnapshotAt)} | online=${formatNumber(status.lastSnapshotOnline || 0)}`,
+    `Chat terakhir: ${timeOrDash(status.lastChatAt)}`,
+    `Verify terakhir: ${timeOrDash(status.lastVerifyAt)}`,
+    `Cache online: ${formatNumber(status.onlineCount || 0)}`,
+    `Job queue: queued=${formatNumber(jobs.queued || 0)} leased=${formatNumber(jobs.leased || 0)} done=${formatNumber(jobs.done || 0)}`,
+    `Pending verify: ${formatNumber(status.pendingVerifyCount || 0)}`,
   ].join('\n');
 }
 
@@ -99,6 +121,17 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
 
     if (!isBridgeAdmin(msg.author?.id)) {
       await replyNoPing(msg, 'Command Minecraft admin hanya untuk admin.');
+      return true;
+    }
+
+    if (parsed.command === 'mcstatus') {
+      await replyNoPing(msg, formatBridgeStatus(bridge.getBridgeStatus()));
+      return true;
+    }
+
+    if (parsed.command === 'mcping') {
+      const job = bridge.enqueueBridgeQuery('ping', { requestedBy: msg.author.id }, { message: msg });
+      await replyNoPing(msg, `Ping BP masuk antrean. Job: \`${job.id}\``);
       return true;
     }
 
