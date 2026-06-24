@@ -201,6 +201,8 @@ function formatBridgeStatus(status) {
     `Event terakhir: ${timeOrDash(status.lastEventAt)} (${status.lastEventType || '-'})`,
     `Snapshot terakhir: ${timeOrDash(status.lastSnapshotAt)} | online=${formatNumber(status.lastSnapshotOnline || 0)}`,
     `Chat terakhir: ${timeOrDash(status.lastChatAt)}`,
+    `Transparansi terakhir: ${timeOrDash(status.lastTransparencyAt)}`,
+    `Join/leave terakhir: ${timeOrDash(status.lastPresenceAt)}`,
     `Verify terakhir: ${timeOrDash(status.lastVerifyAt)}`,
     `Cache online: ${formatNumber(status.onlineCount || 0)}`,
     `Job queue: queued=${formatNumber(jobs.queued || 0)} leased=${formatNumber(jobs.leased || 0)} done=${formatNumber(jobs.done || 0)}`,

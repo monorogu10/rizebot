@@ -95,6 +95,10 @@ function normalizeGamertag(gamertag) {
   return String(gamertag || '').replace(/\s+/g, ' ').trim();
 }
 
+function isSameGamertag(left, right) {
+  return normalizeGamertag(left).toLowerCase() === normalizeGamertag(right).toLowerCase();
+}
+
 function gamertagFormatHelp(command = '!reg') {
   return `Format: \`${command} <gamertag_minecraft>\` (3-32 huruf/angka/underscore/spasi).`;
 }
@@ -329,6 +333,75 @@ async function handleMinecraftRegCommand(msg, options) {
     return true;
   }
 
+  const existing = registerStore.getUser(msg.author.id);
+  if (existing) {
+    const previousGamertag = existing.gamertag;
+    const duplicate = registerStore.findUserByGamertag?.(gamertag, msg.author.id);
+    if (duplicate) {
+      await replyNoPing(
+        msg,
+        `Gamertag \`${gamertag}\` sudah dipakai oleh <@${duplicate.userId}>. Pakai gamertag lain.`
+      );
+      return true;
+    }
+
+    const roleOk = await addRoleIfMissing(member, roleId);
+    if (!roleOk) {
+      await replyNoPing(msg, 'Gamertag belum diubah karena role registrasi gagal dicek. Hubungi admin.');
+      return true;
+    }
+
+    let updated = null;
+    try {
+      updated = await registerStore.updateUser(
+        msg.author.id,
+        gamertag,
+        msg.author?.tag || msg.author?.username || ''
+      );
+    } catch (err) {
+      console.error('Failed to save minecraft registration update from !reg:', err);
+      await replyNoPing(msg, 'Gagal menyimpan perubahan gamertag ke channel save. Coba lagi atau hubungi admin.');
+      return true;
+    }
+
+    if (updated?.duplicate) {
+      await replyNoPing(
+        msg,
+        `Gamertag \`${gamertag}\` sudah dipakai oleh <@${updated.duplicateUserId}>. Pakai gamertag lain.`
+      );
+      return true;
+    }
+    if (!updated) {
+      await replyNoPing(msg, 'Data registrasi tidak ditemukan. Pakai `!reg <gamertag_minecraft>` dulu.');
+      return true;
+    }
+
+    const nicknameOk = await setNicknameToGamertag(member, updated.gamertag).catch(err => {
+      console.error('Failed to set Minecraft registration nickname:', err);
+      return false;
+    });
+    const nicknameNote = nicknameOk
+      ? 'Nickname Discord sudah diubah ke gamertag.'
+      : 'Catatan: nickname Discord gagal diubah otomatis. Cek permission dan posisi role bot.';
+    const changed = !isSameGamertag(previousGamertag, updated.gamertag);
+    const verifyLine = changed
+      ? 'Jalankan `!verifyme` lagi agar gamertag baru terhubung ke akun Minecraft asli.'
+      : 'Kalau belum verified, jalankan `!verifyme` lalu ketik kode di server Minecraft.';
+
+    await replyNoPing(
+      msg,
+      [
+        changed
+          ? `Gamertag berhasil diubah dari \`${previousGamertag}\` ke \`${updated.gamertag}\`.`
+          : `Gamertag kamu tetap: \`${updated.gamertag}\`.`,
+        verifyLine,
+        nicknameNote,
+        getInfoLine(infoChannelId, infoUrl)
+      ].join('\n')
+    );
+    return true;
+  }
+
   let result = null;
   try {
     result = await registerStore.registerUser(
@@ -367,7 +440,7 @@ async function handleMinecraftRegCommand(msg, options) {
       [
         'Kamu sudah terdaftar.',
         formatExistingRegistration(result.entry),
-        `Untuk ganti gamertag, pakai \`!edit-reg ${gamertag}\`.`,
+        `Untuk ganti gamertag, pakai \`!reg ${gamertag}\` atau \`!edit-reg ${gamertag}\`.`,
         'Untuk mengunci akun ke Minecraft asli, pakai `!verifyme` lalu ketik kode di server.',
         getInfoLine(infoChannelId, infoUrl) + roleNote + nicknameNote
       ].join('\n')

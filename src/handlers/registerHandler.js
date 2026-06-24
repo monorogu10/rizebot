@@ -138,7 +138,7 @@ async function handleHelpCommand(msg, options) {
     `- Daftar private: kirim \`!daftar\` di ${registerHint}.`,
     '- Cek status pendaftaran private: `!status`.',
     '- Daftar Minecraft: `!reg <gamertag_minecraft>`.',
-    '- Ubah gamertag Minecraft: `!edit-reg <gamertag_minecraft>`.',
+    '- Ubah gamertag Minecraft: `!reg <gamertag_minecraft>` atau `!edit-reg <gamertag_minecraft>`.',
     '- Keluar dari registrasi Minecraft: `!out`.',
     '- List registrasi Minecraft: `!list`.',
     '- Petisi timeout (khusus member private): `!timeout @user` (butuh 17 vote dalam 1 jam).',

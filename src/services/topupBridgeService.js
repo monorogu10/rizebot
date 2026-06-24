@@ -45,6 +45,8 @@ function createVerifyCode() {
 
 function cleanText(value, maxLength = 1800) {
   return String(value || '')
+    .replace(/\u00A7[0-9A-FK-OR]/gi, '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
@@ -104,6 +106,8 @@ function createTopupBridgeService({ registerStore, client = null }) {
     lastSnapshotAt: null,
     lastSnapshotOnline: 0,
     lastChatAt: null,
+    lastTransparencyAt: null,
+    lastPresenceAt: null,
     lastVerifyAt: null,
   };
 
@@ -620,6 +624,44 @@ function createTopupBridgeService({ registerStore, client = null }) {
     return { ok: true };
   }
 
+  async function sendTransparencyLog(event) {
+    const channel = await resolveChatChannel();
+    if (!channel?.send) return { ok: false, code: 'chat-channel-unavailable' };
+
+    const category = cleanText(event.category || 'unknown', 40);
+    const label = cleanText(event.label || category || 'unknown', 80);
+    const message = cleanText(event.message || '', 1600);
+    if (!message) return { ok: false, code: 'empty-message' };
+
+    await channel.send({
+      content: `**[TRANS][${label}]** ${message}`,
+      allowedMentions: { parse: [] },
+    }).catch(err => {
+      throw err;
+    });
+    return { ok: true };
+  }
+
+  async function sendPresenceLog(type, event = {}, detail = '') {
+    const channel = await resolveChatChannel();
+    if (!channel?.send) return { ok: false, code: 'chat-channel-unavailable' };
+
+    const player = event.player || event;
+    const name = cleanText(player.name || event.name || 'unknown', 80);
+    if (!name) return { ok: false, code: 'empty-name' };
+
+    const label = type === 'player_leave' ? 'LEAVE' : 'JOIN';
+    const action = type === 'player_leave' ? 'keluar server' : 'masuk server';
+    const detailText = cleanText(detail, 160);
+    await channel.send({
+      content: `**[${label}] ${name}** ${action}${detailText ? ` | ${detailText}` : ''}`,
+      allowedMentions: { parse: [] },
+    }).catch(err => {
+      throw err;
+    });
+    return { ok: true };
+  }
+
   async function verifyFromMinecraft(event) {
     pruneVerifications();
     const code = String(event.code || '').replace(/[^\d]/g, '');
@@ -644,7 +686,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
         ok: false,
         code: 'invalid-player-identity',
         hasName: Boolean(name),
-        hasPersistentId: Boolean(persistentId),
+        hasIdentity: Boolean(persistentId),
       };
     }
     if (n(name) !== n(record.gamertag)) {
@@ -686,6 +728,10 @@ function createTopupBridgeService({ registerStore, client = null }) {
       bridgeStats.lastChatAt = bridgeStats.lastEventAt;
       return sendChatLog(eventRaw);
     }
+    if (type === 'transparency') {
+      bridgeStats.lastTransparencyAt = bridgeStats.lastEventAt;
+      return sendTransparencyLog(eventRaw);
+    }
     if (type === 'verify') {
       bridgeStats.lastVerifyAt = bridgeStats.lastEventAt;
       return verifyFromMinecraft(eventRaw);
@@ -698,6 +744,9 @@ function createTopupBridgeService({ registerStore, client = null }) {
       const linked = player?.persistentId
         ? registerStore.findUserByPersistentId?.(player.persistentId)
         : null;
+      bridgeStats.lastPresenceAt = bridgeStats.lastEventAt;
+      await sendPresenceLog(type, { player }, linked?.entry?.verified ? 'verified Discord' : 'belum verified Discord')
+        .catch(err => console.error('Failed to send Minecraft join log:', err));
       return {
         ok: true,
         verified: Boolean(linked?.entry?.verified),
@@ -706,6 +755,10 @@ function createTopupBridgeService({ registerStore, client = null }) {
     }
     if (type === 'player_leave') {
       forgetOnlinePlayer(eventRaw.player || eventRaw);
+      bridgeStats.lastPresenceAt = bridgeStats.lastEventAt;
+      await sendPresenceLog(type, eventRaw).catch(err => {
+        console.error('Failed to send Minecraft leave log:', err);
+      });
       return { ok: true };
     }
     if (type === 'snapshot') {
