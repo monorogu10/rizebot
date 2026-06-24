@@ -15,7 +15,7 @@ const {
 const GAMERTAG_REGEX = /^[A-Za-z0-9_ ]{3,32}$/;
 const LIST_PAGE_SIZE = 10;
 const LIST_BUTTON_PREFIX = 'mcreglist';
-const COMMAND_CLEANUP_DELAY_MS = 20 * 1000;
+const COMMAND_CLEANUP_DELAY_MS = 60 * 1000;
 const BOT_CLEANUP_SCAN_LIMIT = 50;
 const MINECRAFT_REPLY_MARKERS = [
   'Kamu sudah terdaftar.',
