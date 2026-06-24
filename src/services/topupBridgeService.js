@@ -205,7 +205,7 @@ function formatServerTargetLine(target, index = 0) {
   const pid = target.persistentId ? ` | pid=${target.persistentId.slice(0, 10)}...` : '';
   const registerStatus = target.verified
     ? '✅ verified'
-    : (target.discordUserId ? '🟢 terdaftar' : '❌ belum register');
+    : (target.discordUserId ? ((target.registeredMatch || target.accessAllowed) ? '✅ resmi' : '🟢 terdaftar') : '❌ belum register');
   const discord = target.discordUserId ? `<@${target.discordUserId}> (${target.discordUserId})` : '-';
   return `${index + 1}. \`${name}\` | ${online} | ${registerStatus} | Discord=${discord}${geon}${ether}${pid}`;
 }
@@ -514,7 +514,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     }
   }
 
-  async function syncVerifiedMinecraftRole(userIdRaw) {
+  async function syncOfficialMinecraftRole(userIdRaw) {
     const userId = String(userIdRaw || '').trim();
     if (!userId || !client?.guilds?.cache) return false;
 
@@ -1096,7 +1096,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
     pendingVerifications.delete(code);
     saveVerificationsToDisk();
-    const roleSynced = await syncVerifiedMinecraftRole(record.userId).catch(err => {
+    const roleSynced = await syncOfficialMinecraftRole(record.userId).catch(err => {
       console.error('Failed to sync verified Minecraft role:', err);
       return false;
     });
@@ -1140,6 +1140,18 @@ function createTopupBridgeService({ registerStore, client = null }) {
         n(linkedByGamertag.entry.gamertag) === n(player?.name)
       );
       const accessAllowed = bypass || verified || registeredMatch;
+      let roleSynced = false;
+      if (!bypass && accessAllowed && linked?.userId) {
+        if (registeredMatch) {
+          await registerStore.markSeenByGamertag?.(player?.name).catch(err => {
+            console.error('Failed to mark Minecraft gamertag seen:', err);
+          });
+        }
+        roleSynced = await syncOfficialMinecraftRole(linked.userId).catch(err => {
+          console.error('Failed to sync official Minecraft role:', err);
+          return false;
+        });
+      }
       bridgeStats.lastPresenceAt = bridgeStats.lastEventAt;
       await sendPresenceLog(
         type,
@@ -1155,6 +1167,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
         registered: Boolean(linked),
         registeredMatch,
         accessAllowed,
+        roleSynced,
         discordUserId: linked?.userId || '',
       };
     }

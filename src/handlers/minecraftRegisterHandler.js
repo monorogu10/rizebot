@@ -108,6 +108,11 @@ function isSameGamertag(left, right) {
   return normalizeGamertag(left).toLowerCase() === normalizeGamertag(right).toLowerCase();
 }
 
+function hasOfficialMinecraftRegistration(entry) {
+  if (!entry?.gamertag) return false;
+  return Boolean(entry.verified) || isSameGamertag(entry.gamertag, entry.lastSeenName || '');
+}
+
 function gamertagFormatHelp(command = '!reg') {
   return `Format: \`${command} <gamertag_minecraft>\` (3-32 huruf/angka/underscore/spasi).`;
 }
@@ -192,9 +197,9 @@ async function syncMinecraftRegistrationRoleState(member, entry, {
   verifiedRoleId = MINECRAFT_REGISTER_ROLE_ID,
 } = {}) {
   if (!member || !entry) return false;
-  const verified = Boolean(entry.verified);
-  const addRoleId = verified ? verifiedRoleId : pendingRoleId;
-  const removeRoleId = verified ? pendingRoleId : verifiedRoleId;
+  const official = hasOfficialMinecraftRegistration(entry);
+  const addRoleId = official ? verifiedRoleId : pendingRoleId;
+  const removeRoleId = official ? pendingRoleId : verifiedRoleId;
   const added = await addRoleIfMissing(member, addRoleId);
   const removed = addRoleId === removeRoleId ? true : await removeRoleIfPresent(member, removeRoleId);
   return added && removed;
@@ -345,9 +350,10 @@ function buildMinecraftStatusPayload(entry) {
   }
 
   const verified = Boolean(entry.verified);
+  const official = hasOfficialMinecraftRegistration(entry);
   const lines = [
     `Gamertag: \`${entry.gamertag || '-'}\``,
-    `Status: ${verified ? '✅ Terdaftar + verified' : '🟢 Terdaftar'}`,
+    `Status: ${verified ? '✅ Terdaftar + verified' : (official ? '✅ Terdaftar resmi' : '🟢 Terdaftar')}`,
     `Daftar: ${formatDateId(entry.registeredAt)}`,
     `Update: ${formatDateId(entry.updatedAt || entry.registeredAt)}`,
   ];
@@ -359,8 +365,8 @@ function buildMinecraftStatusPayload(entry) {
     .setTitle('🎮 Status Minecraft')
     .setDescription(lines.join('\n'))
     .setFooter({
-      text: verified
-        ? 'Akun sudah terdaftar dan terkunci ke Minecraft asli.'
+      text: official
+        ? 'Akun sudah cocok dengan server Minecraft dan mendapat role resmi.'
         : 'Sudah terdaftar. Join server dengan gamertag yang sama; !verify opsional untuk mengunci akun.',
     });
 

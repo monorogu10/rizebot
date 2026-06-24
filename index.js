@@ -183,13 +183,16 @@ client.once('clientReady', async () => {
   await moderationStore.init(client).catch(err => {
     console.error('Failed to init moderation store:', err);
   });
-  await topupBridgeServer.start()
-    .then(() => {
-      console.log(`Topup bridge HTTP ready at http://${TOPUP_BRIDGE_HOST}:${TOPUP_BRIDGE_PORT}`);
-    })
-    .catch(err => {
-      console.error('Failed to start topup bridge HTTP server:', err);
-    });
+  try {
+    await topupBridgeServer.start();
+    console.log(`Topup bridge HTTP ready at http://${TOPUP_BRIDGE_HOST}:${TOPUP_BRIDGE_PORT}`);
+  } catch (err) {
+    console.error('Failed to start topup bridge HTTP server:', err);
+    console.error('Stopping this rizebot process to prevent duplicate Discord command handling.');
+    await client.destroy().catch(() => null);
+    process.exit(1);
+    return;
+  }
   await privateRoleEvents.sync().catch(err => {
     console.error('Failed to sync private roles:', err);
   });
@@ -218,6 +221,11 @@ client.once('clientReady', async () => {
 const processedMessageContent = new Map();
 const PROCESSED_MESSAGE_TTL_MS = 5 * 60 * 1000;
 const PROCESSED_MESSAGE_MAX = 1000;
+const PROCESS_CLAIM_TTL_MS = 10 * 60 * 1000;
+const PROCESS_CLAIM_PRUNE_MS = 60 * 1000;
+const MESSAGE_CLAIM_DIR = process.env.RIZEBOT_MESSAGE_CLAIM_DIR ||
+  path.join(os.tmpdir(), 'rizebot-message-claims');
+let lastProcessClaimPruneAt = 0;
 
 function pruneProcessedMessages(now = Date.now()) {
   for (const [messageId, entry] of processedMessageContent) {
@@ -252,6 +260,73 @@ function rememberProcessedContent(msg) {
   pruneProcessedMessages();
 }
 
+function safeMessageClaimId(messageId) {
+  return String(messageId || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
+}
+
+function pruneProcessClaims(now = Date.now()) {
+  if (now - lastProcessClaimPruneAt < PROCESS_CLAIM_PRUNE_MS) return;
+  lastProcessClaimPruneAt = now;
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(MESSAGE_CLAIM_DIR, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const claimPath = path.join(MESSAGE_CLAIM_DIR, entry.name);
+    try {
+      const stat = fs.statSync(claimPath);
+      if (now - stat.mtimeMs > PROCESS_CLAIM_TTL_MS) {
+        fs.rmSync(claimPath, { recursive: true, force: true });
+      }
+    } catch {
+      // Ignore stale claim cleanup errors.
+    }
+  }
+}
+
+function claimMessageAcrossProcesses(msg) {
+  const messageId = safeMessageClaimId(msg?.id);
+  if (!messageId) return false;
+
+  const now = Date.now();
+  try {
+    fs.mkdirSync(MESSAGE_CLAIM_DIR, { recursive: true });
+    pruneProcessClaims(now);
+  } catch {
+    return true;
+  }
+
+  const claimPath = path.join(MESSAGE_CLAIM_DIR, messageId);
+  try {
+    fs.mkdirSync(claimPath);
+    fs.writeFileSync(path.join(claimPath, 'owner.json'), JSON.stringify({
+      pid: process.pid,
+      content: getMessageContent(msg).slice(0, 200),
+      createdAt: new Date(now).toISOString()
+    }));
+    return true;
+  } catch (err) {
+    if (err?.code !== 'EEXIST') return true;
+  }
+
+  try {
+    const stat = fs.statSync(claimPath);
+    if (now - stat.mtimeMs > PROCESS_CLAIM_TTL_MS) {
+      fs.rmSync(claimPath, { recursive: true, force: true });
+      return claimMessageAcrossProcesses(msg);
+    }
+  } catch {
+    return true;
+  }
+
+  return false;
+}
+
 async function reloadMinecraftDataFromMessage(msg) {
   const reloadedMinecraftData = await minecraftRegisterStore.reloadFromMessage(msg).catch(err => {
     console.error('Failed to reload minecraft register data from message:', err);
@@ -264,6 +339,7 @@ async function handleMessageCreate(msg) {
   if (await reloadMinecraftDataFromMessage(msg)) return;
   if (!isAllowedBotOutputChannel(msg)) return;
   if (wasContentProcessed(msg)) return;
+  if (!claimMessageAcrossProcesses(msg)) return;
   rememberProcessedContent(msg);
 
   await baseHandleMessage(msg);

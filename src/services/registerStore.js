@@ -354,6 +354,29 @@ function createRegisterStore() {
     return null;
   }
 
+  async function markSeenByGamertag(gamertagRaw = '') {
+    await ensureReady();
+    const gamertag = String(gamertagRaw || '').replace(/\s+/g, ' ').trim();
+    if (!gamertag) return null;
+
+    const linked = findUserByGamertag(gamertag);
+    if (!linked?.entry) return null;
+
+    const nowIso = new Date().toISOString();
+    const history = Array.isArray(linked.entry.nameHistory) ? linked.entry.nameHistory : [];
+    const nextHistory = [...history];
+    if (!nextHistory.some(name => normalizeGamertagKey(name) === normalizeGamertagKey(gamertag))) {
+      nextHistory.push(gamertag);
+    }
+
+    linked.entry.lastSeenAt = nowIso;
+    linked.entry.lastSeenName = gamertag;
+    linked.entry.updatedAt = nowIso;
+    linked.entry.nameHistory = nextHistory.slice(-10);
+    await persist();
+    return linked;
+  }
+
   function findUserByPersistentId(persistentIdRaw) {
     const persistentId = String(persistentIdRaw || '').trim();
     if (!persistentId) return null;
@@ -421,6 +444,7 @@ function createRegisterStore() {
     updateUser,
     markVerified,
     markSeenByPersistentId,
+    markSeenByGamertag,
     findUserByPersistentId,
     markAnswered,
     removeUser,

@@ -78,7 +78,7 @@ function sortOnlinePlayers(players = []) {
 }
 
 function onlineStatusIcon(player) {
-  if (player?.verified && player?.discordUserId) return '✅';
+  if (player?.discordUserId && (player?.verified || player?.registeredMatch || player?.accessAllowed)) return '✅';
   if (player?.discordUserId) return '🟢';
   return '❌';
 }
@@ -95,7 +95,7 @@ function formatOnlinePlayer(player, index = 0) {
   const pid = player.persistentId ? ` | pid=${player.persistentId.slice(0, 10)}...` : '';
   const status = player.verified
     ? 'verified'
-    : (player.discordUserId ? 'terdaftar' : 'belum register');
+    : (player.discordUserId ? ((player.registeredMatch || player.accessAllowed) ? 'resmi' : 'terdaftar') : 'belum register');
   return `${index + 1}. ${onlineStatusIcon(player)} \`${player.name || player.key || '-'}\` | ${status} | ${discordLine(player)}${wallet}${pid}`;
 }
 
