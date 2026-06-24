@@ -74,7 +74,7 @@ const privateRoleEvents = registerPrivateRoleEvents(client, {
   legacyRoleId: LEGACY_ROLE_ID
 });
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   await submissionStore.init(client).catch(err => {
     console.error('Failed to init submission store:', err);
   });

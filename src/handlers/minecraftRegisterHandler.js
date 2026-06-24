@@ -2,7 +2,8 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  EmbedBuilder
+  EmbedBuilder,
+  PermissionsBitField
 } = require('discord.js');
 const {
   MINECRAFT_REGISTER_ROLE_ID,
@@ -122,8 +123,18 @@ async function setNicknameToGamertag(member, gamertag) {
   if (!member || !gamertag) return false;
   if (member.nickname === gamertag) return true;
   if (member.user?.username === gamertag && !member.nickname) return true;
-  const updated = await member.setNickname(gamertag, 'Minecraft registration gamertag sync');
-  return updated?.nickname === gamertag || member.nickname === gamertag;
+
+  const botMember = member.guild?.members?.me;
+  const canManageNicknames = botMember?.permissions?.has(PermissionsBitField.Flags.ManageNicknames);
+  if (!canManageNicknames || member.manageable === false) return false;
+
+  try {
+    const updated = await member.setNickname(gamertag, 'Minecraft registration gamertag sync');
+    return updated?.nickname === gamertag || member.nickname === gamertag;
+  } catch (err) {
+    if (err?.code === 50013) return false;
+    throw err;
+  }
 }
 
 function getInfoLine(infoChannelId = MINECRAFT_INFO_CHANNEL_ID, infoUrl = MINECRAFT_INFO_URL) {
