@@ -1,4 +1,6 @@
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const { MINECRAFT_CHAT_LOG_CHANNEL_ID } = require('../config');
 
 const JOB_LEASE_MS = 20 * 1000;
@@ -6,6 +8,8 @@ const JOB_TTL_MS = 10 * 60 * 1000;
 const JOB_LIMIT = 100;
 const VERIFY_CODE_TTL_MS = 10 * 60 * 1000;
 const ONLINE_TTL_MS = 90 * 1000;
+const VERIFY_STORE_FILE = process.env.RIZEBOT_VERIFY_STORE_FILE ||
+  path.join(process.cwd(), '.runtime', 'minecraft-verify-codes.json');
 
 function n(value) {
   return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -103,6 +107,77 @@ function createTopupBridgeService({ registerStore, client = null }) {
     lastVerifyAt: null,
   };
 
+  function normalizeVerificationRecord(record = {}) {
+    const code = String(record.code || '').replace(/[^\d]/g, '');
+    const userId = String(record.userId || '');
+    const gamertag = cleanText(record.gamertag, 80);
+    const expiresAt = Math.floor(Number(record.expiresAt) || 0);
+    const createdAt = Math.floor(Number(record.createdAt) || Date.now());
+    if (!code || !userId || !gamertag || !expiresAt) return null;
+    return { code, userId, gamertag, expiresAt, createdAt };
+  }
+
+  function loadVerificationsFromDisk(now = Date.now()) {
+    let raw = '';
+    try {
+      raw = fs.readFileSync(VERIFY_STORE_FILE, 'utf8');
+    } catch (err) {
+      if (err?.code !== 'ENOENT') {
+        console.error('Failed to read Minecraft verification store:', err);
+      }
+      return false;
+    }
+
+    let data = null;
+    try {
+      data = JSON.parse(raw);
+    } catch (err) {
+      console.error('Failed to parse Minecraft verification store:', err);
+      return false;
+    }
+
+    const records = Array.isArray(data?.records) ? data.records : [];
+    let changed = false;
+    for (const rawRecord of records) {
+      const record = normalizeVerificationRecord(rawRecord);
+      if (!record) {
+        changed = true;
+        continue;
+      }
+      if (record.expiresAt <= now) {
+        changed = true;
+        pendingVerifications.delete(record.code);
+        continue;
+      }
+      const existing = pendingVerifications.get(record.code);
+      pendingVerifications.set(record.code, {
+        ...record,
+        message: existing?.message || null,
+      });
+    }
+    return changed;
+  }
+
+  function saveVerificationsToDisk(now = Date.now()) {
+    const records = [...pendingVerifications.values()]
+      .map(normalizeVerificationRecord)
+      .filter(record => record && record.expiresAt > now);
+
+    const payload = JSON.stringify({
+      updatedAt: new Date(now).toISOString(),
+      records,
+    }, null, 2);
+
+    try {
+      fs.mkdirSync(path.dirname(VERIFY_STORE_FILE), { recursive: true });
+      const tmpFile = `${VERIFY_STORE_FILE}.tmp`;
+      fs.writeFileSync(tmpFile, payload);
+      fs.renameSync(tmpFile, VERIFY_STORE_FILE);
+    } catch (err) {
+      console.error('Failed to write Minecraft verification store:', err);
+    }
+  }
+
   function pruneJobs(now = Date.now()) {
     for (const [jobId, record] of jobs.entries()) {
       if (record.status === 'done' && now - record.updatedAt > JOB_TTL_MS) {
@@ -118,9 +193,15 @@ function createTopupBridgeService({ registerStore, client = null }) {
   }
 
   function pruneVerifications(now = Date.now()) {
+    const diskChanged = loadVerificationsFromDisk(now);
+    let changed = diskChanged;
     for (const [code, record] of pendingVerifications.entries()) {
-      if (record.expiresAt <= now) pendingVerifications.delete(code);
+      if (record.expiresAt <= now) {
+        pendingVerifications.delete(code);
+        changed = true;
+      }
     }
+    if (changed) saveVerificationsToDisk(now);
   }
 
   function onlineKey(player) {
@@ -270,7 +351,8 @@ function createTopupBridgeService({ registerStore, client = null }) {
   }
 
   function createVerification({ userId, gamertag, message }) {
-    pruneVerifications();
+    const now = Date.now();
+    pruneVerifications(now);
     const safeUserId = String(userId || '');
     const safeGamertag = cleanText(gamertag, 80);
     if (!safeUserId || !safeGamertag) return null;
@@ -281,15 +363,16 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
     let code = createVerifyCode();
     while (pendingVerifications.has(code)) code = createVerifyCode();
-    const expiresAt = Date.now() + VERIFY_CODE_TTL_MS;
+    const expiresAt = now + VERIFY_CODE_TTL_MS;
     pendingVerifications.set(code, {
       code,
       userId: safeUserId,
       gamertag: safeGamertag,
       message,
       expiresAt,
-      createdAt: Date.now(),
+      createdAt: now,
     });
+    saveVerificationsToDisk(now);
     return {
       code,
       gamertag: safeGamertag,
@@ -450,6 +533,24 @@ function createTopupBridgeService({ registerStore, client = null }) {
     ].join('\n')).catch(() => {});
   }
 
+  async function sendDiscordBroadcastResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    if (!result.ok) {
+      await message.reply({
+        content: `Pesan Discord gagal dikirim ke Minecraft: \`${result.code || 'unknown'}\`.`,
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => {});
+      return;
+    }
+
+    await message.reply({
+      content: `Pesan Discord terkirim ke Minecraft: \`${cleanText(result.text || record.job?.text || '-', 120)}\``,
+      allowedMentions: { parse: [], repliedUser: false },
+    }).catch(() => {});
+  }
+
   async function sendQueryResult(record, result) {
     if (record.job.type === 'wallet') {
       await sendWalletResult(record, result);
@@ -459,6 +560,8 @@ function createTopupBridgeService({ registerStore, client = null }) {
       await sendPlayerInfoResult(record, result);
     } else if (record.job.type === 'ping') {
       await sendPingResult(record, result);
+    } else if (record.job.type === 'discord_broadcast') {
+      await sendDiscordBroadcastResult(record, result);
     }
   }
 
@@ -521,15 +624,29 @@ function createTopupBridgeService({ registerStore, client = null }) {
     pruneVerifications();
     const code = String(event.code || '').replace(/[^\d]/g, '');
     const record = pendingVerifications.get(code);
-    if (!record) return { ok: false, code: 'verify-code-not-found' };
+    if (!record) {
+      return {
+        ok: false,
+        code: 'verify-code-not-found',
+        pendingCount: pendingVerifications.size,
+      };
+    }
     if (record.expiresAt <= Date.now()) {
       pendingVerifications.delete(code);
+      saveVerificationsToDisk();
       return { ok: false, code: 'verify-code-expired' };
     }
 
     const name = cleanText(event.name, 80);
     const persistentId = cleanText(event.persistentId, 160);
-    if (!name || !persistentId) return { ok: false, code: 'invalid-player-identity' };
+    if (!name || !persistentId) {
+      return {
+        ok: false,
+        code: 'invalid-player-identity',
+        hasName: Boolean(name),
+        hasPersistentId: Boolean(persistentId),
+      };
+    }
     if (n(name) !== n(record.gamertag)) {
       return {
         ok: false,
@@ -554,6 +671,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     if (!entry) return { ok: false, code: 'register-entry-not-found' };
 
     pendingVerifications.delete(code);
+    saveVerificationsToDisk();
     await record.message?.reply(
       `Verifikasi Minecraft berhasil: \`${name}\` sekarang linked dan verified.`
     ).catch(() => {});

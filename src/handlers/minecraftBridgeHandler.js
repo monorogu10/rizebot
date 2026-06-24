@@ -1,4 +1,18 @@
-const { TOPUP_ADMIN_DISCORD_ID } = require('../config');
+const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+} = require('discord.js');
+const {
+  MINECRAFT_CHAT_LOG_CHANNEL_ID,
+  TOPUP_ADMIN_DISCORD_ID,
+} = require('../config');
+
+const ONLINE_PAGE_SIZE = 10;
+const ONLINE_BUTTON_PREFIX = 'mconline';
+const ONLINE_COLLECTOR_MS = 2 * 60 * 1000;
+const DISCORD_BROADCAST_MAX_LENGTH = 240;
 
 function isBridgeAdmin(userId) {
   return String(userId || '') === TOPUP_ADMIN_DISCORD_ID;
@@ -10,7 +24,7 @@ function normalizeSpaces(value) {
 
 function parseCommand(content) {
   const raw = normalizeSpaces(content);
-  const match = raw.match(/^!(verifyme|mc-help|mcstatus|mcping|online|srcsrv|geon|player)(?:\s+(.+))?$/i);
+  const match = raw.match(/^!(verifyme|mc-help|mcstatus|mcping|online|srcsrv|geon|player|p)(?:\s+(.+))?$/i);
   if (!match) return null;
   return {
     command: match[1].toLowerCase(),
@@ -37,12 +51,127 @@ function formatNumber(value) {
   return String(number).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
 
+function cleanDiscordBroadcastMessage(value) {
+  return normalizeSpaces(value)
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .slice(0, DISCORD_BROADCAST_MAX_LENGTH)
+    .trim();
+}
+
 function formatOnlinePlayer(player, index = 0) {
   const wallet = player.wallet
     ? ` | Geon=${formatNumber(player.wallet.geon)} | Ether=${formatNumber(player.wallet.ether)}`
     : '';
   const pid = player.persistentId ? ` | pid=${player.persistentId.slice(0, 10)}...` : '';
   return `${index + 1}. \`${player.name || player.key || '-'}\`${wallet}${pid}`;
+}
+
+function paginateItems(items, page, pageSize = ONLINE_PAGE_SIZE) {
+  const totalItems = items.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const safePage = Math.min(Math.max(Number(page) || 1, 1), totalPages);
+  const startIndex = (safePage - 1) * pageSize;
+  return {
+    page: safePage,
+    totalPages,
+    totalItems,
+    startIndex,
+    items: items.slice(startIndex, startIndex + pageSize),
+  };
+}
+
+function buildOnlineButtonId(sourceMessageId, page) {
+  return `${ONLINE_BUTTON_PREFIX}:${sourceMessageId}:${page}`;
+}
+
+function parseOnlineButtonId(customId, sourceMessageId) {
+  const raw = String(customId || '');
+  const prefix = `${ONLINE_BUTTON_PREFIX}:${sourceMessageId}:`;
+  if (!raw.startsWith(prefix)) return null;
+  const page = Number.parseInt(raw.slice(prefix.length), 10);
+  if (!Number.isFinite(page) || page < 1) return null;
+  return { page };
+}
+
+function buildOnlineButtons(sourceMessageId, page, totalPages, disabled = false) {
+  const prevPage = Math.max(1, page - 1);
+  const nextPage = Math.min(totalPages, page + 1);
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(buildOnlineButtonId(sourceMessageId, prevPage))
+      .setLabel('Sebelumnya')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled || page <= 1),
+    new ButtonBuilder()
+      .setCustomId(buildOnlineButtonId(sourceMessageId, nextPage))
+      .setLabel('Berikutnya')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(disabled || page >= totalPages)
+  );
+}
+
+function buildOnlineEmbed(onlinePlayers, pagination, createdAt = new Date()) {
+  const lines = pagination.items.map((player, idx) => (
+    formatOnlinePlayer(player, pagination.startIndex + idx)
+  ));
+
+  const embed = new EmbedBuilder()
+    .setColor(0x2f80ed)
+    .setTitle(`Player Online: ${formatNumber(pagination.totalItems)}`)
+    .setDescription(lines.length ? lines.join('\n') : 'Tidak ada player online yang tercatat bridge.')
+    .setFooter({
+      text: `Halaman ${pagination.page}/${pagination.totalPages} | Snapshot bridge`
+    })
+    .setTimestamp(createdAt);
+
+  return embed;
+}
+
+function buildOnlineResponse(onlinePlayers, sourceMessageId, page, options = {}) {
+  const pagination = paginateItems(onlinePlayers, page);
+  const components = pagination.totalPages > 1
+    ? [buildOnlineButtons(sourceMessageId, pagination.page, pagination.totalPages, options.disabled)]
+    : [];
+  return noPing({
+    embeds: [buildOnlineEmbed(onlinePlayers, pagination, options.createdAt)],
+    components,
+  });
+}
+
+async function sendOnlinePagination(msg, onlinePlayers) {
+  const createdAt = new Date();
+  const sourceMessageId = msg.id;
+  let currentPage = 1;
+  const reply = await replyNoPing(msg, buildOnlineResponse(onlinePlayers, sourceMessageId, 1, { createdAt }));
+  if (!reply?.createMessageComponentCollector) return;
+
+  const collector = reply.createMessageComponentCollector({
+    time: ONLINE_COLLECTOR_MS,
+    filter: interaction => Boolean(parseOnlineButtonId(interaction.customId, sourceMessageId)),
+  });
+
+  collector.on('collect', async interaction => {
+    if (String(interaction.user?.id || '') !== String(msg.author?.id || '')) {
+      await interaction.reply({
+        content: 'Pagination ini hanya untuk admin yang menjalankan `!online`.',
+        ephemeral: true,
+      }).catch(() => {});
+      return;
+    }
+
+    const parsed = parseOnlineButtonId(interaction.customId, sourceMessageId);
+    if (!parsed) return;
+    currentPage = parsed.page;
+    await interaction.update(
+      buildOnlineResponse(onlinePlayers, sourceMessageId, parsed.page, { createdAt })
+    ).catch(() => {});
+  });
+
+  collector.on('end', async () => {
+    await reply.edit(
+      buildOnlineResponse(onlinePlayers, sourceMessageId, currentPage, { createdAt, disabled: true })
+    ).catch(() => {});
+  });
 }
 
 function helpText() {
@@ -55,6 +184,7 @@ function helpText() {
     '`!srcsrv <nama>` - admin: cari player dari data server Minecraft',
     '`!geon <nama>` - admin: cek saldo Geon/Ether player',
     '`!player <nama>` - admin: detail player dari server',
+    '`!p <pesan>` - admin: kirim pesan Discord ke chat Minecraft',
   ].join('\n');
 }
 
@@ -137,12 +267,30 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
       return true;
     }
 
+    if (parsed.command === 'p') {
+      if (String(msg.channelId || msg.channel?.id || '') !== MINECRAFT_CHAT_LOG_CHANNEL_ID) {
+        await replyNoPing(msg, `Command \`!p\` hanya dipakai di channel chat log Minecraft: <#${MINECRAFT_CHAT_LOG_CHANNEL_ID}>.`);
+        return true;
+      }
+
+      const text = cleanDiscordBroadcastMessage(parsed.args);
+      if (!text) {
+        await replyNoPing(msg, 'Format: `!p <pesan chat>`');
+        return true;
+      }
+
+      const job = bridge.enqueueBridgeQuery('discord_broadcast', {
+        text,
+        requestedBy: msg.author.id,
+        requestedByTag: msg.author?.tag || msg.author?.username || '',
+      }, { message: msg });
+      await replyNoPing(msg, `Pesan Discord masuk antrean Minecraft. Job: \`${job.id}\``);
+      return true;
+    }
+
     if (parsed.command === 'online') {
       const online = bridge.getOnlinePlayers();
-      const lines = online.length
-        ? online.slice(0, 30).map(formatOnlinePlayer).join('\n')
-        : 'Tidak ada player online yang tercatat bridge.';
-      await replyNoPing(msg, `Player online: ${online.length}\n${lines}`);
+      await sendOnlinePagination(msg, online);
       return true;
     }
 
