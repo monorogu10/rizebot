@@ -30,6 +30,38 @@ const ALLOWED_HOSTS = new Set([
   ...ALLOWED_GIF_HOSTS,
   // Add any other whitelisted domains here
 ]);
+const blockedLinkMessages = new Map();
+const BLOCK_DEDUPE_TTL_MS = 5 * 60 * 1000;
+const BLOCK_DEDUPE_MAX = 1000;
+
+function pruneBlockedLinkMessages(now = Date.now()) {
+  for (const [messageId, entry] of blockedLinkMessages) {
+    if (now - entry.at <= BLOCK_DEDUPE_TTL_MS) continue;
+    blockedLinkMessages.delete(messageId);
+  }
+
+  while (blockedLinkMessages.size > BLOCK_DEDUPE_MAX) {
+    const oldest = blockedLinkMessages.keys().next().value;
+    if (!oldest) break;
+    blockedLinkMessages.delete(oldest);
+  }
+}
+
+function wasBlockedRecently(msg, text) {
+  if (!msg?.id) return false;
+  pruneBlockedLinkMessages();
+  const entry = blockedLinkMessages.get(msg.id);
+  return Boolean(entry && entry.text === text);
+}
+
+function rememberBlockedLinkMessage(msg, text) {
+  if (!msg?.id) return;
+  blockedLinkMessages.set(msg.id, {
+    text,
+    at: Date.now()
+  });
+  pruneBlockedLinkMessages();
+}
 
 function normalizeHost(hostname = '') {
   const lower = hostname.toLowerCase();
@@ -98,11 +130,13 @@ async function maybeBlockLink(msg) {
     if (isAdmin(msg.member)) return false;
 
     const text = msg.content || '';
+    if (wasBlockedRecently(msg, text)) return true;
 
     // ── 1. Discord invite links (top priority – always blocked) ──
     // Reset lastIndex for global regex
     DISCORD_INVITE_REGEX.lastIndex = 0;
     if (containsDiscordInvite(text)) {
+      rememberBlockedLinkMessage(msg, text);
       await msg.delete().catch(() => {});
       const warn = await msg.channel
         .send(`${msg.author}, dilarang mengirim link invite Discord di server ini.`)
@@ -115,6 +149,7 @@ async function maybeBlockLink(msg) {
     if (LINK_REGEX.test(text)) {
       if (isGifOnlyMessage(msg)) return false;
 
+      rememberBlockedLinkMessage(msg, text);
       await msg.delete().catch(() => {});
       const warn = await msg.channel
         .send(`${msg.author}, dilarang mengirim link di server ini.`)
@@ -126,6 +161,7 @@ async function maybeBlockLink(msg) {
     // ── 3. Bare-domain links (no protocol) ───────────────────────
     const bareLinks = findBareLinks(text);
     if (bareLinks.length > 0) {
+      rememberBlockedLinkMessage(msg, text);
       await msg.delete().catch(() => {});
       const warn = await msg.channel
         .send(`${msg.author}, dilarang mengirim link di server ini.`)

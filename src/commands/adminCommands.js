@@ -1,6 +1,5 @@
 const { isAdmin } = require('../utils/permissions');
 const { formatCurrency } = require('../utils/format');
-const { COMMAND_CHANNELS } = require('../config');
 
 function formatTotals(userId, entry) {
   return `<@${userId}> | model: ${entry.models}, reward: Rp${formatCurrency(entry.reward)}`;
@@ -19,13 +18,7 @@ async function handleAdminCommands(msg, leaderboardStore) {
   const content = (msg.content || '').trim();
   const mentionedUser = msg.mentions.users.first();
 
-  const inCommandChannel = COMMAND_CHANNELS.has(String(msg.channelId));
-
   if (/^ok\b/i.test(content)) {
-    if (!inCommandChannel) {
-      await msg.reply('Command hanya bisa dipakai di channel yang ditentukan.');
-      return true;
-    }
     if (!mentionedUser) {
       await msg.reply('Format: `ok @user`');
       return true;
@@ -39,10 +32,6 @@ async function handleAdminCommands(msg, leaderboardStore) {
   }
 
   if (/^nice\b/i.test(content)) {
-    if (!inCommandChannel) {
-      await msg.reply('Command hanya bisa dipakai di channel yang ditentukan.');
-      return true;
-    }
     if (!mentionedUser) {
       await msg.reply('Format: `nice @user`');
       return true;
@@ -56,10 +45,6 @@ async function handleAdminCommands(msg, leaderboardStore) {
   }
 
   if (/^!reset-data\b/i.test(content)) {
-    if (!inCommandChannel) {
-      await msg.reply('Command hanya bisa dipakai di channel yang ditentukan.');
-      return true;
-    }
     await leaderboardStore.resetAll();
     await msg.reply('Semua data leaderboard direset dan dihapus dari status.');
     return true;
@@ -67,10 +52,6 @@ async function handleAdminCommands(msg, leaderboardStore) {
 
   const bonusValue = parseValue(content, '!bonus');
   if (bonusValue !== null) {
-    if (!inCommandChannel) {
-      await msg.reply('Command hanya bisa dipakai di channel yang ditentukan.');
-      return true;
-    }
     if (bonusValue <= 0) {
       await msg.reply('Nilai bonus harus lebih besar dari 0.');
       return true;
@@ -89,10 +70,6 @@ async function handleAdminCommands(msg, leaderboardStore) {
 
   const minModelValue = parseValue(content, '!min-model');
   if (minModelValue !== null) {
-    if (!inCommandChannel) {
-      await msg.reply('Command hanya bisa dipakai di channel yang ditentukan.');
-      return true;
-    }
     if (minModelValue <= 0) {
       await msg.reply('Nilai pengurangan model harus lebih besar dari 0.');
       return true;
@@ -111,10 +88,6 @@ async function handleAdminCommands(msg, leaderboardStore) {
 
   const minRewardValue = parseValue(content, '!min-reward');
   if (minRewardValue !== null) {
-    if (!inCommandChannel) {
-      await msg.reply('Command hanya bisa dipakai di channel yang ditentukan.');
-      return true;
-    }
     if (minRewardValue <= 0) {
       await msg.reply('Nilai pengurangan reward harus lebih besar dari 0.');
       return true;

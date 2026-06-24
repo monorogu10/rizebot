@@ -3,6 +3,7 @@ const {
   PRIVATE_CHAT_CHANNEL_ID,
   REGISTRATION_INBOX_CHANNEL_ID
 } = require('../config');
+const { isAdmin } = require('../utils/permissions');
 
 function isTargetChannelOrThread(msg, targetChannelId) {
   if (!targetChannelId) return true;
@@ -52,12 +53,12 @@ async function handleRegisterCommand(msg, options) {
   if (!/^!daftar\b/i.test(content) && !/^!register\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  if (!ensureRegChannel(msg, registrationChannelId)) {
+  const member = await resolveMember(msg);
+  if (!ensureRegChannel(msg, registrationChannelId) && !isAdmin(member)) {
     await msg.reply(`Gunakan command ini di <#${registrationChannelId}>.`).catch(() => null);
     return true;
   }
 
-  const member = await resolveMember(msg);
   if (!member) {
     await msg.reply('Gagal membaca data member kamu, coba lagi.').catch(() => null);
     return true;

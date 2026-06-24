@@ -1,19 +1,118 @@
 const { KEYWORD_LINKS } = require('../config');
 
-const repliedKeywordMsgIds = new Set();
+const repliedKeywordMessages = new Map();
 const MEMBER_COMMAND = '!member';
+const REPLY_DEDUPE_TTL_MS = 5 * 60 * 1000;
+const REPLY_DEDUPE_MAX = 1000;
+const CLAIM_LAND_TUTORIAL_URL = 'https://www.youtube.com/shorts/DkJUHpTXktg';
+const MAGIC_TOOL_TUTORIAL_URL = 'https://www.youtube.com/shorts/wHzqhw7TdQ0';
+const HOW_TO_WORDS = new Set([
+  'cara',
+  'gimana',
+  'gmn',
+  'bagaimana',
+  'tutorial',
+  'tutor',
+  'pake',
+  'pakai',
+  'make',
+  'menggunakan',
+  'gunakan',
+  'guna',
+  'use',
+  'how'
+]);
+
+function pruneRepliedKeywordMessages(now = Date.now()) {
+  for (const [messageId, entry] of repliedKeywordMessages) {
+    if (now - entry.at <= REPLY_DEDUPE_TTL_MS) continue;
+    repliedKeywordMessages.delete(messageId);
+  }
+
+  while (repliedKeywordMessages.size > REPLY_DEDUPE_MAX) {
+    const oldest = repliedKeywordMessages.keys().next().value;
+    if (!oldest) break;
+    repliedKeywordMessages.delete(oldest);
+  }
+}
+
+function hasRepliedKeyword(msg, text) {
+  if (!msg?.id) return false;
+  pruneRepliedKeywordMessages();
+  const entry = repliedKeywordMessages.get(msg.id);
+  return Boolean(entry && entry.text === text);
+}
+
+function rememberKeywordReply(msg, text) {
+  if (!msg?.id) return;
+  repliedKeywordMessages.set(msg.id, {
+    text,
+    at: Date.now()
+  });
+  pruneRepliedKeywordMessages();
+}
+
+function tokenize(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function hasAnyToken(tokens, values) {
+  return values.some(value => tokens.includes(value));
+}
+
+function hasHowToIntent(tokens) {
+  return tokens.some(token => HOW_TO_WORDS.has(token));
+}
+
+function findTutorialReply(text) {
+  const tokens = tokenize(text);
+  const compact = tokens.join('');
+
+  const mentionsClaim = hasAnyToken(tokens, ['claim', 'klaim']);
+  const mentionsLand = hasAnyToken(tokens, ['land', 'tanah']);
+  if (mentionsClaim && mentionsLand) {
+    return {
+      name: 'claim land',
+      url: CLAIM_LAND_TUTORIAL_URL
+    };
+  }
+
+  const mentionsMagicTool = tokens.includes('mt') ||
+    compact.includes('magictool') ||
+    (tokens.includes('magic') && tokens.includes('tool'));
+  if (mentionsMagicTool && hasHowToIntent(tokens)) {
+    return {
+      name: 'Magic Tool',
+      url: MAGIC_TOOL_TUTORIAL_URL
+    };
+  }
+
+  return null;
+}
 
 async function maybeReplyKeyword(msg) {
   try {
     if (!msg.guild || msg.author?.bot) return false;
 
     const text = (msg.content || '').trim().toLowerCase();
-    if (repliedKeywordMsgIds.has(msg.id)) return false;
+    if (hasRepliedKeyword(msg, text)) return false;
 
     if (text === MEMBER_COMMAND) {
-      repliedKeywordMsgIds.add(msg.id);
+      rememberKeywordReply(msg, text);
       const total = Number(msg.guild?.memberCount) || 0;
       await msg.reply(`Total member saat ini: ${total}`).catch(() => null);
+      return true;
+    }
+
+    const tutorial = findTutorialReply(text);
+    if (tutorial) {
+      rememberKeywordReply(msg, text);
+      await msg.reply(`Tonton tutorial ${tutorial.name} ini dulu ya: ${tutorial.url}`).catch(() => null);
       return true;
     }
 
@@ -21,7 +120,7 @@ async function maybeReplyKeyword(msg) {
     if (!Object.prototype.hasOwnProperty.call(KEYWORD_LINKS, normalized)) return false;
     const link = KEYWORD_LINKS[normalized];
 
-    repliedKeywordMsgIds.add(msg.id);
+    rememberKeywordReply(msg, text);
     await msg.reply(`Silakan cek: ${link}`).catch(() => null);
     return true;
   } catch (err) {

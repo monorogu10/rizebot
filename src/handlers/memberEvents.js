@@ -1,8 +1,10 @@
 const { EmbedBuilder } = require('discord.js');
 const { WELCOME_CHANNEL_ID, LEAVE_CHANNEL_ID } = require('../config');
+const { isAllowedBotOutputChannel } = require('../utils/channelPolicy');
 
 async function sendEmbed(client, channelId, embed) {
   if (!channelId) return;
+  if (!isAllowedBotOutputChannel({ channelId })) return;
   const channel = await client.channels.fetch(channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
   await channel.send({ embeds: [embed] }).catch(() => null);

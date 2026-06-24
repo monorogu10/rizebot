@@ -22,6 +22,7 @@ const { createSubmissionStore } = require('./src/services/submissionStore');
 const { createRegisterStore } = require('./src/services/registerStore');
 const { createModerationStore } = require('./src/services/moderationStore');
 const { REGISTER_ROLE_ID, LEGACY_ROLE_ID, MINECRAFT_REGISTER_ROLE_ID } = require('./src/config');
+const { isAllowedBotOutputChannel } = require('./src/utils/channelPolicy');
 
 const client = new Client({
   intents: [
@@ -93,7 +94,7 @@ client.once('ready', async () => {
   )
     .then(stats => {
       console.log(
-        `Minecraft role sync selesai. scanned=${stats.scanned}, synced=${stats.synced}, failed=${stats.failed}, skipped=${stats.skipped}`
+        `Minecraft role sync selesai. scanned=${stats.scanned}, synced=${stats.synced}, failed=${stats.failed}, skipped=${stats.skipped}, duplicateEntriesRemoved=${stats.duplicateEntriesRemoved || 0}, duplicateRolesRemoved=${stats.duplicateRolesRemoved || 0}, duplicateRoleRemoveFailed=${stats.duplicateRoleRemoveFailed || 0}`
       );
     })
     .catch(err => {
@@ -105,23 +106,82 @@ client.once('ready', async () => {
   console.log(`バ. Bot ready as ${client.user.tag}`);
 });
 
-async function handleMessage(msg) {
+const processedMessageContent = new Map();
+const PROCESSED_MESSAGE_TTL_MS = 5 * 60 * 1000;
+const PROCESSED_MESSAGE_MAX = 1000;
+
+function pruneProcessedMessages(now = Date.now()) {
+  for (const [messageId, entry] of processedMessageContent) {
+    if (now - entry.at <= PROCESSED_MESSAGE_TTL_MS) continue;
+    processedMessageContent.delete(messageId);
+  }
+
+  while (processedMessageContent.size > PROCESSED_MESSAGE_MAX) {
+    const oldest = processedMessageContent.keys().next().value;
+    if (!oldest) break;
+    processedMessageContent.delete(oldest);
+  }
+}
+
+function getMessageContent(msg) {
+  return String(msg?.content || '');
+}
+
+function wasContentProcessed(msg) {
+  if (!msg?.id) return false;
+  pruneProcessedMessages();
+  const entry = processedMessageContent.get(msg.id);
+  return Boolean(entry && entry.content === getMessageContent(msg));
+}
+
+function rememberProcessedContent(msg) {
+  if (!msg?.id) return;
+  processedMessageContent.set(msg.id, {
+    content: getMessageContent(msg),
+    at: Date.now()
+  });
+  pruneProcessedMessages();
+}
+
+async function reloadMinecraftDataFromMessage(msg) {
   const reloadedMinecraftData = await minecraftRegisterStore.reloadFromMessage(msg).catch(err => {
     console.error('Failed to reload minecraft register data from message:', err);
     return false;
   });
-  if (reloadedMinecraftData) return;
-  await baseHandleMessage(msg);
+  return reloadedMinecraftData;
 }
 
-client.on('messageCreate', handleMessage);
-client.on('messageUpdate', async (_old, n) => {
-  if (n?.partial) {
-    try { await n.fetch(); } catch { /* ignore */ }
+async function handleMessageCreate(msg) {
+  if (await reloadMinecraftDataFromMessage(msg)) return;
+  if (!isAllowedBotOutputChannel(msg)) return;
+
+  await baseHandleMessage(msg);
+  rememberProcessedContent(msg);
+}
+
+async function handleMessageUpdate(oldMsg, newMsg) {
+  let msg = newMsg;
+  if (msg?.partial) {
+    msg = await msg.fetch().catch(() => null);
   }
-  await handleMessage(n);
-});
+  if (!msg) return;
+
+  if (await reloadMinecraftDataFromMessage(msg)) return;
+  if (!isAllowedBotOutputChannel(msg)) return;
+  if (wasContentProcessed(msg)) return;
+
+  const oldContent = oldMsg?.partial ? null : getMessageContent(oldMsg);
+  const newContent = getMessageContent(msg);
+  if (oldContent !== null && oldContent === newContent) return;
+
+  await maybeBlockLink(msg);
+  rememberProcessedContent(msg);
+}
+
+client.on('messageCreate', handleMessageCreate);
+client.on('messageUpdate', handleMessageUpdate);
 client.on('interactionCreate', async interaction => {
+  if (!isAllowedBotOutputChannel(interaction)) return;
   const handledMinecraft = await minecraftRegisterInteractionHandler(interaction);
   if (handledMinecraft) return;
 });

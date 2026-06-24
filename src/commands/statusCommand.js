@@ -1,5 +1,6 @@
 const { formatCurrency, formatStatsLine } = require('../utils/format');
 const { COMMAND_CHANNELS } = require('../config');
+const { isAdmin } = require('../utils/permissions');
 
 function sortByReward(entries) {
   return [...entries].sort((a, b) => {
@@ -11,7 +12,7 @@ function sortByReward(entries) {
 async function handleStatusCommand(msg, leaderboardStore) {
   if ((msg.content || '').trim().toLowerCase() !== '!status') return false;
 
-  if (!COMMAND_CHANNELS.has(String(msg.channelId))) {
+  if (!isAdmin(msg.member) && !COMMAND_CHANNELS.has(String(msg.channelId))) {
     await msg.reply('Command hanya bisa dipakai di channel yang ditentukan.');
     return true;
   }

@@ -9,6 +9,7 @@ const {
   PETITION_WINDOW_MS,
   TIMEOUT_DURATION_MS
 } = require('../config');
+const { isAllowedBotOutputChannel } = require('../utils/channelPolicy');
 
 const petitionTimers = new Map();
 
@@ -48,8 +49,9 @@ function formatPetitionText(petition, voteCount, minVotes, voteEmoji) {
   ].join('\n');
 }
 
-async function updatePetitionMessage(client, petition, text) {
+async function updatePetitionMessage(client, petition, text, options = {}) {
   if (!client || !petition) return;
+  if (!options.bypassChannel && !isAllowedBotOutputChannel({ channelId: petition.channelId })) return;
   const channel = await client.channels.fetch(petition.channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
   const message = await channel.messages.fetch(petition.messageId).catch(() => null);
@@ -120,7 +122,7 @@ async function handleTimeoutCommand(msg, options) {
   if (!msg.guild) return false;
 
   const member = await resolveMember(msg);
-  if (!member || !member.roles.cache.has(privateRoleId)) {
+  if (!member || (!isAdmin(member) && !member.roles.cache.has(privateRoleId))) {
     await msg.reply('Command ini hanya untuk member private.').catch(() => null);
     return true;
   }
@@ -192,7 +194,7 @@ async function handleFreedomCommand(msg, options) {
     });
     petitionTimers.delete(petition.petitionId);
     const text = `Petisi timeout untuk <@${petition.targetId}> dibatalkan admin.`;
-    await updatePetitionMessage(msg.client, petition, text);
+    await updatePetitionMessage(msg.client, petition, text, { bypassChannel: true });
   }
 
   const removed = await removeTimeout(msg.guild, target.id, 'Freedom by admin');
@@ -234,14 +236,16 @@ async function handlePetitionVote(reaction, user, options) {
   }
 
   const voterMember = await message.guild.members.fetch(user.id).catch(() => null);
-  if (!voterMember || !voterMember.roles.cache.has(privateRoleId)) return false;
+  const voterIsAdmin = isAdmin(voterMember);
+  if (!isAllowedBotOutputChannel(message) && !voterIsAdmin) return false;
+  if (!voterMember || (!voterIsAdmin && !voterMember.roles.cache.has(privateRoleId))) return false;
 
   const { added, petition: updatedPetition } = await moderationStore.addVote(petition.petitionId, user.id);
   if (!added || !updatedPetition) return true;
 
   const voteCount = updatedPetition.votes.length;
   const text = formatPetitionText(updatedPetition, voteCount, petitionMinVotes, petitionVoteEmoji);
-  await updatePetitionMessage(message.client, updatedPetition, text);
+  await updatePetitionMessage(message.client, updatedPetition, text, { bypassChannel: voterIsAdmin });
 
   if (voteCount < petitionMinVotes) return true;
 
@@ -258,7 +262,7 @@ async function handlePetitionVote(reaction, user, options) {
     });
     petitionTimers.delete(updatedPetition.petitionId);
     const successText = `Petisi disetujui. <@${updatedPetition.targetId}> timeout 1 hari.`;
-    await updatePetitionMessage(message.client, updatedPetition, successText);
+    await updatePetitionMessage(message.client, updatedPetition, successText, { bypassChannel: voterIsAdmin });
   }
 
   return true;
@@ -275,14 +279,19 @@ async function handleTrashReaction(reaction, user, options) {
 
   const message = resolved.message;
   if (!message?.guild) return false;
-  if (privateChatChannelId && String(message.channelId) !== String(privateChatChannelId)) return false;
   if (message.author?.bot) return false;
+
+  const voterMember = await message.guild.members.fetch(user.id).catch(() => null);
+  const voterIsAdmin = isAdmin(voterMember);
+  if (!isAllowedBotOutputChannel(message) && !voterIsAdmin) return false;
+  if (privateChatChannelId && String(message.channelId) !== String(privateChatChannelId) && !voterIsAdmin) {
+    return false;
+  }
 
   const authorMember = await message.guild.members.fetch(message.author.id).catch(() => null);
   if (authorMember && isAdmin(authorMember)) return false;
 
-  const voterMember = await message.guild.members.fetch(user.id).catch(() => null);
-  if (!voterMember || !voterMember.roles.cache.has(privateRoleId)) return false;
+  if (!voterMember || (!voterIsAdmin && !voterMember.roles.cache.has(privateRoleId))) return false;
 
   if ((resolved.count || 0) < trashMinCount) return true;
 

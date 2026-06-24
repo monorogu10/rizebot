@@ -29,6 +29,15 @@ function normalizeUsers(users = {}) {
   return normalized;
 }
 
+function normalizeGamertagKey(gamertag) {
+  return String(gamertag || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function getRegisteredAtMs(entry) {
+  const timestamp = new Date(entry?.registeredAt || '').getTime();
+  return Number.isFinite(timestamp) ? timestamp : Number.MAX_SAFE_INTEGER;
+}
+
 function normalizeOrder(order, users) {
   const seen = new Set();
   const result = [];
@@ -47,6 +56,44 @@ function normalizeOrder(order, users) {
   return result;
 }
 
+function removeDuplicateGamertags(users, order) {
+  const keepByGamertag = new Map();
+  const removedUserIds = [];
+
+  for (const userId of order) {
+    const entry = users[userId];
+    if (!entry) continue;
+
+    const key = normalizeGamertagKey(entry.gamertag);
+    if (!key) continue;
+
+    const current = keepByGamertag.get(key);
+    if (!current) {
+      keepByGamertag.set(key, userId);
+      continue;
+    }
+
+    const currentEntry = users[current];
+    const entryTime = getRegisteredAtMs(entry);
+    const currentTime = getRegisteredAtMs(currentEntry);
+
+    if (entryTime < currentTime) {
+      removedUserIds.push(current);
+      delete users[current];
+      keepByGamertag.set(key, userId);
+    } else {
+      removedUserIds.push(userId);
+      delete users[userId];
+    }
+  }
+
+  return {
+    users,
+    order: order.filter(userId => users[userId]),
+    removedUserIds
+  };
+}
+
 function createRegisterStore() {
   const saveChannelStore = createEditableJsonMessageStore({
     channelId: SAVE_CHANNEL_ID,
@@ -54,6 +101,8 @@ function createRegisterStore() {
   });
 
   const state = { users: {}, order: [] };
+  const lastCleanup = { removedDuplicateUserIds: [] };
+  let lastLoadRemovedDuplicateCount = 0;
   let clientRef = null;
   let initPromise = null;
 
@@ -75,7 +124,10 @@ function createRegisterStore() {
     clientRef = client;
     initPromise = (async () => {
       const loaded = await saveChannelStore.load(clientRef);
-      applyLoadedData(loaded);
+      const applied = applyLoadedData(loaded);
+      if (applied && lastLoadRemovedDuplicateCount > 0) {
+        await persist();
+      }
     })();
     return initPromise;
   }
@@ -109,11 +161,53 @@ function createRegisterStore() {
     return state.order.length;
   }
 
+  function findUserByGamertag(gamertag, exceptUserId = null) {
+    const key = normalizeGamertagKey(gamertag);
+    if (!key) return null;
+    const exceptId = exceptUserId ? String(exceptUserId) : null;
+
+    for (const userId of state.order) {
+      if (exceptId && userId === exceptId) continue;
+      const entry = state.users[userId];
+      if (!entry) continue;
+      if (normalizeGamertagKey(entry.gamertag) === key) {
+        return {
+          userId,
+          entry
+        };
+      }
+    }
+
+    return null;
+  }
+
+  function getLastCleanup() {
+    return {
+      removedDuplicateUserIds: [...lastCleanup.removedDuplicateUserIds]
+    };
+  }
+
+  function clearLastCleanup() {
+    lastCleanup.removedDuplicateUserIds = [];
+  }
+
   function applyLoadedData(loaded) {
+    lastLoadRemovedDuplicateCount = 0;
     if (!loaded?.users) return false;
     const users = normalizeUsers(loaded.users);
-    state.users = users;
-    state.order = normalizeOrder(loaded.order, users);
+    const order = normalizeOrder(loaded.order, users);
+    const deduped = removeDuplicateGamertags(users, order);
+
+    state.users = deduped.users;
+    state.order = deduped.order;
+    lastLoadRemovedDuplicateCount = deduped.removedUserIds.length;
+    if (deduped.removedUserIds.length) {
+      const pending = new Set(lastCleanup.removedDuplicateUserIds);
+      for (const userId of deduped.removedUserIds) {
+        pending.add(userId);
+      }
+      lastCleanup.removedDuplicateUserIds = [...pending];
+    }
     return true;
   }
 
@@ -121,6 +215,15 @@ function createRegisterStore() {
     await ensureReady();
     if (state.users[userId]) {
       return { created: false, entry: state.users[userId] };
+    }
+    const duplicate = findUserByGamertag(gamertag);
+    if (duplicate) {
+      return {
+        created: false,
+        duplicate: true,
+        duplicateUserId: duplicate.userId,
+        entry: duplicate.entry
+      };
     }
     const nowIso = new Date().toISOString();
     const entry = {
@@ -140,6 +243,14 @@ function createRegisterStore() {
   async function updateUser(userId, gamertag, username = '') {
     await ensureReady();
     if (!state.users[userId]) return null;
+    const duplicate = findUserByGamertag(gamertag, userId);
+    if (duplicate) {
+      return {
+        duplicate: true,
+        duplicateUserId: duplicate.userId,
+        entry: duplicate.entry
+      };
+    }
     state.users[userId].gamertag = gamertag;
     state.users[userId].username = username || state.users[userId].username || '';
     state.users[userId].updatedAt = new Date().toISOString();
@@ -176,7 +287,11 @@ function createRegisterStore() {
     if (!saveChannelStore.isDataMessage(message)) return false;
     await ensureReady();
     const loaded = await saveChannelStore.loadFromMessage(message);
-    return applyLoadedData(loaded);
+    const applied = applyLoadedData(loaded);
+    if (applied && lastLoadRemovedDuplicateCount > 0) {
+      await persist();
+    }
+    return applied;
   }
 
   function isStorageMessage(message) {
@@ -188,6 +303,9 @@ function createRegisterStore() {
     getUser,
     getEntries,
     getTotal,
+    findUserByGamertag,
+    getLastCleanup,
+    clearLastCleanup,
     registerUser,
     updateUser,
     markAnswered,
