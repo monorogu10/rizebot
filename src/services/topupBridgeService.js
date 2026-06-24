@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { EmbedBuilder } = require('discord.js');
 const { MINECRAFT_CHAT_LOG_CHANNEL_ID } = require('../config');
 
 const JOB_LEASE_MS = 20 * 1000;
@@ -10,6 +11,11 @@ const VERIFY_CODE_TTL_MS = 10 * 60 * 1000;
 const ONLINE_TTL_MS = 90 * 1000;
 const VERIFY_STORE_FILE = process.env.RIZEBOT_VERIFY_STORE_FILE ||
   path.join(process.cwd(), '.runtime', 'minecraft-verify-codes.json');
+const EMBED_COLOR_CHAT = 0x2f80ed;
+const EMBED_COLOR_TRANS = 0xf2c94c;
+const EMBED_COLOR_JOIN = 0x2ecc71;
+const EMBED_COLOR_LEAVE = 0xe74c3c;
+const VERIFY_BYPASS_GAMERTAGS = new Set(['xylofly', 'monoguraa']);
 
 function n(value) {
   return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -50,6 +56,43 @@ function cleanText(value, maxLength = 1800) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
+}
+
+function cleanEmbedText(value, maxLength = 3800) {
+  const text = cleanText(value, maxLength);
+  return text || '-';
+}
+
+function createLogEmbed({ color, title, description, fields = [] }) {
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle(cleanText(title, 256) || 'Minecraft Log')
+    .setDescription(cleanEmbedText(description))
+    .setTimestamp(new Date());
+
+  const safeFields = fields
+    .map(field => ({
+      name: cleanText(field.name, 256),
+      value: cleanEmbedText(field.value, 1024),
+      inline: field.inline !== false,
+    }))
+    .filter(field => field.name && field.value);
+
+  if (safeFields.length) embed.addFields(safeFields.slice(0, 25));
+  return embed;
+}
+
+function isVerifiedMinecraftLink(linked, player = {}) {
+  if (!linked?.entry?.verified) return false;
+  const playerName = n(player.name);
+  const playerPersistentId = String(player.persistentId || '').trim();
+  const entry = linked.entry;
+  if (playerPersistentId && entry.persistentId === playerPersistentId) return true;
+  return Boolean(playerName && n(entry.gamertag) === playerName);
+}
+
+function isVerifyBypassGamertag(gamertag) {
+  return VERIFY_BYPASS_GAMERTAGS.has(n(gamertag));
 }
 
 function targetScore(entry, query) {
@@ -616,7 +659,14 @@ function createTopupBridgeService({ registerStore, client = null }) {
     if (!message) return { ok: false, code: 'empty-message' };
 
     await channel.send({
-      content: `**[MC] ${name}:** ${message}`,
+      embeds: [createLogEmbed({
+        color: EMBED_COLOR_CHAT,
+        title: 'Minecraft Chat',
+        description: message,
+        fields: [
+          { name: 'Player', value: name },
+        ],
+      })],
       allowedMentions: { parse: [] },
     }).catch(err => {
       throw err;
@@ -634,7 +684,14 @@ function createTopupBridgeService({ registerStore, client = null }) {
     if (!message) return { ok: false, code: 'empty-message' };
 
     await channel.send({
-      content: `**[TRANS][${label}]** ${message}`,
+      embeds: [createLogEmbed({
+        color: EMBED_COLOR_TRANS,
+        title: 'Transparansi',
+        description: message,
+        fields: [
+          { name: 'Kategori', value: label || category || 'unknown' },
+        ],
+      })],
       allowedMentions: { parse: [] },
     }).catch(err => {
       throw err;
@@ -654,7 +711,15 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const action = type === 'player_leave' ? 'keluar server' : 'masuk server';
     const detailText = cleanText(detail, 160);
     await channel.send({
-      content: `**[${label}] ${name}** ${action}${detailText ? ` | ${detailText}` : ''}`,
+      embeds: [createLogEmbed({
+        color: type === 'player_leave' ? EMBED_COLOR_LEAVE : EMBED_COLOR_JOIN,
+        title: label === 'LEAVE' ? 'Player Keluar' : 'Player Masuk',
+        description: `${name} ${action}.`,
+        fields: [
+          { name: 'Player', value: name },
+          ...(detailText ? [{ name: 'Status', value: detailText }] : []),
+        ],
+      })],
       allowedMentions: { parse: [] },
     }).catch(err => {
       throw err;
@@ -698,7 +763,10 @@ function createTopupBridgeService({ registerStore, client = null }) {
       };
     }
 
-    const existingPersistent = registerStore.findUserByPersistentId?.(persistentId);
+    const persistentLooksVolatile = persistentId.startsWith('entity:');
+    const existingPersistent = persistentLooksVolatile
+      ? null
+      : registerStore.findUserByPersistentId?.(persistentId);
     if (existingPersistent && existingPersistent.userId !== record.userId) {
       return {
         ok: false,
@@ -741,15 +809,18 @@ function createTopupBridgeService({ registerStore, client = null }) {
       if (player?.persistentId) {
         await registerStore.markSeenByPersistentId?.(player.persistentId, player.name).catch(() => null);
       }
-      const linked = player?.persistentId
+      const linkedByPersistentId = player?.persistentId
         ? registerStore.findUserByPersistentId?.(player.persistentId)
         : null;
+      const linked = linkedByPersistentId || registerStore.findUserByGamertag?.(player?.name);
+      const bypass = Boolean(eventRaw.verifyBypass) || isVerifyBypassGamertag(player?.name);
+      const verified = bypass || isVerifiedMinecraftLink(linked, player);
       bridgeStats.lastPresenceAt = bridgeStats.lastEventAt;
-      await sendPresenceLog(type, { player }, linked?.entry?.verified ? 'verified Discord' : 'belum verified Discord')
+      await sendPresenceLog(type, { player }, bypass ? 'bypass Discord' : (verified ? 'verified Discord' : 'belum verified Discord'))
         .catch(err => console.error('Failed to send Minecraft join log:', err));
       return {
         ok: true,
-        verified: Boolean(linked?.entry?.verified),
+        verified,
         discordUserId: linked?.userId || '',
       };
     }

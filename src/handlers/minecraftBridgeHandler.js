@@ -24,10 +24,11 @@ function normalizeSpaces(value) {
 
 function parseCommand(content) {
   const raw = normalizeSpaces(content);
-  const match = raw.match(/^!(verifyme|mc-help|mcstatus|mcping|online|srcsrv|geon|player|p)(?:\s+(.+))?$/i);
+  const match = raw.match(/^!(verifyme|verifme|veryfyme|mc-help|mcstatus|mcping|online|srcsrv|geon|player|p)(?:\s+(.+))?$/i);
   if (!match) return null;
+  const command = match[1].toLowerCase();
   return {
-    command: match[1].toLowerCase(),
+    command: command === 'verifme' || command === 'veryfyme' ? 'verifyme' : command,
     args: normalizeSpaces(match[2] || ''),
   };
 }
@@ -244,8 +245,8 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         [
           `Kode verify Minecraft untuk \`${challenge.gamertag}\`: \`${challenge.code}\``,
           `Masuk ke server sebagai \`${challenge.gamertag}\`, lalu ketik:`,
-          `\`/secrules:verify ${challenge.code}\``,
-          `Atau fallback chat: \`!verify ${challenge.code}\``,
+          `\`!verify ${challenge.code}\``,
+          `Atau command: \`/secrules:verify ${challenge.code}\``,
           `Kode expired dalam ${challenge.expiresInMinutes} menit.`,
           'Jika kamu menjalankan `!verifyme` lagi, kode sebelumnya otomatis batal.',
         ].join('\n')
