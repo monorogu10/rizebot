@@ -1,4 +1,7 @@
 require('dotenv').config();
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { Client, GatewayIntentBits: I, Partials: T } = require('discord.js');
 
 const { maybeBlockLink } = require('./src/features/linkBlocker');
@@ -23,6 +26,72 @@ const { createRegisterStore } = require('./src/services/registerStore');
 const { createModerationStore } = require('./src/services/moderationStore');
 const { REGISTER_ROLE_ID, LEGACY_ROLE_ID, MINECRAFT_REGISTER_ROLE_ID } = require('./src/config');
 const { isAllowedBotOutputChannel } = require('./src/utils/channelPolicy');
+
+const LOCK_FILE = process.env.RIZEBOT_LOCK_FILE || path.join(os.tmpdir(), 'rizebot.lock');
+
+function isProcessAlive(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function releaseLock() {
+  try {
+    const raw = fs.readFileSync(LOCK_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    if (data.pid === process.pid) {
+      fs.unlinkSync(LOCK_FILE);
+    }
+  } catch {
+    // ignore lock cleanup issues
+  }
+}
+
+function acquireLock() {
+  const lockPayload = JSON.stringify({
+    pid: process.pid,
+    cwd: process.cwd(),
+    startedAt: new Date().toISOString()
+  });
+
+  try {
+    const fd = fs.openSync(LOCK_FILE, 'wx');
+    fs.writeFileSync(fd, lockPayload);
+    fs.closeSync(fd);
+    process.once('exit', releaseLock);
+    process.once('SIGINT', () => {
+      releaseLock();
+      process.exit(130);
+    });
+    process.once('SIGTERM', () => {
+      releaseLock();
+      process.exit(143);
+    });
+    return;
+  } catch (err) {
+    if (err?.code !== 'EEXIST') throw err;
+  }
+
+  try {
+    const raw = fs.readFileSync(LOCK_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    if (isProcessAlive(Number(data.pid))) {
+      console.error(`Rizebot instance already running with pid ${data.pid}. Exiting.`);
+      process.exit(1);
+    }
+  } catch {
+    // stale or unreadable lock, replace it below
+  }
+
+  fs.rmSync(LOCK_FILE, { force: true });
+  acquireLock();
+}
+
+acquireLock();
 
 const client = new Client({
   intents: [

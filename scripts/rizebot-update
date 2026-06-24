@@ -65,6 +65,38 @@ if [ -d src ]; then
   find src -name '*.js' -print0 | xargs -0 -n1 node --check
 fi
 
+duplicate_pm2_ids="$(
+  APP_DIR="$APP_DIR" PM2_APP="$PM2_APP" node <<'NODE'
+const { execFileSync } = require('node:child_process');
+const path = require('node:path');
+
+const appDir = process.env.APP_DIR;
+const appName = process.env.PM2_APP;
+const indexPath = path.join(appDir, 'index.js');
+const list = JSON.parse(execFileSync('pm2', ['jlist'], { encoding: 'utf8' }));
+const candidates = list
+  .filter(item => {
+    const env = item.pm2_env || {};
+    return item.name === appName || env.pm_exec_path === indexPath || env.pm_cwd === appDir;
+  })
+  .sort((a, b) => Number(a.pm_id) - Number(b.pm_id));
+
+if (candidates.length <= 1) process.exit(0);
+const keep = candidates.find(item => item.name === appName) || candidates[0];
+for (const item of candidates) {
+  if (item.pm_id === keep.pm_id) continue;
+  console.log(item.pm_id);
+}
+NODE
+)"
+
+if [ -n "$duplicate_pm2_ids" ]; then
+  log "Deleting duplicate PM2 rizebot processes: $duplicate_pm2_ids"
+  for pm2_id in $duplicate_pm2_ids; do
+    pm2 delete "$pm2_id"
+  done
+fi
+
 if ! pm2 describe "$PM2_APP" >/dev/null 2>&1; then
   printf 'PM2 app not found: %s\n' "$PM2_APP" >&2
   pm2 list

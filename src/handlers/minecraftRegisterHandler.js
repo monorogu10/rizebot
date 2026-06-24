@@ -16,6 +16,26 @@ const GAMERTAG_REGEX = /^[A-Za-z0-9_ ]{3,32}$/;
 const LIST_PAGE_SIZE = 10;
 const LIST_BUTTON_PREFIX = 'mcreglist';
 const COMMAND_CLEANUP_DELAY_MS = 20 * 1000;
+const BOT_CLEANUP_SCAN_LIMIT = 50;
+const MINECRAFT_REPLY_MARKERS = [
+  'Kamu sudah terdaftar.',
+  'Gamertag tersimpan:',
+  'Registrasi berhasil.',
+  'Gamertag berhasil diubah',
+  'Command `!req` salah.',
+  'Total Regist:',
+  'Belum ada user yang terdaftar.',
+  'Halaman ',
+  'List Registrasi Minecraft',
+  'Sistem registrasi belum aktif.',
+  'Gagal menyimpan',
+  'Gagal memberi role registrasi',
+  'Gagal mencabut role registrasi',
+  'Kamu sudah keluar dari registrasi Minecraft',
+  'Register Minecraft direset.',
+  'Format: `!reg',
+  'Format: `!edit-reg'
+];
 
 function escapeRegExp(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -51,9 +71,31 @@ function isMinecraftCommandLike(content) {
     .test(String(content || '').trim());
 }
 
-function deleteCommandMessage(msg) {
-  if (msg?.deletable === false) return;
-  void msg?.delete?.().catch(() => {});
+function isMinecraftBotMessage(message) {
+  const content = String(message?.content || '');
+  const embedText = message?.embeds?.map(embed => [
+    embed.title,
+    embed.description,
+    embed.footer?.text
+  ].filter(Boolean).join('\n')).join('\n') || '';
+  const text = `${content}\n${embedText}`;
+  return MINECRAFT_REPLY_MARKERS.some(marker => text.includes(marker));
+}
+
+async function cleanupRecentMinecraftBotMessages(msg) {
+  const channel = msg?.channel;
+  const botId = msg?.client?.user?.id;
+  if (!channel?.messages?.fetch || !botId) return;
+
+  const messages = await channel.messages.fetch({ limit: BOT_CLEANUP_SCAN_LIMIT }).catch(() => null);
+  if (!messages) return;
+
+  for (const message of messages.values()) {
+    if (message.id === msg.id) continue;
+    if (message.author?.id !== botId) continue;
+    if (!isMinecraftBotMessage(message)) continue;
+    await message.delete().catch(() => {});
+  }
 }
 
 function isValidGamertag(gamertag) {
@@ -103,13 +145,10 @@ async function replyNoPing(msg, payload) {
 }
 
 function scheduleCommandCleanup(msg, reply, delayMs = COMMAND_CLEANUP_DELAY_MS) {
-  if (!msg?.delete && !reply?.delete) return;
+  if (!reply?.delete) return;
   const cleanupTimer = setTimeout(() => {
     if (reply?.deletable !== false) {
       void reply.delete?.().catch(() => {});
-    }
-    if (msg?.deletable !== false) {
-      void msg.delete?.().catch(() => {});
     }
   }, delayMs);
   cleanupTimer.unref?.();
@@ -645,7 +684,9 @@ function createMinecraftRegisterHandler({
       if (!msg || msg.author?.bot) return false;
       if (!msg.guild) return false;
       const isMinecraftCommand = isMinecraftCommandLike(msg.content);
-      if (isMinecraftCommand) deleteCommandMessage(msg);
+      if (isMinecraftCommand) {
+        await cleanupRecentMinecraftBotMessages(msg);
+      }
 
       const options = { registerStore, roleId, resetAdminId, infoChannelId, infoUrl };
 
