@@ -49,7 +49,7 @@ function parseCouponArgs(args, bridge) {
 function formatTarget(target) {
   const user = target.userId ? `<@${target.userId}>` : '-';
   const username = target.username ? ` | discord=${target.username}` : '';
-  const status = target.verified ? 'verified' : 'legacy';
+  const status = target.verified ? 'verified' : 'terdaftar';
   return `\`${target.gamertag}\` | ${user} | ${status}${username}`;
 }
 

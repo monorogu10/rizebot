@@ -52,7 +52,7 @@ async function handleRegisterCommand(msg, options) {
   if (!msg.guild) return false;
 
   await msg.reply(
-    'Command ini sudah dialihkan ke register Minecraft. Pakai `!reg <gamertag>` atau `!daftar <gamertag>`, lalu lanjut `!verify`.'
+    'Command ini sudah dialihkan ke register Minecraft. Pakai `!reg <gamertag>` atau `!daftar <gamertag>` sesuai nama Minecraft kamu.'
   ).catch(() => null);
   return true;
 }

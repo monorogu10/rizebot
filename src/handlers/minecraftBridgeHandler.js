@@ -64,22 +64,22 @@ function cleanDiscordBroadcastMessage(value) {
     .trim();
 }
 
-function isOfficialOnlinePlayer(player) {
-  return Boolean(player?.verified && player?.discordUserId);
+function isRegisteredOnlinePlayer(player) {
+  return Boolean(player?.discordUserId);
 }
 
 function sortOnlinePlayers(players = []) {
   return [...players].sort((a, b) => {
-    const leftOfficial = isOfficialOnlinePlayer(a) ? 0 : 1;
-    const rightOfficial = isOfficialOnlinePlayer(b) ? 0 : 1;
-    if (leftOfficial !== rightOfficial) return leftOfficial - rightOfficial;
+    const leftRegistered = isRegisteredOnlinePlayer(a) ? 0 : 1;
+    const rightRegistered = isRegisteredOnlinePlayer(b) ? 0 : 1;
+    if (leftRegistered !== rightRegistered) return leftRegistered - rightRegistered;
     return String(a.name || a.key || '').localeCompare(String(b.name || b.key || ''));
   });
 }
 
 function onlineStatusIcon(player) {
-  if (isOfficialOnlinePlayer(player)) return '✅';
-  if (player?.discordUserId) return '⚠️';
+  if (player?.verified && player?.discordUserId) return '✅';
+  if (player?.discordUserId) return '🟢';
   return '❌';
 }
 
@@ -93,9 +93,9 @@ function formatOnlinePlayer(player, index = 0) {
     ? ` | Geon=${formatNumber(player.wallet.geon)} | Ether=${formatNumber(player.wallet.ether)}`
     : '';
   const pid = player.persistentId ? ` | pid=${player.persistentId.slice(0, 10)}...` : '';
-  const status = isOfficialOnlinePlayer(player)
-    ? 'resmi'
-    : (player.discordUserId ? 'belum verified' : 'belum linked');
+  const status = player.verified
+    ? 'verified'
+    : (player.discordUserId ? 'terdaftar' : 'belum register');
   return `${index + 1}. ${onlineStatusIcon(player)} \`${player.name || player.key || '-'}\` | ${status} | ${discordLine(player)}${wallet}${pid}`;
 }
 
@@ -144,24 +144,24 @@ function buildOnlineButtons(sourceMessageId, page, totalPages, disabled = false)
 }
 
 function buildOnlineEmbed(onlinePlayers, pagination, createdAt = new Date()) {
-  const official = pagination.items.filter(isOfficialOnlinePlayer);
-  const unofficial = pagination.items.filter(player => !isOfficialOnlinePlayer(player));
-  const linesOfficial = official.map((player, idx) => (
+  const registered = pagination.items.filter(isRegisteredOnlinePlayer);
+  const unregistered = pagination.items.filter(player => !isRegisteredOnlinePlayer(player));
+  const linesRegistered = registered.map((player, idx) => (
     formatOnlinePlayer(player, pagination.startIndex + idx)
   ));
-  const linesUnofficial = unofficial.map((player, idx) => (
-    formatOnlinePlayer(player, pagination.startIndex + official.length + idx)
+  const linesUnregistered = unregistered.map((player, idx) => (
+    formatOnlinePlayer(player, pagination.startIndex + registered.length + idx)
   ));
-  const totalOfficial = onlinePlayers.filter(isOfficialOnlinePlayer).length;
-  const totalUnofficial = Math.max(0, onlinePlayers.length - totalOfficial);
+  const totalRegistered = onlinePlayers.filter(isRegisteredOnlinePlayer).length;
+  const totalUnregistered = Math.max(0, onlinePlayers.length - totalRegistered);
   const description = [
-    linesOfficial.length ? `✅ **Resmi / verified (${formatNumber(totalOfficial)})**\n${linesOfficial.join('\n')}` : '',
-    linesUnofficial.length ? `⚠️ **Belum resmi (${formatNumber(totalUnofficial)})**\n${linesUnofficial.join('\n')}` : '',
+    linesRegistered.length ? `✅ **Terdaftar Discord (${formatNumber(totalRegistered)})**\n${linesRegistered.join('\n')}` : '',
+    linesUnregistered.length ? `⚠️ **Belum register Discord (${formatNumber(totalUnregistered)})**\n${linesUnregistered.join('\n')}` : '',
   ].filter(Boolean).join('\n\n') || 'Tidak ada player online yang tercatat bridge.';
 
   const embed = new EmbedBuilder()
     .setColor(0x2f80ed)
-    .setTitle(`Player Online: ${formatNumber(pagination.totalItems)} | Resmi: ${formatNumber(totalOfficial)} | Belum: ${formatNumber(totalUnofficial)}`)
+    .setTitle(`Player Online: ${formatNumber(pagination.totalItems)} | Terdaftar: ${formatNumber(totalRegistered)} | Belum: ${formatNumber(totalUnregistered)}`)
     .setDescription(description)
     .setFooter({
       text: `Halaman ${pagination.page}/${pagination.totalPages} | Snapshot bridge`
@@ -275,13 +275,19 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
 
       await replyNoPing(
         msg,
-        [
-          `Kode verify Minecraft untuk \`${challenge.gamertag}\`: \`${challenge.code}\``,
-          `Masuk ke server sebagai \`${challenge.gamertag}\`, lalu di chat Minecraft ketik:`,
-          `\`!verify ${challenge.code}\``,
-          `Kode expired dalam ${challenge.expiresInMinutes} menit.`,
-          'Jika kamu menjalankan `!verify` lagi, kode sebelumnya otomatis batal.',
-        ].join('\n')
+        challenge.reused
+          ? [
+            `Kode verify Minecraft kamu masih aktif untuk \`${challenge.gamertag}\`: \`${challenge.code}\``,
+            `Di chat Minecraft ketik: \`!verify ${challenge.code}\``,
+            `Expired sekitar ${challenge.expiresInMinutes} menit lagi.`,
+          ].join('\n')
+          : [
+            `Kode verify Minecraft untuk \`${challenge.gamertag}\`: \`${challenge.code}\``,
+            `Masuk ke server sebagai \`${challenge.gamertag}\`, lalu di chat Minecraft ketik:`,
+            `\`!verify ${challenge.code}\``,
+            `Kode expired dalam ${challenge.expiresInMinutes} menit.`,
+            'Jika kamu menjalankan `!verify` lagi, kode yang sama akan dipakai selama masih aktif.',
+          ].join('\n')
       );
       return true;
     }

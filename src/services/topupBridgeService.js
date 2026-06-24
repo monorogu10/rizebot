@@ -132,6 +132,11 @@ function isVerifiedMinecraftLink(linked, player = {}) {
   return Boolean(playerName && n(entry.gamertag) === playerName);
 }
 
+function isRegisteredMinecraftLink(linked, player = {}) {
+  const playerName = n(player.name || player.gamertag || player.key);
+  return Boolean(linked?.entry?.gamertag && playerName && n(linked.entry.gamertag) === playerName);
+}
+
 function isVerifyBypassGamertag(gamertag) {
   return VERIFY_BYPASS_GAMERTAGS.has(n(gamertag));
 }
@@ -186,7 +191,7 @@ function normalizeTarget(entry) {
 
 function formatTargetLine(target, index = 0) {
   const user = target.userId ? `<@${target.userId}>` : '-';
-  const status = target.verified ? 'verified' : 'legacy';
+  const status = target.verified ? 'verified' : 'terdaftar';
   const online = target.online ? 'online' : 'offline';
   const geon = target.wallet ? ` | Geon=${formatNumber(target.wallet.geon)}` : '';
   return `${index + 1}. \`${target.gamertag || target.name || target.key || '-'}\` | ${user} | ${status} | ${online}${geon}`;
@@ -199,8 +204,8 @@ function formatServerTargetLine(target, index = 0) {
   const ether = target.wallet ? ` | Ether=${formatNumber(target.wallet.ether)}` : '';
   const pid = target.persistentId ? ` | pid=${target.persistentId.slice(0, 10)}...` : '';
   const registerStatus = target.verified
-    ? '✅ resmi'
-    : (target.discordUserId ? '⚠️ belum verified' : '❌ belum register');
+    ? '✅ verified'
+    : (target.discordUserId ? '🟢 terdaftar' : '❌ belum register');
   const discord = target.discordUserId ? `<@${target.discordUserId}> (${target.discordUserId})` : '-';
   return `${index + 1}. \`${name}\` | ${online} | ${registerStatus} | Discord=${discord}${geon}${ether}${pid}`;
 }
@@ -468,10 +473,13 @@ function createTopupBridgeService({ registerStore, client = null }) {
   function attachRegistrationToOnlinePlayer(player = {}) {
     const linked = findLinkedUserForPlayer(player);
     const verified = isVerifiedMinecraftLink(linked, player);
+    const registeredMatch = isRegisteredMinecraftLink(linked, player);
     return {
       ...player,
       registered: Boolean(linked),
       verified,
+      registeredMatch,
+      accessAllowed: verified || registeredMatch || Boolean(player.verifyBypass),
       discordUserId: linked?.userId || '',
       discordUsername: linked?.entry?.username || '',
       registeredGamertag: linked?.entry?.gamertag || '',
@@ -659,8 +667,29 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const safeGamertag = cleanText(gamertag, 80);
     if (!safeUserId || !safeGamertag) return null;
 
+    let existingActive = null;
     for (const [code, record] of pendingVerifications.entries()) {
-      if (record.userId === safeUserId) pendingVerifications.delete(code);
+      if (record.userId !== safeUserId) continue;
+      if (n(record.gamertag) === n(safeGamertag) && record.expiresAt > now) {
+        existingActive = { ...record, code };
+        pendingVerifications.set(code, {
+          ...record,
+          message: message || record.message || null,
+        });
+        continue;
+      }
+      pendingVerifications.delete(code);
+    }
+
+    if (existingActive) {
+      saveVerificationsToDisk(now);
+      return {
+        code: existingActive.code,
+        gamertag: safeGamertag,
+        expiresAt: existingActive.expiresAt,
+        expiresInMinutes: Math.max(1, Math.ceil((existingActive.expiresAt - now) / 60_000)),
+        reused: true,
+      };
     }
 
     let code = createVerifyCode();
@@ -680,6 +709,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
       gamertag: safeGamertag,
       expiresAt,
       expiresInMinutes: Math.floor(VERIFY_CODE_TTL_MS / 60_000),
+      reused: false,
     };
   }
 
@@ -779,7 +809,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
       ? registerStore.findUserByPersistentId?.(target.persistentId)
       : registerStore.findUserByGamertag?.(target.name || target.key);
     const linked = registered
-      ? ` | Discord: <@${registered.userId}> | ${registered.entry?.verified ? 'verified' : 'legacy'}`
+      ? ` | Discord: <@${registered.userId}> | ${registered.entry?.verified ? 'verified' : 'terdaftar'}`
       : '';
 
     await message.reply(
@@ -823,8 +853,8 @@ function createTopupBridgeService({ registerStore, client = null }) {
       ? registerStore.findUserByPersistentId?.(target.persistentId)
       : registerStore.findUserByGamertag?.(target.name || target.key);
     const registerLine = registered
-      ? `Discord: <@${registered.userId}> | ${registered.entry?.verified ? 'verified' : 'legacy'}`
-      : 'Discord: belum terhubung/terverifikasi';
+      ? `Discord: <@${registered.userId}> | ${registered.entry?.verified ? 'verified' : 'terdaftar'}`
+      : 'Discord: belum register';
 
     await message.reply([
       `Player: \`${target.name || target.key || '-'}\``,
@@ -936,7 +966,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const rank = cleanText(event.rank || 'Player', 180) || 'Player';
     const footerParts = [
       `💬 Rank: ${rank}`,
-      linked?.userId ? `Discord ID: ${linked.userId}` : 'Discord: belum linked',
+      linked?.userId ? `Discord ID: ${linked.userId}` : 'Discord: belum register',
     ];
 
     await channel.send({
@@ -1101,15 +1131,30 @@ function createTopupBridgeService({ registerStore, client = null }) {
       const linkedByPersistentId = player?.persistentId
         ? registerStore.findUserByPersistentId?.(player.persistentId)
         : null;
-      const linked = linkedByPersistentId || registerStore.findUserByGamertag?.(player?.name);
+      const linkedByGamertag = registerStore.findUserByGamertag?.(player?.name);
+      const linked = linkedByPersistentId || linkedByGamertag;
       const bypass = Boolean(eventRaw.verifyBypass) || isVerifyBypassGamertag(player?.name);
       const verified = bypass || isVerifiedMinecraftLink(linked, player);
+      const registeredMatch = Boolean(
+        linkedByGamertag?.entry?.gamertag &&
+        n(linkedByGamertag.entry.gamertag) === n(player?.name)
+      );
+      const accessAllowed = bypass || verified || registeredMatch;
       bridgeStats.lastPresenceAt = bridgeStats.lastEventAt;
-      await sendPresenceLog(type, { player }, bypass ? 'bypass Discord' : (verified ? 'verified Discord' : 'belum verified Discord'))
+      await sendPresenceLog(
+        type,
+        { player },
+        bypass
+          ? 'bypass Discord'
+          : (verified ? 'verified Discord' : (registeredMatch ? 'registered Discord' : 'belum register Discord'))
+      )
         .catch(err => console.error('Failed to send Minecraft join log:', err));
       return {
         ok: true,
         verified,
+        registered: Boolean(linked),
+        registeredMatch,
+        accessAllowed,
         discordUserId: linked?.userId || '',
       };
     }

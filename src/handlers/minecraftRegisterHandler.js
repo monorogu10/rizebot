@@ -337,7 +337,7 @@ function buildMinecraftStatusPayload(entry) {
           .setDescription('Akun Discord kamu belum punya data register Minecraft.')
           .addFields({
             name: 'Mulai daftar',
-            value: 'Pakai `!reg <gamertag>` atau `!daftar <gamertag>`, lalu lanjut `!verify`.',
+            value: 'Pakai `!reg <gamertag>` atau `!daftar <gamertag>` sesuai nama Minecraft kamu.',
           }),
       ],
       allowedMentions: { parse: [], repliedUser: false },
@@ -347,7 +347,7 @@ function buildMinecraftStatusPayload(entry) {
   const verified = Boolean(entry.verified);
   const lines = [
     `Gamertag: \`${entry.gamertag || '-'}\``,
-    `Status: ${verified ? '✅ Verified' : '⏳ Belum verified'}`,
+    `Status: ${verified ? '✅ Terdaftar + verified' : '🟢 Terdaftar'}`,
     `Daftar: ${formatDateId(entry.registeredAt)}`,
     `Update: ${formatDateId(entry.updatedAt || entry.registeredAt)}`,
   ];
@@ -360,8 +360,8 @@ function buildMinecraftStatusPayload(entry) {
     .setDescription(lines.join('\n'))
     .setFooter({
       text: verified
-        ? 'Akun sudah terhubung ke Minecraft.'
-        : 'Pakai !verify untuk ambil kode, lalu di Minecraft ketik !verify <kode>.',
+        ? 'Akun sudah terdaftar dan terkunci ke Minecraft asli.'
+        : 'Sudah terdaftar. Join server dengan gamertag yang sama; !verify opsional untuk mengunci akun.',
     });
 
   return {
@@ -468,8 +468,8 @@ async function handleMinecraftRegCommand(msg, options) {
       : 'Catatan: nickname Discord gagal diubah otomatis. Cek permission dan posisi role bot.';
     const changed = !isSameGamertag(previousGamertag, updated.gamertag);
     const verifyLine = changed
-      ? 'Jalankan `!verify` lagi agar gamertag baru terhubung ke akun Minecraft asli.'
-      : 'Kalau belum verified, jalankan `!verify`, lalu di server ketik `!verify <kode>`.';
+      ? 'Join server dengan gamertag baru itu. `!verify` opsional untuk mengunci akun ke Minecraft asli.'
+      : 'Join server dengan gamertag yang sama. `!verify` opsional untuk keamanan ekstra.';
 
     await replyNoPing(
       msg,
@@ -524,7 +524,7 @@ async function handleMinecraftRegCommand(msg, options) {
         'Kamu sudah terdaftar.',
         formatExistingRegistration(result.entry),
         `Untuk ganti gamertag, pakai \`!reg ${gamertag}\` atau \`!edit-reg ${gamertag}\`.`,
-        'Untuk mengunci akun ke Minecraft asli, pakai `!verify`, lalu di server ketik `!verify <kode>`.',
+        'Join server dengan gamertag yang sama. Untuk mengunci akun ke Minecraft asli, opsional pakai `!verify`.',
         getInfoLine(infoChannelId, infoUrl) + roleNote + nicknameNote
       ].join('\n')
     );
@@ -559,7 +559,7 @@ async function handleMinecraftRegCommand(msg, options) {
     [
       `Registrasi berhasil. Gamertag kamu: \`${gamertag}\`.`,
       'Role registrasi sudah diberikan.',
-      'Lanjutkan dengan `!verify`, lalu di server ketik `!verify <kode>`.',
+      'Sekarang join server dengan gamertag yang sama. `!verify` opsional untuk keamanan ekstra.',
       nicknameNote,
       getInfoLine(infoChannelId, infoUrl)
     ].join('\n')
@@ -665,7 +665,7 @@ async function handleMinecraftEditRegCommand(msg, options) {
     msg,
     [
       `Gamertag berhasil diubah dari \`${existing.gamertag}\` ke \`${updated.gamertag}\`.`,
-      'Jalankan `!verify` lagi agar gamertag baru terhubung ke akun Minecraft asli.',
+      'Join server dengan gamertag baru itu. `!verify` opsional untuk mengunci akun ke Minecraft asli.',
       nicknameNote,
       getInfoLine(infoChannelId, infoUrl)
     ].join('\n')
