@@ -1,9 +1,12 @@
 const {
   REGISTER_ROLE_ID,
   PRIVATE_CHAT_CHANNEL_ID,
-  REGISTRATION_INBOX_CHANNEL_ID
+  REGISTRATION_INBOX_CHANNEL_ID,
+  MINECRAFT_REGISTER_RESET_ADMIN_ID,
+  TOPUP_ADMIN_DISCORD_ID,
 } = require('../config');
 const { isAdmin } = require('../utils/permissions');
+const { createRizebotHelpPayload } = require('./helpPayload');
 
 function isTargetChannelOrThread(msg, targetChannelId) {
   if (!targetChannelId) return true;
@@ -43,81 +46,24 @@ async function markApprovedIfPossible(submissionStore, client, userId, source) {
 }
 
 async function handleRegisterCommand(msg, options) {
-  const {
-    roleId,
-    submissionStore,
-    registrationChannelId,
-    privateChatChannelId
-  } = options;
+  void options;
   const content = (msg.content || '').trim();
   if (!/^!daftar\b/i.test(content) && !/^!register\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  const member = await resolveMember(msg);
-  if (!ensureRegChannel(msg, registrationChannelId) && !isAdmin(member)) {
-    await msg.reply(`Gunakan command ini di <#${registrationChannelId}>.`).catch(() => null);
-    return true;
-  }
-
-  if (!member) {
-    await msg.reply('Gagal membaca data member kamu, coba lagi.').catch(() => null);
-    return true;
-  }
-
-  if (!roleId) {
-    await msg.reply('Role private belum dikonfigurasi. Hubungi admin.').catch(() => null);
-    return true;
-  }
-
-  const alreadyRegistered = member.roles.cache.has(roleId);
-  if (alreadyRegistered) {
-    await markApprovedIfPossible(submissionStore, msg.client, member.id, 'role');
-    await msg.reply('Kamu sudah terdaftar di private.').catch(() => null);
-    return true;
-  }
-
-  const added = await addRoleIfMissing(member, roleId);
-  if (!added) {
-    await msg.reply('Gagal memberi role private. Hubungi admin.').catch(() => null);
-    return true;
-  }
-
-  await markApprovedIfPossible(submissionStore, msg.client, member.id, 'direct');
-  const privateChatHint = privateChatChannelId
-    ? ` Silakan lanjut chat di <#${privateChatChannelId}>.`
-    : '';
-  await msg.reply(`Pendaftaran berhasil, role private sudah diberikan.${privateChatHint}`).catch(() => null);
+  await msg.reply(
+    'Command ini sudah dialihkan ke register Minecraft. Pakai `!reg <gamertag>` atau `!daftar <gamertag>`, lalu lanjut `!verify`.'
+  ).catch(() => null);
   return true;
 }
 
 async function handleStatusCommand(msg, options) {
-  const { roleId, submissionStore, registrationChannelId } = options;
+  void options;
   const content = (msg.content || '').trim();
   if (!/^!status\b/i.test(content)) return false;
 
-  const member = await resolveMember(msg);
-  const hasRole = Boolean(roleId && member?.roles?.cache?.has(roleId));
-  let isRegistered = hasRole;
-
-  if (submissionStore) {
-    await submissionStore.init(msg.client);
-    if (!isRegistered) {
-      isRegistered = submissionStore.isApprovedMember(msg.author.id) ||
-        submissionStore.isPermanentMember(msg.author.id);
-    }
-    if (hasRole) {
-      await submissionStore.markApprovedMember(msg.author.id, 'role');
-    }
-  }
-
-  if (isRegistered) {
-    await msg.reply('Status: kamu sudah terdaftar di private.').catch(() => null);
-    return true;
-  }
-
-  const channelHint = registrationChannelId ? ` di <#${registrationChannelId}>` : '';
   await msg.reply(
-    `Status: belum terdaftar. Kirim \`!daftar\`${channelHint} untuk dapat akses private.`
+    '`!status` sekarang dipakai untuk status verify Minecraft. Coba lagi, atau hubungi admin jika pesan ini muncul.'
   ).catch(() => null);
   return true;
 }
@@ -131,22 +77,16 @@ async function handleHelpCommand(msg, options) {
   if (!/^!help\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  const registerHint = registrationChannelId ? `<#${registrationChannelId}>` : 'channel registrasi';
-  const privateChatHint = privateChatChannelId ? `<#${privateChatChannelId}>` : 'channel private chat';
-  const lines = [
-    '**Panduan Singkat**',
-    `- Daftar private: kirim \`!daftar\` di ${registerHint}.`,
-    '- Cek status pendaftaran private: `!status`.',
-    '- Daftar Minecraft: `!reg <gamertag_minecraft>`.',
-    '- Ubah gamertag Minecraft: `!reg <gamertag_minecraft>` atau `!edit-reg <gamertag_minecraft>`.',
-    '- Keluar dari registrasi Minecraft: `!out`.',
-    '- List registrasi Minecraft: `!list`.',
-    '- Petisi timeout (khusus member private): `!timeout @user` (butuh 17 vote dalam 1 jam).',
-    '- Veto admin: `!freedom @user`.',
-    `- Moderasi cepat (khusus ${privateChatHint}): react \uD83D\uDDD1\uFE0F 5x dari member private -> pesan dihapus.`
-  ];
+  const member = await resolveMember(msg);
+  const showAdmin = isAdmin(member) ||
+    String(msg.author?.id || '') === String(TOPUP_ADMIN_DISCORD_ID) ||
+    String(msg.author?.id || '') === String(MINECRAFT_REGISTER_RESET_ADMIN_ID);
 
-  await msg.reply(lines.join('\n')).catch(() => null);
+  await msg.reply(createRizebotHelpPayload({
+    showAdmin,
+    registrationChannelId,
+    privateChatChannelId,
+  })).catch(() => null);
   return true;
 }
 

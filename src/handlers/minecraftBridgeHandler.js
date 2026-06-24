@@ -6,8 +6,11 @@ const {
 } = require('discord.js');
 const {
   MINECRAFT_CHAT_LOG_CHANNEL_ID,
+  MINECRAFT_REGISTER_RESET_ADMIN_ID,
   TOPUP_ADMIN_DISCORD_ID,
 } = require('../config');
+const { isAdmin } = require('../utils/permissions');
+const { createRizebotHelpPayload } = require('./helpPayload');
 
 const ONLINE_PAGE_SIZE = 10;
 const ONLINE_BUTTON_PREFIX = 'mconline';
@@ -24,11 +27,13 @@ function normalizeSpaces(value) {
 
 function parseCommand(content) {
   const raw = normalizeSpaces(content);
-  const match = raw.match(/^!(verifyme|verifme|veryfyme|mc-help|mcstatus|mcping|online|srcsrv|geon|player|p)(?:\s+(.+))?$/i);
+  const match = raw.match(/^!(verify|verifyme|verifme|veryfyme|mc-help|mcstatus|mcping|online|srcsrv|srcpl|geon|player|p)(?:\s+(.+))?$/i);
   if (!match) return null;
   const command = match[1].toLowerCase();
   return {
-    command: command === 'verifme' || command === 'veryfyme' ? 'verifyme' : command,
+    command: ['verify', 'verifme', 'veryfyme'].includes(command)
+      ? 'verifyme'
+      : (command === 'srcpl' ? 'srcsrv' : command),
     args: normalizeSpaces(match[2] || ''),
   };
 }
@@ -59,12 +64,39 @@ function cleanDiscordBroadcastMessage(value) {
     .trim();
 }
 
+function isOfficialOnlinePlayer(player) {
+  return Boolean(player?.verified && player?.discordUserId);
+}
+
+function sortOnlinePlayers(players = []) {
+  return [...players].sort((a, b) => {
+    const leftOfficial = isOfficialOnlinePlayer(a) ? 0 : 1;
+    const rightOfficial = isOfficialOnlinePlayer(b) ? 0 : 1;
+    if (leftOfficial !== rightOfficial) return leftOfficial - rightOfficial;
+    return String(a.name || a.key || '').localeCompare(String(b.name || b.key || ''));
+  });
+}
+
+function onlineStatusIcon(player) {
+  if (isOfficialOnlinePlayer(player)) return '✅';
+  if (player?.discordUserId) return '⚠️';
+  return '❌';
+}
+
+function discordLine(player) {
+  if (!player?.discordUserId) return 'Discord: -';
+  return `Discord: <@${player.discordUserId}> (${player.discordUserId})`;
+}
+
 function formatOnlinePlayer(player, index = 0) {
   const wallet = player.wallet
     ? ` | Geon=${formatNumber(player.wallet.geon)} | Ether=${formatNumber(player.wallet.ether)}`
     : '';
   const pid = player.persistentId ? ` | pid=${player.persistentId.slice(0, 10)}...` : '';
-  return `${index + 1}. \`${player.name || player.key || '-'}\`${wallet}${pid}`;
+  const status = isOfficialOnlinePlayer(player)
+    ? 'resmi'
+    : (player.discordUserId ? 'belum verified' : 'belum linked');
+  return `${index + 1}. ${onlineStatusIcon(player)} \`${player.name || player.key || '-'}\` | ${status} | ${discordLine(player)}${wallet}${pid}`;
 }
 
 function paginateItems(items, page, pageSize = ONLINE_PAGE_SIZE) {
@@ -112,14 +144,25 @@ function buildOnlineButtons(sourceMessageId, page, totalPages, disabled = false)
 }
 
 function buildOnlineEmbed(onlinePlayers, pagination, createdAt = new Date()) {
-  const lines = pagination.items.map((player, idx) => (
+  const official = pagination.items.filter(isOfficialOnlinePlayer);
+  const unofficial = pagination.items.filter(player => !isOfficialOnlinePlayer(player));
+  const linesOfficial = official.map((player, idx) => (
     formatOnlinePlayer(player, pagination.startIndex + idx)
   ));
+  const linesUnofficial = unofficial.map((player, idx) => (
+    formatOnlinePlayer(player, pagination.startIndex + official.length + idx)
+  ));
+  const totalOfficial = onlinePlayers.filter(isOfficialOnlinePlayer).length;
+  const totalUnofficial = Math.max(0, onlinePlayers.length - totalOfficial);
+  const description = [
+    linesOfficial.length ? `✅ **Resmi / verified (${formatNumber(totalOfficial)})**\n${linesOfficial.join('\n')}` : '',
+    linesUnofficial.length ? `⚠️ **Belum resmi (${formatNumber(totalUnofficial)})**\n${linesUnofficial.join('\n')}` : '',
+  ].filter(Boolean).join('\n\n') || 'Tidak ada player online yang tercatat bridge.';
 
   const embed = new EmbedBuilder()
     .setColor(0x2f80ed)
-    .setTitle(`Player Online: ${formatNumber(pagination.totalItems)}`)
-    .setDescription(lines.length ? lines.join('\n') : 'Tidak ada player online yang tercatat bridge.')
+    .setTitle(`Player Online: ${formatNumber(pagination.totalItems)} | Resmi: ${formatNumber(totalOfficial)} | Belum: ${formatNumber(totalUnofficial)}`)
+    .setDescription(description)
     .setFooter({
       text: `Halaman ${pagination.page}/${pagination.totalPages} | Snapshot bridge`
     })
@@ -129,12 +172,13 @@ function buildOnlineEmbed(onlinePlayers, pagination, createdAt = new Date()) {
 }
 
 function buildOnlineResponse(onlinePlayers, sourceMessageId, page, options = {}) {
-  const pagination = paginateItems(onlinePlayers, page);
+  const sortedPlayers = sortOnlinePlayers(onlinePlayers);
+  const pagination = paginateItems(sortedPlayers, page);
   const components = pagination.totalPages > 1
     ? [buildOnlineButtons(sourceMessageId, pagination.page, pagination.totalPages, options.disabled)]
     : [];
   return noPing({
-    embeds: [buildOnlineEmbed(onlinePlayers, pagination, options.createdAt)],
+    embeds: [buildOnlineEmbed(sortedPlayers, pagination, options.createdAt)],
     components,
   });
 }
@@ -175,20 +219,6 @@ async function sendOnlinePagination(msg, onlinePlayers) {
   });
 }
 
-function helpText() {
-  return [
-    '**Minecraft bridge commands**',
-    '`!verifyme` - buat kode verify Minecraft untuk akun Discord kamu; kode lama otomatis batal',
-    '`!mcstatus` - admin: cek status bridge rizebot/BP',
-    '`!mcping` - admin: test BP polling job',
-    '`!online` - admin: lihat player online dari server',
-    '`!srcsrv <nama>` - admin: cari player dari data server Minecraft',
-    '`!geon <nama>` - admin: cek saldo Geon/Ether player',
-    '`!player <nama>` - admin: detail player dari server',
-    '`!p <pesan>` - admin: kirim pesan Discord ke chat Minecraft',
-  ].join('\n');
-}
-
 function timeOrDash(value) {
   return value ? String(value) : '-';
 }
@@ -219,7 +249,10 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
     if (!parsed) return false;
 
     if (parsed.command === 'mc-help') {
-      await replyNoPing(msg, helpText());
+      const showAdmin = isAdmin(msg.member) ||
+        isBridgeAdmin(msg.author?.id) ||
+        String(msg.author?.id || '') === String(MINECRAFT_REGISTER_RESET_ADMIN_ID);
+      await replyNoPing(msg, createRizebotHelpPayload({ showAdmin }));
       return true;
     }
 
@@ -244,11 +277,10 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         msg,
         [
           `Kode verify Minecraft untuk \`${challenge.gamertag}\`: \`${challenge.code}\``,
-          `Masuk ke server sebagai \`${challenge.gamertag}\`, lalu ketik:`,
+          `Masuk ke server sebagai \`${challenge.gamertag}\`, lalu di chat Minecraft ketik:`,
           `\`!verify ${challenge.code}\``,
-          `Atau command: \`/secrules:verify ${challenge.code}\``,
           `Kode expired dalam ${challenge.expiresInMinutes} menit.`,
-          'Jika kamu menjalankan `!verifyme` lagi, kode sebelumnya otomatis batal.',
+          'Jika kamu menjalankan `!verify` lagi, kode sebelumnya otomatis batal.',
         ].join('\n')
       );
       return true;
@@ -299,10 +331,13 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
 
     if (parsed.command === 'srcsrv') {
       if (parsed.args.length < 2) {
-        await replyNoPing(msg, 'Format: `!srcsrv <minimal 2 huruf nama player>`');
+        await replyNoPing(msg, 'Format: `!srcpl <minimal 2 huruf nama player>`');
         return true;
       }
-      const job = bridge.enqueueBridgeQuery('search_server', { query: parsed.args }, { message: msg });
+      const job = bridge.enqueueBridgeQuery('search_server', {
+        query: parsed.args,
+        requestedBy: msg.author.id,
+      }, { message: msg });
       await replyNoPing(msg, `Search server masuk antrean. Job: \`${job.id}\``);
       return true;
     }

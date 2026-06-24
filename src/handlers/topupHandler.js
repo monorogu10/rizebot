@@ -61,7 +61,7 @@ function formatCandidates(candidates) {
 function helpText() {
   return [
     '**TOPUP admin commands**',
-    '`!srcpl <nama>` - cari player dari data registrasi Discord',
+    '`!srcpl <nama>` - cari player dari data asli server Minecraft + status Discord',
     '`!tu <nama/key> <geon> <rupiah>` - kirim topup ke Minecraft',
     '`!gnrtkpn <geon> <rupiah> [jumlah] [hari_expired]` - generate kupon',
   ].join('\n');
@@ -90,8 +90,11 @@ function createTopupHandler({ bridge }) {
         return true;
       }
 
-      const targets = bridge.searchTargets(parsed.args, 15);
-      await msg.reply(`Hasil pencarian \`${parsed.args}\`:\n${formatCandidates(targets)}`).catch(() => {});
+      const job = bridge.enqueueBridgeQuery('search_server', {
+        query: parsed.args,
+        requestedBy: msg.author.id,
+      }, { message: msg });
+      await msg.reply(`Search player server masuk antrean. Job: \`${job.id}\``).catch(() => {});
       return true;
     }
 

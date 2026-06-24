@@ -7,6 +7,7 @@ const {
 } = require('discord.js');
 const {
   MINECRAFT_REGISTER_ROLE_ID,
+  MINECRAFT_REGISTER_PENDING_ROLE_ID,
   MINECRAFT_REGISTER_RESET_ADMIN_ID,
   MINECRAFT_INFO_CHANNEL_ID,
   MINECRAFT_INFO_URL
@@ -61,13 +62,21 @@ function parseSingleArgCommand(content, command) {
   };
 }
 
+function parseSingleArgCommandAny(content, commands) {
+  for (const command of commands) {
+    const parsed = parseSingleArgCommand(content, command);
+    if (parsed) return { ...parsed, command };
+  }
+  return null;
+}
+
 function isExactCommand(content, command) {
   const pattern = new RegExp(`^${buildCommandPattern(command)}\\s*$`, 'i');
   return pattern.test(String(content || '').trim());
 }
 
 function isMinecraftCommandLike(content) {
-  return /^!\s*(?:edit\s*-\s*reg|list\s*-\s*reg|list|req|reg|out|reset)(?:\s|$)/i
+  return /^!\s*(?:edit\s*-\s*reg|list\s*-\s*reg|list|req|reg|daftar|register|status|out|reset)(?:\s|$)/i
     .test(String(content || '').trim());
 }
 
@@ -176,6 +185,30 @@ async function removeRoleIfPresent(member, roleId) {
   const updated = await member.roles.remove(role).catch(() => null);
   if (updated?.roles?.cache && !updated.roles.cache.has(roleId)) return true;
   return !member.roles.cache.has(roleId);
+}
+
+async function syncMinecraftRegistrationRoleState(member, entry, {
+  pendingRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  verifiedRoleId = MINECRAFT_REGISTER_ROLE_ID,
+} = {}) {
+  if (!member || !entry) return false;
+  const verified = Boolean(entry.verified);
+  const addRoleId = verified ? verifiedRoleId : pendingRoleId;
+  const removeRoleId = verified ? pendingRoleId : verifiedRoleId;
+  const added = await addRoleIfMissing(member, addRoleId);
+  const removed = addRoleId === removeRoleId ? true : await removeRoleIfPresent(member, removeRoleId);
+  return added && removed;
+}
+
+async function removeMinecraftRegistrationRoles(member, {
+  pendingRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  verifiedRoleId = MINECRAFT_REGISTER_ROLE_ID,
+} = {}) {
+  const removedPending = await removeRoleIfPresent(member, pendingRoleId);
+  const removedVerified = pendingRoleId === verifiedRoleId
+    ? true
+    : await removeRoleIfPresent(member, verifiedRoleId);
+  return removedPending && removedVerified;
 }
 
 async function setNicknameToGamertag(member, gamertag) {
@@ -294,6 +327,49 @@ function buildListResponse(entries, page) {
   };
 }
 
+function buildMinecraftStatusPayload(entry) {
+  if (!entry) {
+    return {
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xe74c3c)
+          .setTitle('🎮 Status Minecraft')
+          .setDescription('Akun Discord kamu belum punya data register Minecraft.')
+          .addFields({
+            name: 'Mulai daftar',
+            value: 'Pakai `!reg <gamertag>` atau `!daftar <gamertag>`, lalu lanjut `!verify`.',
+          }),
+      ],
+      allowedMentions: { parse: [], repliedUser: false },
+    };
+  }
+
+  const verified = Boolean(entry.verified);
+  const lines = [
+    `Gamertag: \`${entry.gamertag || '-'}\``,
+    `Status: ${verified ? '✅ Verified' : '⏳ Belum verified'}`,
+    `Daftar: ${formatDateId(entry.registeredAt)}`,
+    `Update: ${formatDateId(entry.updatedAt || entry.registeredAt)}`,
+  ];
+  if (entry.verifiedAt) lines.push(`Verified: ${formatDateId(entry.verifiedAt)}`);
+  if (entry.lastSeenName) lines.push(`Last seen: \`${entry.lastSeenName}\``);
+
+  const embed = new EmbedBuilder()
+    .setColor(verified ? 0x2ecc71 : 0xf2c94c)
+    .setTitle('🎮 Status Minecraft')
+    .setDescription(lines.join('\n'))
+    .setFooter({
+      text: verified
+        ? 'Akun sudah terhubung ke Minecraft.'
+        : 'Pakai !verify untuk ambil kode, lalu di Minecraft ketik !verify <kode>.',
+    });
+
+  return {
+    embeds: [embed],
+    allowedMentions: { parse: [], repliedUser: false },
+  };
+}
+
 async function ensureRegisterStore(registerStore, client) {
   if (!registerStore) return false;
   await registerStore.init(client);
@@ -303,21 +379,28 @@ async function ensureRegisterStore(registerStore, client) {
 async function handleMinecraftRegCommand(msg, options) {
   const {
     registerStore,
-    roleId = MINECRAFT_REGISTER_ROLE_ID,
+    pendingRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+    verifiedRoleId = MINECRAFT_REGISTER_ROLE_ID,
     infoChannelId = MINECRAFT_INFO_CHANNEL_ID,
     infoUrl = MINECRAFT_INFO_URL
   } = options;
-  const parsed = parseSingleArgCommand(msg.content, '!reg');
+  const parsed = parseSingleArgCommandAny(msg.content, ['!reg', '!daftar', '!register']);
   if (!parsed) return false;
   if (!msg.guild) return false;
   if (!parsed.hasArg) {
-    await replyNoPing(msg, gamertagFormatHelp('!reg'));
+    await replyNoPing(
+      msg,
+      [
+        gamertagFormatHelp(parsed.command || '!reg'),
+        'Command ini sekarang terhubung ke register Minecraft, bukan private Discord.',
+      ].join('\n')
+    );
     return true;
   }
 
   const gamertag = normalizeGamertag(parsed.arg);
   if (!isValidGamertag(gamertag)) {
-    await replyNoPing(msg, gamertagFormatHelp('!reg'));
+    await replyNoPing(msg, gamertagFormatHelp(parsed.command || '!reg'));
     return true;
   }
 
@@ -342,12 +425,6 @@ async function handleMinecraftRegCommand(msg, options) {
         msg,
         `Gamertag \`${gamertag}\` sudah dipakai oleh <@${duplicate.userId}>. Pakai gamertag lain.`
       );
-      return true;
-    }
-
-    const roleOk = await addRoleIfMissing(member, roleId);
-    if (!roleOk) {
-      await replyNoPing(msg, 'Gamertag belum diubah karena role registrasi gagal dicek. Hubungi admin.');
       return true;
     }
 
@@ -376,6 +453,12 @@ async function handleMinecraftRegCommand(msg, options) {
       return true;
     }
 
+    const roleOk = await syncMinecraftRegistrationRoleState(member, updated, { pendingRoleId, verifiedRoleId });
+    if (!roleOk) {
+      await replyNoPing(msg, 'Gamertag sudah disimpan, tapi role Discord gagal diupdate. Hubungi admin.');
+      return true;
+    }
+
     const nicknameOk = await setNicknameToGamertag(member, updated.gamertag).catch(err => {
       console.error('Failed to set Minecraft registration nickname:', err);
       return false;
@@ -385,8 +468,8 @@ async function handleMinecraftRegCommand(msg, options) {
       : 'Catatan: nickname Discord gagal diubah otomatis. Cek permission dan posisi role bot.';
     const changed = !isSameGamertag(previousGamertag, updated.gamertag);
     const verifyLine = changed
-      ? 'Jalankan `!verifyme` lagi agar gamertag baru terhubung ke akun Minecraft asli.'
-      : 'Kalau belum verified, jalankan `!verifyme` lalu ketik kode di server Minecraft.';
+      ? 'Jalankan `!verify` lagi agar gamertag baru terhubung ke akun Minecraft asli.'
+      : 'Kalau belum verified, jalankan `!verify`, lalu di server ketik `!verify <kode>`.';
 
     await replyNoPing(
       msg,
@@ -424,7 +507,7 @@ async function handleMinecraftRegCommand(msg, options) {
   }
 
   if (!result.created) {
-    const roleOk = await addRoleIfMissing(member, roleId);
+    const roleOk = await syncMinecraftRegistrationRoleState(member, result.entry, { pendingRoleId, verifiedRoleId });
     const nicknameOk = await setNicknameToGamertag(member, result.entry.gamertag).catch(err => {
       console.error('Failed to set Minecraft registration nickname:', err);
       return false;
@@ -441,14 +524,14 @@ async function handleMinecraftRegCommand(msg, options) {
         'Kamu sudah terdaftar.',
         formatExistingRegistration(result.entry),
         `Untuk ganti gamertag, pakai \`!reg ${gamertag}\` atau \`!edit-reg ${gamertag}\`.`,
-        'Untuk mengunci akun ke Minecraft asli, pakai `!verifyme` lalu ketik kode di server.',
+        'Untuk mengunci akun ke Minecraft asli, pakai `!verify`, lalu di server ketik `!verify <kode>`.',
         getInfoLine(infoChannelId, infoUrl) + roleNote + nicknameNote
       ].join('\n')
     );
     return true;
   }
 
-  const roleOk = await addRoleIfMissing(member, roleId);
+  const roleOk = await syncMinecraftRegistrationRoleState(member, result.entry, { pendingRoleId, verifiedRoleId });
   if (!roleOk) {
     const rolledBack = await registerStore.removeUser(msg.author.id)
       .then(() => true)
@@ -476,7 +559,7 @@ async function handleMinecraftRegCommand(msg, options) {
     [
       `Registrasi berhasil. Gamertag kamu: \`${gamertag}\`.`,
       'Role registrasi sudah diberikan.',
-      'Lanjutkan verifikasi dengan `!verifyme`, lalu ketik kode yang muncul di server Minecraft.',
+      'Lanjutkan dengan `!verify`, lalu di server ketik `!verify <kode>`.',
       nicknameNote,
       getInfoLine(infoChannelId, infoUrl)
     ].join('\n')
@@ -503,7 +586,8 @@ async function handleMinecraftReqTypoCommand(msg) {
 async function handleMinecraftEditRegCommand(msg, options) {
   const {
     registerStore,
-    roleId = MINECRAFT_REGISTER_ROLE_ID,
+    pendingRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+    verifiedRoleId = MINECRAFT_REGISTER_ROLE_ID,
     infoChannelId = MINECRAFT_INFO_CHANNEL_ID,
     infoUrl = MINECRAFT_INFO_URL
   } = options;
@@ -539,12 +623,6 @@ async function handleMinecraftEditRegCommand(msg, options) {
   }
 
   const member = await resolveMember(msg);
-  const roleOk = await addRoleIfMissing(member, roleId);
-  if (!roleOk) {
-    await replyNoPing(msg, 'Gamertag belum diubah karena role registrasi gagal dicek. Hubungi admin.');
-    return true;
-  }
-
   let updated = null;
   try {
     updated = await registerStore.updateUser(
@@ -569,6 +647,12 @@ async function handleMinecraftEditRegCommand(msg, options) {
     return true;
   }
 
+  const roleOk = await syncMinecraftRegistrationRoleState(member, updated, { pendingRoleId, verifiedRoleId });
+  if (!roleOk) {
+    await replyNoPing(msg, 'Gamertag sudah disimpan, tapi role Discord gagal diupdate. Hubungi admin.');
+    return true;
+  }
+
   const nicknameOk = await setNicknameToGamertag(member, updated.gamertag).catch(err => {
     console.error('Failed to set Minecraft registration nickname:', err);
     return false;
@@ -581,7 +665,7 @@ async function handleMinecraftEditRegCommand(msg, options) {
     msg,
     [
       `Gamertag berhasil diubah dari \`${existing.gamertag}\` ke \`${updated.gamertag}\`.`,
-      'Jalankan `!verifyme` lagi agar gamertag baru terhubung ke akun Minecraft asli.',
+      'Jalankan `!verify` lagi agar gamertag baru terhubung ke akun Minecraft asli.',
       nicknameNote,
       getInfoLine(infoChannelId, infoUrl)
     ].join('\n')
@@ -590,7 +674,11 @@ async function handleMinecraftEditRegCommand(msg, options) {
 }
 
 async function handleMinecraftOutCommand(msg, options) {
-  const { registerStore, roleId = MINECRAFT_REGISTER_ROLE_ID } = options;
+  const {
+    registerStore,
+    pendingRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+    verifiedRoleId = MINECRAFT_REGISTER_ROLE_ID,
+  } = options;
   if (!isExactCommand(msg.content, '!out')) return false;
   if (!msg.guild) return false;
 
@@ -602,14 +690,17 @@ async function handleMinecraftOutCommand(msg, options) {
 
   const member = await resolveMember(msg);
   const hadData = Boolean(registerStore.getUser(msg.author.id));
-  const hadRole = Boolean(roleId && member?.roles?.cache?.has(roleId));
+  const hadRole = Boolean(
+    (pendingRoleId && member?.roles?.cache?.has(pendingRoleId)) ||
+    (verifiedRoleId && member?.roles?.cache?.has(verifiedRoleId))
+  );
 
   if (!hadData && !hadRole) {
     await replyNoPing(msg, 'Kamu belum terdaftar di registrasi Minecraft.');
     return true;
   }
 
-  const removedRole = await removeRoleIfPresent(member, roleId);
+  const removedRole = await removeMinecraftRegistrationRoles(member, { pendingRoleId, verifiedRoleId });
   if (!removedRole) {
     await replyNoPing(msg, 'Gagal mencabut role registrasi. Hubungi admin.');
     return true;
@@ -632,7 +723,8 @@ async function handleMinecraftOutCommand(msg, options) {
 async function handleMinecraftResetCommand(msg, options) {
   const {
     registerStore,
-    roleId = MINECRAFT_REGISTER_ROLE_ID,
+    pendingRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+    verifiedRoleId = MINECRAFT_REGISTER_ROLE_ID,
     resetAdminId = MINECRAFT_REGISTER_RESET_ADMIN_ID
   } = options;
   if (!isExactCommand(msg.content, '!reset')) return false;
@@ -662,8 +754,11 @@ async function handleMinecraftResetCommand(msg, options) {
       continue;
     }
 
-    const hadRole = Boolean(roleId && member.roles.cache.has(roleId));
-    const removed = await removeRoleIfPresent(member, roleId);
+    const hadRole = Boolean(
+      (pendingRoleId && member.roles.cache.has(pendingRoleId)) ||
+      (verifiedRoleId && member.roles.cache.has(verifiedRoleId))
+    );
+    const removed = await removeMinecraftRegistrationRoles(member, { pendingRoleId, verifiedRoleId });
     if (!removed) {
       failed += 1;
       continue;
@@ -708,6 +803,21 @@ async function handleMinecraftTotalRegCommand(msg, options) {
   return true;
 }
 
+async function handleMinecraftStatusCommand(msg, options) {
+  const { registerStore } = options;
+  if (!isExactCommand(msg.content, '!status')) return false;
+  if (!msg.guild) return false;
+
+  const ready = await ensureRegisterStore(registerStore, msg.client);
+  if (!ready) {
+    await replyNoPing(msg, 'Sistem registrasi belum aktif. Hubungi admin.');
+    return true;
+  }
+
+  await replyNoPing(msg, buildMinecraftStatusPayload(registerStore.getUser(msg.author.id)));
+  return true;
+}
+
 async function handleMinecraftListCommand(msg, options) {
   const { registerStore } = options;
   const page = parseListPage(msg.content);
@@ -738,7 +848,8 @@ async function handleMinecraftListCommand(msg, options) {
 
 function createMinecraftRegisterHandler({
   registerStore,
-  roleId = MINECRAFT_REGISTER_ROLE_ID,
+  pendingRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  verifiedRoleId = MINECRAFT_REGISTER_ROLE_ID,
   resetAdminId = MINECRAFT_REGISTER_RESET_ADMIN_ID,
   infoChannelId = MINECRAFT_INFO_CHANNEL_ID,
   infoUrl = MINECRAFT_INFO_URL
@@ -752,7 +863,7 @@ function createMinecraftRegisterHandler({
         await cleanupRecentMinecraftBotMessages(msg);
       }
 
-      const options = { registerStore, roleId, resetAdminId, infoChannelId, infoUrl };
+      const options = { registerStore, pendingRoleId, verifiedRoleId, resetAdminId, infoChannelId, infoUrl };
 
       const handledEdit = await handleMinecraftEditRegCommand(msg, options);
       if (handledEdit) return true;
@@ -765,6 +876,9 @@ function createMinecraftRegisterHandler({
 
       const handledTotalReg = await handleMinecraftTotalRegCommand(msg, options);
       if (handledTotalReg) return true;
+
+      const handledStatus = await handleMinecraftStatusCommand(msg, options);
+      if (handledStatus) return true;
 
       const handledList = await handleMinecraftListCommand(msg, options);
       if (handledList) return true;
@@ -844,13 +958,13 @@ async function findMemberAcrossGuilds(client, userId) {
 async function syncMinecraftRoleForMember(
   member,
   registerStore,
-  roleId = MINECRAFT_REGISTER_ROLE_ID
+  roleIds = {}
 ) {
   if (!member || member.user?.bot || !registerStore) return false;
   await registerStore.init(member.client);
   const entry = registerStore.getUser(member.id);
   if (!entry) return false;
-  const roleOk = await addRoleIfMissing(member, roleId);
+  const roleOk = await syncMinecraftRegistrationRoleState(member, entry, roleIds);
   await setNicknameToGamertag(member, entry.gamertag).catch(err => {
     console.error('Failed to sync minecraft nickname for joined member:', err);
   });
@@ -860,9 +974,14 @@ async function syncMinecraftRoleForMember(
 async function syncMinecraftRegistrationRolesFromStore(
   client,
   registerStore,
-  roleId = MINECRAFT_REGISTER_ROLE_ID
+  roleIds = {}
 ) {
-  if (!client || !registerStore || !roleId) {
+  const {
+    pendingRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+    verifiedRoleId = MINECRAFT_REGISTER_ROLE_ID,
+  } = roleIds || {};
+
+  if (!client || !registerStore || (!pendingRoleId && !verifiedRoleId)) {
     return { scanned: 0, synced: 0, failed: 0, skipped: 0 };
   }
 
@@ -882,7 +1001,7 @@ async function syncMinecraftRegistrationRolesFromStore(
   for (const userId of cleanup.removedDuplicateUserIds) {
     const member = await findMemberAcrossGuilds(client, userId);
     if (!member) continue;
-    const removed = await removeRoleIfPresent(member, roleId);
+    const removed = await removeMinecraftRegistrationRoles(member, { pendingRoleId, verifiedRoleId });
     if (removed) {
       stats.duplicateRolesRemoved += 1;
     } else {
@@ -898,7 +1017,7 @@ async function syncMinecraftRegistrationRolesFromStore(
       continue;
     }
 
-    const ok = await addRoleIfMissing(member, roleId);
+    const ok = await syncMinecraftRegistrationRoleState(member, entry, { pendingRoleId, verifiedRoleId });
     await setNicknameToGamertag(member, entry.gamertag).catch(err => {
       console.error('Failed to sync minecraft nickname from store:', err);
     });

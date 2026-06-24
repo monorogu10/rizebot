@@ -28,7 +28,12 @@ const { createTopupBridgeService } = require('./src/services/topupBridgeService'
 const { createTopupBridgeServer } = require('./src/services/topupBridgeServer');
 const { createTopupHandler } = require('./src/handlers/topupHandler');
 const { createMinecraftBridgeHandler } = require('./src/handlers/minecraftBridgeHandler');
-const { REGISTER_ROLE_ID, LEGACY_ROLE_ID, MINECRAFT_REGISTER_ROLE_ID } = require('./src/config');
+const {
+  REGISTER_ROLE_ID,
+  LEGACY_ROLE_ID,
+  MINECRAFT_REGISTER_ROLE_ID,
+  MINECRAFT_REGISTER_PENDING_ROLE_ID,
+} = require('./src/config');
 const { TOPUP_BRIDGE_HOST, TOPUP_BRIDGE_PORT, TOPUP_BRIDGE_TOKEN } = require('./src/config');
 const { isAllowedBotOutputChannel } = require('./src/utils/channelPolicy');
 
@@ -124,7 +129,8 @@ const topupBridgeServer = createTopupBridgeServer({
   token: TOPUP_BRIDGE_TOKEN
 });
 const minecraftRegisterHandler = createMinecraftRegisterHandler({
-  roleId: MINECRAFT_REGISTER_ROLE_ID,
+  pendingRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  verifiedRoleId: MINECRAFT_REGISTER_ROLE_ID,
   registerStore: minecraftRegisterStore
 });
 const minecraftRegisterInteractionHandler = createMinecraftRegisterInteractionHandler({
@@ -190,7 +196,10 @@ client.once('clientReady', async () => {
   await syncMinecraftRegistrationRolesFromStore(
     client,
     minecraftRegisterStore,
-    MINECRAFT_REGISTER_ROLE_ID
+    {
+      pendingRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
+      verifiedRoleId: MINECRAFT_REGISTER_ROLE_ID,
+    }
   )
     .then(stats => {
       console.log(
@@ -290,7 +299,10 @@ client.on('guildMemberAdd', async member => {
   await syncMinecraftRoleForMember(
     member,
     minecraftRegisterStore,
-    MINECRAFT_REGISTER_ROLE_ID
+    {
+      pendingRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
+      verifiedRoleId: MINECRAFT_REGISTER_ROLE_ID,
+    }
   ).catch(err => {
     console.error('Failed to sync minecraft role for joined member:', err);
   });

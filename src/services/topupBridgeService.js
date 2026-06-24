@@ -2,15 +2,23 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { EmbedBuilder } = require('discord.js');
-const { MINECRAFT_CHAT_LOG_CHANNEL_ID } = require('../config');
+const {
+  MINECRAFT_CHAT_LOG_CHANNEL_ID,
+  MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  MINECRAFT_REGISTER_ROLE_ID,
+} = require('../config');
 
-const JOB_LEASE_MS = 20 * 1000;
+const JOB_LEASE_MS = 2 * 60 * 1000;
 const JOB_TTL_MS = 10 * 60 * 1000;
 const JOB_LIMIT = 100;
 const VERIFY_CODE_TTL_MS = 10 * 60 * 1000;
 const ONLINE_TTL_MS = 90 * 1000;
+const RUNTIME_DIR = process.env.RIZEBOT_RUNTIME_DIR ||
+  path.join(__dirname, '..', '..', '.runtime');
 const VERIFY_STORE_FILE = process.env.RIZEBOT_VERIFY_STORE_FILE ||
-  path.join(process.cwd(), '.runtime', 'minecraft-verify-codes.json');
+  path.join(RUNTIME_DIR, 'minecraft-verify-codes.json');
+const JOB_STORE_FILE = process.env.RIZEBOT_JOB_STORE_FILE ||
+  path.join(RUNTIME_DIR, 'minecraft-bridge-jobs.json');
 const EMBED_COLOR_CHAT = 0x2f80ed;
 const EMBED_COLOR_TRANS = 0xf2c94c;
 const EMBED_COLOR_JOIN = 0x2ecc71;
@@ -59,16 +67,49 @@ function cleanText(value, maxLength = 1800) {
 }
 
 function cleanEmbedText(value, maxLength = 3800) {
-  const text = cleanText(value, maxLength);
+  const text = String(value || '')
+    .replace(/\u00A7[0-9A-FK-OR]/gi, '')
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, '')
+    .split(/\r?\n/g)
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim()
+    .slice(0, maxLength);
   return text || '-';
 }
 
-function createLogEmbed({ color, title, description, fields = [] }) {
+function formatJakartaTime(date = new Date()) {
+  try {
+    return `${new Intl.DateTimeFormat('id-ID', {
+      timeZone: 'Asia/Jakarta',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(date)} WIB`;
+  } catch {
+    return date.toISOString();
+  }
+}
+
+function compactFooter(parts = []) {
+  const clean = parts
+    .map(part => cleanText(part, 180))
+    .filter(Boolean);
+  return clean.join(' • ').slice(0, 2048) || formatJakartaTime();
+}
+
+function createLogEmbed({ color, title, description, footerParts = [], thumbnailUrl = '', fields = [] }) {
   const embed = new EmbedBuilder()
     .setColor(color)
     .setTitle(cleanText(title, 256) || 'Minecraft Log')
     .setDescription(cleanEmbedText(description))
-    .setTimestamp(new Date());
+    .setFooter({ text: compactFooter([`🕒 ${formatJakartaTime()}`, ...footerParts]) });
+
+  const thumbnail = String(thumbnailUrl || '').trim();
+  if (thumbnail) {
+    embed.setThumbnail(thumbnail);
+  }
 
   const safeFields = fields
     .map(field => ({
@@ -93,6 +134,31 @@ function isVerifiedMinecraftLink(linked, player = {}) {
 
 function isVerifyBypassGamertag(gamertag) {
   return VERIFY_BYPASS_GAMERTAGS.has(n(gamertag));
+}
+
+async function fetchRole(guild, roleId) {
+  if (!guild || !roleId) return null;
+  return guild.roles.cache.get(roleId) || guild.roles.fetch(roleId).catch(() => null);
+}
+
+async function addRoleIfMissing(member, roleId) {
+  if (!member || !roleId) return false;
+  if (member.roles.cache.has(roleId)) return true;
+  const role = await fetchRole(member.guild, roleId);
+  if (!role) return false;
+  const updated = await member.roles.add(role).catch(() => null);
+  if (updated?.roles?.cache?.has(roleId)) return true;
+  return member.roles.cache.has(roleId);
+}
+
+async function removeRoleIfPresent(member, roleId) {
+  if (!member || !roleId) return true;
+  if (!member.roles.cache.has(roleId)) return true;
+  const role = await fetchRole(member.guild, roleId);
+  if (!role) return false;
+  const updated = await member.roles.remove(role).catch(() => null);
+  if (updated?.roles?.cache && !updated.roles.cache.has(roleId)) return true;
+  return !member.roles.cache.has(roleId);
 }
 
 function targetScore(entry, query) {
@@ -132,13 +198,19 @@ function formatServerTargetLine(target, index = 0) {
   const geon = target.wallet ? ` | Geon=${formatNumber(target.wallet.geon)}` : '';
   const ether = target.wallet ? ` | Ether=${formatNumber(target.wallet.ether)}` : '';
   const pid = target.persistentId ? ` | pid=${target.persistentId.slice(0, 10)}...` : '';
-  return `${index + 1}. \`${name}\` | ${online}${geon}${ether}${pid}`;
+  const registerStatus = target.verified
+    ? '✅ resmi'
+    : (target.discordUserId ? '⚠️ belum verified' : '❌ belum register');
+  const discord = target.discordUserId ? `<@${target.discordUserId}> (${target.discordUserId})` : '-';
+  return `${index + 1}. \`${name}\` | ${online} | ${registerStatus} | Discord=${discord}${geon}${ether}${pid}`;
 }
 
 function createTopupBridgeService({ registerStore, client = null }) {
   const jobs = new Map();
   const pendingVerifications = new Map();
   const onlinePlayers = new Map();
+  const discordUserCache = new Map();
+  let jobsLoaded = false;
   let chatChannelPromise = null;
   const bridgeStats = {
     lastJobPollAt: null,
@@ -225,10 +297,111 @@ function createTopupBridgeService({ registerStore, client = null }) {
     }
   }
 
+  function normalizeJobRecord(record = {}, now = Date.now()) {
+    const job = record.job && typeof record.job === 'object' ? record.job : null;
+    const id = cleanText(record.id || job?.id, 100);
+    const type = cleanText(job?.type, 80);
+    if (!id || !job?.id || !type) return null;
+
+    const safeStatus = ['queued', 'leased', 'done'].includes(record.status)
+      ? record.status
+      : 'queued';
+    const updatedAt = Math.floor(Number(record.updatedAt) || now);
+    if (safeStatus === 'done' && now - updatedAt > JOB_TTL_MS) return null;
+
+    const leaseUntil = Math.floor(Number(record.leaseUntil) || 0);
+    return {
+      id,
+      job: {
+        ...job,
+        id,
+        type,
+      },
+      context: record.context || null,
+      status: safeStatus === 'leased' && leaseUntil <= now ? 'queued' : safeStatus,
+      attempts: Math.max(0, Math.floor(Number(record.attempts) || 0)),
+      leaseUntil: safeStatus === 'leased' && leaseUntil > now ? leaseUntil : 0,
+      createdAt: Math.floor(Number(record.createdAt) || updatedAt || now),
+      updatedAt,
+      result: record.result && typeof record.result === 'object' ? record.result : null,
+    };
+  }
+
+  function loadJobsFromDisk(now = Date.now()) {
+    if (jobsLoaded) return false;
+    jobsLoaded = true;
+
+    let raw = '';
+    try {
+      raw = fs.readFileSync(JOB_STORE_FILE, 'utf8');
+    } catch (err) {
+      if (err?.code !== 'ENOENT') {
+        console.error('Failed to read Minecraft bridge job store:', err);
+      }
+      return false;
+    }
+
+    let data = null;
+    try {
+      data = JSON.parse(raw);
+    } catch (err) {
+      console.error('Failed to parse Minecraft bridge job store:', err);
+      return false;
+    }
+
+    const records = Array.isArray(data?.records) ? data.records : [];
+    let changed = false;
+    for (const rawRecord of records) {
+      const record = normalizeJobRecord(rawRecord, now);
+      if (!record) {
+        changed = true;
+        continue;
+      }
+      if (rawRecord?.status !== record.status || rawRecord?.leaseUntil !== record.leaseUntil) {
+        changed = true;
+      }
+      jobs.set(record.id, record);
+    }
+    return changed;
+  }
+
+  function saveJobsToDisk(now = Date.now()) {
+    const records = [...jobs.values()]
+      .map(record => normalizeJobRecord(record, now))
+      .filter(Boolean)
+      .map(record => ({
+        id: record.id,
+        job: record.job,
+        status: record.status,
+        attempts: record.attempts,
+        leaseUntil: record.leaseUntil,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        result: record.result,
+      }));
+
+    const payload = JSON.stringify({
+      updatedAt: new Date(now).toISOString(),
+      records,
+    }, null, 2);
+
+    try {
+      fs.mkdirSync(path.dirname(JOB_STORE_FILE), { recursive: true });
+      const tmpFile = `${JOB_STORE_FILE}.tmp`;
+      fs.writeFileSync(tmpFile, payload);
+      fs.renameSync(tmpFile, JOB_STORE_FILE);
+    } catch (err) {
+      console.error('Failed to write Minecraft bridge job store:', err);
+    }
+  }
+
   function pruneJobs(now = Date.now()) {
+    const diskChanged = loadJobsFromDisk(now);
+    let changed = diskChanged;
     for (const [jobId, record] of jobs.entries()) {
       if (record.status === 'done' && now - record.updatedAt > JOB_TTL_MS) {
         jobs.delete(jobId);
+        changed = true;
       }
     }
 
@@ -236,7 +409,10 @@ function createTopupBridgeService({ registerStore, client = null }) {
       const first = jobs.keys().next().value;
       if (!first) break;
       jobs.delete(first);
+      changed = true;
     }
+
+    if (changed) saveJobsToDisk(now);
   }
 
   function pruneVerifications(now = Date.now()) {
@@ -260,6 +436,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
       name: cleanText(player.name, 80),
       key: cleanText(player.key || player.name, 80).toLowerCase(),
       persistentId: cleanText(player.persistentId, 160),
+      rank: cleanText(player.rank || '', 180),
       online: player.online !== false,
       wallet: player.wallet && typeof player.wallet === 'object'
         ? {
@@ -269,6 +446,82 @@ function createTopupBridgeService({ registerStore, client = null }) {
         : null,
       updatedAt: now,
     };
+  }
+
+  function findLinkedUserForPlayer(player = {}) {
+    const persistentId = cleanText(player.persistentId, 160);
+    const byPersistentId = persistentId
+      ? registerStore.findUserByPersistentId?.(persistentId)
+      : null;
+    if (byPersistentId) return byPersistentId;
+
+    const names = [player.name, player.gamertag, player.key]
+      .map(value => cleanText(value, 80))
+      .filter(Boolean);
+    for (const name of names) {
+      const linked = registerStore.findUserByGamertag?.(name);
+      if (linked) return linked;
+    }
+    return null;
+  }
+
+  function attachRegistrationToOnlinePlayer(player = {}) {
+    const linked = findLinkedUserForPlayer(player);
+    const verified = isVerifiedMinecraftLink(linked, player);
+    return {
+      ...player,
+      registered: Boolean(linked),
+      verified,
+      discordUserId: linked?.userId || '',
+      discordUsername: linked?.entry?.username || '',
+      registeredGamertag: linked?.entry?.gamertag || '',
+      registeredPersistentId: linked?.entry?.persistentId || '',
+    };
+  }
+
+  async function resolveDiscordUser(userIdRaw) {
+    const userId = String(userIdRaw || '').trim();
+    if (!userId || !client?.users) return null;
+
+    const now = Date.now();
+    const cached = discordUserCache.get(userId);
+    if (cached && cached.expiresAt > now) return cached.user;
+
+    const user = client.users.cache.get(userId) ||
+      await client.users.fetch(userId).catch(() => null);
+    if (user) {
+      discordUserCache.set(userId, {
+        user,
+        expiresAt: now + (10 * 60 * 1000),
+      });
+    }
+    return user;
+  }
+
+  function discordAvatarUrl(user) {
+    try {
+      return user?.displayAvatarURL?.({ size: 64 }) || '';
+    } catch {
+      return '';
+    }
+  }
+
+  async function syncVerifiedMinecraftRole(userIdRaw) {
+    const userId = String(userIdRaw || '').trim();
+    if (!userId || !client?.guilds?.cache) return false;
+
+    for (const guild of client.guilds.cache.values()) {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      if (!member) continue;
+
+      const added = await addRoleIfMissing(member, MINECRAFT_REGISTER_ROLE_ID);
+      const removedPending = MINECRAFT_REGISTER_PENDING_ROLE_ID === MINECRAFT_REGISTER_ROLE_ID
+        ? true
+        : await removeRoleIfPresent(member, MINECRAFT_REGISTER_PENDING_ROLE_ID);
+      return added && removedPending;
+    }
+
+    return false;
   }
 
   function rememberOnlinePlayer(player = {}) {
@@ -315,6 +568,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const now = Date.now();
     return [...onlinePlayers.values()]
       .filter(player => player.online && now - player.updatedAt <= ONLINE_TTL_MS)
+      .map(attachRegistrationToOnlinePlayer)
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -369,6 +623,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
       createdAt: now,
       updatedAt: now,
     });
+    saveJobsToDisk(now);
     return job;
   }
 
@@ -449,16 +704,20 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
     if (result.length > 0) {
       bridgeStats.lastJobPollHadJobsAt = new Date().toISOString();
+      saveJobsToDisk(now);
     }
     return result;
   }
 
   async function sendCouponResult(record, result) {
     const message = record.context?.message;
-    if (!message) return;
+    const requester = message?.author || await resolveDiscordUser(record.job?.requestedBy);
+    if (!message && !requester) return;
 
     if (!result.ok) {
-      await message.reply(`Generate kupon gagal: \`${result.code || 'unknown'}\``).catch(() => {});
+      const failText = `Generate kupon gagal: \`${result.code || 'unknown'}\``;
+      if (message) await message.reply(failText).catch(() => {});
+      else await requester.send(failText).catch(() => {});
       return;
     }
 
@@ -471,29 +730,37 @@ function createTopupBridgeService({ registerStore, client = null }) {
       couponText,
     ].join('\n');
 
-    const dm = await message.author?.send(`\`\`\`\n${dmText}\n\`\`\``).catch(() => null);
+    const dm = await requester?.send(`\`\`\`\n${dmText}\n\`\`\``).catch(() => null);
     if (dm) {
-      await message.reply(`Kupon berhasil dibuat dan sudah dikirim lewat DM. Jumlah: ${coupons.length}`).catch(() => {});
-    } else {
+      if (message) {
+        await message.reply(`Kupon berhasil dibuat dan sudah dikirim lewat DM. Jumlah: ${coupons.length}`).catch(() => {});
+      }
+    } else if (message) {
       await message.reply(`Kupon berhasil dibuat:\n\`\`\`\n${dmText}\n\`\`\``).catch(() => {});
     }
   }
 
   async function sendTopupResult(record, result) {
     const message = record.context?.message;
-    if (!message) return;
+    const requester = message?.author || await resolveDiscordUser(record.job?.requestedBy);
+    if (!message && !requester) return;
 
     const targetName = result.targetName || record.context?.target?.gamertag || record.job?.targetName || '-';
     const geon = result.geon || record.job?.geon || 0;
     const rupiah = result.rupiah || record.job?.rupiah || 0;
+    const text = result.ok
+      ? (
+        result.status === 'pending'
+          ? `TOPUP pending: \`${targetName}\` akan menerima **${formatNumber(geon)} Geon** (${rupiahText(rupiah)}) saat join.`
+          : `TOPUP sukses: \`${targetName}\` menerima **${formatNumber(geon)} Geon** (${rupiahText(rupiah)}).`
+      )
+      : `TOPUP gagal untuk \`${targetName}\`: \`${result.code || 'unknown'}\`.`;
     if (result.ok) {
-      await message.reply(
-        `TOPUP sukses: \`${targetName}\` menerima **${formatNumber(geon)} Geon** (${rupiahText(rupiah)}).`
-      ).catch(() => {});
+      if (message) await message.reply(text).catch(() => {});
+      else await requester.send(text).catch(() => {});
     } else {
-      await message.reply(
-        `TOPUP gagal untuk \`${targetName}\`: \`${result.code || 'unknown'}\`.`
-      ).catch(() => {});
+      if (message) await message.reply(text).catch(() => {});
+      else await requester.send(text).catch(() => {});
     }
   }
 
@@ -529,11 +796,16 @@ function createTopupBridgeService({ registerStore, client = null }) {
       return;
     }
 
-    const targets = Array.isArray(result.targets) ? result.targets.slice(0, 15) : [];
+    const targets = Array.isArray(result.targets)
+      ? result.targets.slice(0, 15).map(attachRegistrationToOnlinePlayer)
+      : [];
     const lines = targets.length
       ? targets.map(formatServerTargetLine).join('\n')
       : 'Tidak ada hasil dari data server.';
-    await message.reply(`Hasil server untuk \`${record.job.query || '-'}\`:\n${lines}`).catch(() => {});
+    await message.reply({
+      content: `Hasil server untuk \`${record.job.query || '-'}\`:\n${lines}`,
+      allowedMentions: { parse: [], repliedUser: false },
+    }).catch(() => {});
   }
 
   async function sendPlayerInfoResult(record, result) {
@@ -621,6 +893,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     record.updatedAt = Date.now();
     record.result = resultRaw;
     bridgeStats.lastResultAt = new Date().toISOString();
+    saveJobsToDisk(record.updatedAt);
 
     try {
       if (record.job.type === 'coupon') {
@@ -658,14 +931,21 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const message = cleanText(event.message || '', 1600);
     if (!message) return { ok: false, code: 'empty-message' };
 
+    const linked = findLinkedUserForPlayer(event);
+    const user = await resolveDiscordUser(linked?.userId);
+    const rank = cleanText(event.rank || 'Player', 180) || 'Player';
+    const footerParts = [
+      `💬 Rank: ${rank}`,
+      linked?.userId ? `Discord ID: ${linked.userId}` : 'Discord: belum linked',
+    ];
+
     await channel.send({
       embeds: [createLogEmbed({
         color: EMBED_COLOR_CHAT,
-        title: 'Minecraft Chat',
+        title: name,
         description: message,
-        fields: [
-          { name: 'Player', value: name },
-        ],
+        footerParts,
+        thumbnailUrl: discordAvatarUrl(user),
       })],
       allowedMentions: { parse: [] },
     }).catch(err => {
@@ -686,11 +966,9 @@ function createTopupBridgeService({ registerStore, client = null }) {
     await channel.send({
       embeds: [createLogEmbed({
         color: EMBED_COLOR_TRANS,
-        title: 'Transparansi',
+        title: `📣 Transparansi: ${label || category || 'unknown'}`,
         description: message,
-        fields: [
-          { name: 'Kategori', value: label || category || 'unknown' },
-        ],
+        footerParts: [`Kategori: ${category}`],
       })],
       allowedMentions: { parse: [] },
     }).catch(err => {
@@ -707,18 +985,24 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const name = cleanText(player.name || event.name || 'unknown', 80);
     if (!name) return { ok: false, code: 'empty-name' };
 
-    const label = type === 'player_leave' ? 'LEAVE' : 'JOIN';
-    const action = type === 'player_leave' ? 'keluar server' : 'masuk server';
+    const linked = findLinkedUserForPlayer(player);
+    const user = await resolveDiscordUser(linked?.userId);
+    const isLeave = type === 'player_leave';
+    const action = isLeave ? 'left the game' : 'joined the game';
     const detailText = cleanText(detail, 160);
+    const description = [
+      `${isLeave ? '🔴' : '🟢'} ${name} ${action}.`,
+      detailText ? `Status: ${detailText}` : '',
+      linked?.userId ? `Discord ID: \`${linked.userId}\`` : 'Discord ID: -',
+    ].filter(Boolean).join('\n');
+
     await channel.send({
       embeds: [createLogEmbed({
-        color: type === 'player_leave' ? EMBED_COLOR_LEAVE : EMBED_COLOR_JOIN,
-        title: label === 'LEAVE' ? 'Player Keluar' : 'Player Masuk',
-        description: `${name} ${action}.`,
-        fields: [
-          { name: 'Player', value: name },
-          ...(detailText ? [{ name: 'Status', value: detailText }] : []),
-        ],
+        color: isLeave ? EMBED_COLOR_LEAVE : EMBED_COLOR_JOIN,
+        title: `${isLeave ? '[-]' : '[+]'} ${name} ${action}`,
+        description,
+        footerParts: [isLeave ? 'Event: leave' : 'Event: join'],
+        thumbnailUrl: discordAvatarUrl(user),
       })],
       allowedMentions: { parse: [] },
     }).catch(err => {
@@ -782,10 +1066,15 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
     pendingVerifications.delete(code);
     saveVerificationsToDisk();
+    const roleSynced = await syncVerifiedMinecraftRole(record.userId).catch(err => {
+      console.error('Failed to sync verified Minecraft role:', err);
+      return false;
+    });
     await record.message?.reply(
-      `Verifikasi Minecraft berhasil: \`${name}\` sekarang linked dan verified.`
+      `Verifikasi Minecraft berhasil: \`${name}\` sekarang linked dan verified.` +
+        (roleSynced ? ' Role Discord sudah diupdate.' : ' Catatan: role Discord belum bisa diupdate otomatis.')
     ).catch(() => {});
-    return { ok: true, code: 'ok', userId: record.userId, gamertag: name };
+    return { ok: true, code: 'ok', userId: record.userId, gamertag: name, roleSynced };
   }
 
   async function handleMinecraftEvent(eventRaw = {}) {
