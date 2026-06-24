@@ -15,6 +15,7 @@ const {
 const GAMERTAG_REGEX = /^[A-Za-z0-9_ ]{3,32}$/;
 const LIST_PAGE_SIZE = 10;
 const LIST_BUTTON_PREFIX = 'mcreglist';
+const COMMAND_CLEANUP_DELAY_MS = 20 * 1000;
 
 function escapeRegExp(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -43,6 +44,16 @@ function parseSingleArgCommand(content, command) {
 function isExactCommand(content, command) {
   const pattern = new RegExp(`^${buildCommandPattern(command)}\\s*$`, 'i');
   return pattern.test(String(content || '').trim());
+}
+
+function isMinecraftCommandLike(content) {
+  return /^!\s*(?:edit\s*-\s*reg|list\s*-\s*reg|list|req|reg|out|reset)(?:\s|$)/i
+    .test(String(content || '').trim());
+}
+
+function deleteCommandMessage(msg) {
+  if (msg?.deletable === false) return;
+  void msg?.delete?.().catch(() => {});
 }
 
 function isValidGamertag(gamertag) {
@@ -84,7 +95,24 @@ function createNoPingPayload(payload) {
 }
 
 async function replyNoPing(msg, payload) {
-  return msg.reply(createNoPingPayload(payload)).catch(() => null);
+  const replyPayload = createNoPingPayload(payload);
+  const reply = await msg.channel?.send(replyPayload).catch(() => null) ||
+    await msg.reply(replyPayload).catch(() => null);
+  scheduleCommandCleanup(msg, reply);
+  return reply;
+}
+
+function scheduleCommandCleanup(msg, reply, delayMs = COMMAND_CLEANUP_DELAY_MS) {
+  if (!msg?.delete && !reply?.delete) return;
+  const cleanupTimer = setTimeout(() => {
+    if (reply?.deletable !== false) {
+      void reply.delete?.().catch(() => {});
+    }
+    if (msg?.deletable !== false) {
+      void msg.delete?.().catch(() => {});
+    }
+  }, delayMs);
+  cleanupTimer.unref?.();
 }
 
 async function resolveMember(msg) {
@@ -616,6 +644,8 @@ function createMinecraftRegisterHandler({
     try {
       if (!msg || msg.author?.bot) return false;
       if (!msg.guild) return false;
+      const isMinecraftCommand = isMinecraftCommandLike(msg.content);
+      if (isMinecraftCommand) deleteCommandMessage(msg);
 
       const options = { registerStore, roleId, resetAdminId, infoChannelId, infoUrl };
 

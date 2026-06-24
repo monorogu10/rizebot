@@ -154,9 +154,10 @@ async function reloadMinecraftDataFromMessage(msg) {
 async function handleMessageCreate(msg) {
   if (await reloadMinecraftDataFromMessage(msg)) return;
   if (!isAllowedBotOutputChannel(msg)) return;
+  if (wasContentProcessed(msg)) return;
+  rememberProcessedContent(msg);
 
   await baseHandleMessage(msg);
-  rememberProcessedContent(msg);
 }
 
 async function handleMessageUpdate(oldMsg, newMsg) {
