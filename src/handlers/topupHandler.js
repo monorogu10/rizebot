@@ -1,4 +1,5 @@
 const { TOPUP_ADMIN_DISCORD_ID } = require('../config');
+const { calculateGeon } = require('../services/sociabuzzTopupService');
 
 const GEON_MAX = 100_000_000;
 const RUPIAH_MAX = 2_000_000_000;
@@ -15,12 +16,16 @@ function normalizeSpaces(value) {
 
 function parseCommand(content) {
   const raw = normalizeSpaces(content);
-  const match = raw.match(/^!(srcpl|searchpl|tu|topup|gnrtkpn|kupon|coupon|topup-help)(?:\s+(.+))?$/i);
+  const match = raw.match(/^!(srcpl|searchpl|tu|topup|gnrtkpn|kupon|coupon|topup-help|geonrate|rategeon|cek-harga|cekharga|kurs|harga|rate)(?:\s+(.+))?$/i);
   if (!match) return null;
   return {
     command: match[1].toLowerCase(),
     args: normalizeSpaces(match[2] || ''),
   };
+}
+
+function isRateCommand(command) {
+  return ['geonrate', 'rategeon', 'cek-harga', 'cekharga', 'kurs', 'harga', 'rate'].includes(command);
 }
 
 function parseTopupArgs(args, bridge) {
@@ -64,6 +69,7 @@ function helpText() {
     '`!srcpl <nama>` - cari player dari data asli server Minecraft + status Discord',
     '`!tu <nama/key> <geon> <rupiah>` - kirim topup ke Minecraft',
     '`!gnrtkpn <geon> <rupiah> [jumlah] [hari_expired]` - generate kupon',
+    '`!geonrate <rupiah>` / `!kurs <rupiah>` - cek kalkulasi Geon otomatis SociaBuzz',
   ].join('\n');
 }
 
@@ -74,8 +80,20 @@ function createTopupHandler({ bridge }) {
     const parsed = parseCommand(msg.content);
     if (!parsed) return false;
 
+    if (isRateCommand(parsed.command)) {
+      const rupiah = bridge.normalizePositiveInt(parsed.args, RUPIAH_MAX);
+      if (!rupiah) {
+        await msg.reply('Format: `!geonrate <rupiah>` atau `!kurs <rupiah>`').catch(() => {});
+        return true;
+      }
+      await msg.reply(
+        `${bridge.rupiahText(rupiah)} = **${bridge.formatNumber(calculateGeon(rupiah))} Geon**`
+      ).catch(() => {});
+      return true;
+    }
+
     if (!isTopupAdmin(msg.author?.id)) {
-      await msg.reply('Command TOPUP hanya untuk admin.').catch(() => {});
+      await msg.reply('Command TOPUP hanya untuk admin. Untuk cek kurs, pakai `!geonrate <rupiah>`.').catch(() => {});
       return true;
     }
 

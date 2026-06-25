@@ -6,6 +6,7 @@ const REPLY_DEDUPE_TTL_MS = 5 * 60 * 1000;
 const REPLY_DEDUPE_MAX = 1000;
 const CLAIM_LAND_TUTORIAL_URL = 'https://www.youtube.com/shorts/DkJUHpTXktg';
 const MAGIC_TOOL_TUTORIAL_URL = 'https://www.youtube.com/shorts/wHzqhw7TdQ0';
+const TOPUP_SUPPORT_URL = 'https://sociabuzz.com/monodeco/support';
 const HOW_TO_WORDS = new Set([
   'cara',
   'gimana',
@@ -21,6 +22,38 @@ const HOW_TO_WORDS = new Set([
   'guna',
   'use',
   'how'
+]);
+const TOPUP_WORDS = new Set([
+  'topup',
+  'top',
+  'up',
+  'donasi',
+  'donate',
+  'support',
+  'sociabuzz',
+  'geon'
+]);
+const TOPUP_INTENT_WORDS = new Set([
+  'cara',
+  'gimana',
+  'gmn',
+  'bagaimana',
+  'mau',
+  'ingin',
+  'beli',
+  'isi',
+  'cek',
+  'berapa',
+  'rate',
+  'kurs',
+  'harga',
+  'link',
+  'min',
+  'admin',
+  'topup',
+  'donasi',
+  'donate',
+  'support'
 ]);
 
 function pruneRepliedKeywordMessages(now = Date.now()) {
@@ -95,6 +128,36 @@ function findTutorialReply(text) {
   return null;
 }
 
+function findTopupReply(text) {
+  const tokens = tokenize(text);
+  const compact = tokens.join('');
+  const mentionsTopup =
+    tokens.some(token => TOPUP_WORDS.has(token)) ||
+    compact.includes('topup') ||
+    compact.includes('isigeon') ||
+    compact.includes('beligeon') ||
+    compact.includes('donasi') ||
+    compact.includes('sociabuzz');
+
+  if (!mentionsTopup) return null;
+
+  const hasIntent =
+    tokens.some(token => TOPUP_INTENT_WORDS.has(token)) ||
+    hasHowToIntent(tokens) ||
+    compact === 'topup' ||
+    compact === 'donasi' ||
+    compact === 'support';
+
+  if (!hasIntent) return null;
+
+  return [
+    `Topup Geon lewat: ${TOPUP_SUPPORT_URL}`,
+    'Saat isi SociaBuzz, tulis GAMERTAG MINECRAFT kamu dengan jelas di nama dan pesan. Jangan typo.',
+    'Contoh pesan: `GT: NamaMinecraft | DC: username_discord`',
+    'Cek kurs: `!geonrate <rupiah>` atau `!kurs <rupiah>`.'
+  ].join('\n');
+}
+
 async function maybeReplyKeyword(msg) {
   try {
     if (!msg.guild || msg.author?.bot) return false;
@@ -113,6 +176,13 @@ async function maybeReplyKeyword(msg) {
     if (tutorial) {
       rememberKeywordReply(msg, text);
       await msg.reply(`Tonton tutorial ${tutorial.name} ini dulu ya: ${tutorial.url}`).catch(() => null);
+      return true;
+    }
+
+    const topupReply = findTopupReply(text);
+    if (topupReply) {
+      rememberKeywordReply(msg, text);
+      await msg.reply(topupReply).catch(() => null);
       return true;
     }
 

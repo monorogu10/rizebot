@@ -635,7 +635,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     return job;
   }
 
-  function enqueueTopup({ target, geon, rupiah, requestedBy, message }) {
+  function enqueueTopup({ target, geon, rupiah, requestedBy, message, source = '', paymentId = '' }) {
     return enqueueJob('topup', {
       targetKey: target.gamertag,
       targetName: target.gamertag,
@@ -643,6 +643,8 @@ function createTopupBridgeService({ registerStore, client = null }) {
       geon,
       rupiah,
       requestedBy,
+      source,
+      paymentId,
     }, { message, target });
   }
 

@@ -16,6 +16,14 @@ const TOPUP_BRIDGE_PORT = Number.isInteger(parsedTopupBridgePort) && parsedTopup
   : 8787;
 const TOPUP_BRIDGE_TOKEN = process.env.TOPUP_BRIDGE_TOKEN || '';
 const MINECRAFT_CHAT_LOG_CHANNEL_ID = '1519260589208240219';
+const SOCIABUZZ_TOPUP_LOG_CHANNEL_ID = process.env.SOCIABUZZ_TOPUP_LOG_CHANNEL_ID || '1519567676836413490';
+const SOCIABUZZ_SOURCE_CHANNEL_IDS = new Set(
+  String(process.env.SOCIABUZZ_SOURCE_CHANNEL_IDS || '1195891719154184295')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+);
+const SOCIABUZZ_WEBHOOK_TOKEN = process.env.SOCIABUZZ_WEBHOOK_TOKEN || '';
 const MINECRAFT_INFO_CHANNEL_ID = '1412304090146541748';
 const MINECRAFT_INFO_URL = 'https://discord.com/channels/1195884175442587779/1412304090146541748';
 const PRIVATE_CHAT_CHANNEL_ID = '1465702373946163353';
@@ -46,6 +54,7 @@ const BOT_OUTPUT_CHANNEL_IDS = new Set([
   '1411683951575040160',
   '1465702373946163353',
   MINECRAFT_CHAT_LOG_CHANNEL_ID,
+  SOCIABUZZ_TOPUP_LOG_CHANNEL_ID,
   '1517517579587948645',
   '1265850087288868864',
   '1259789142720647180'
@@ -76,9 +85,9 @@ const KEYWORD_LINKS = {
   live: 'https://www.youtube.com/@monodeco_md',
   update: 'https://www.youtube.com/@monodeco_md',
   liveupdate: 'https://www.youtube.com/@monodeco_md',
-  donate: 'https://sociabuzz.com/monodeco/tribe',
-  donasi: 'https://sociabuzz.com/monodeco/tribe',
-  support: 'https://sociabuzz.com/monodeco/tribe',
+  donate: 'https://sociabuzz.com/monodeco/support',
+  donasi: 'https://sociabuzz.com/monodeco/support',
+  support: 'https://sociabuzz.com/monodeco/support',
   website: 'https://monodeco.my.id/'
 };
 const COMMAND_CHANNELS = new Set(BOT_OUTPUT_CHANNEL_IDS);
@@ -99,6 +108,9 @@ module.exports = {
   TOPUP_BRIDGE_PORT,
   TOPUP_BRIDGE_TOKEN,
   MINECRAFT_CHAT_LOG_CHANNEL_ID,
+  SOCIABUZZ_TOPUP_LOG_CHANNEL_ID,
+  SOCIABUZZ_SOURCE_CHANNEL_IDS,
+  SOCIABUZZ_WEBHOOK_TOKEN,
   MINECRAFT_INFO_CHANNEL_ID,
   MINECRAFT_INFO_URL,
   PRIVATE_CHAT_CHANNEL_ID,

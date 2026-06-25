@@ -26,6 +26,7 @@ const { createRegisterStore } = require('./src/services/registerStore');
 const { createModerationStore } = require('./src/services/moderationStore');
 const { createTopupBridgeService } = require('./src/services/topupBridgeService');
 const { createTopupBridgeServer } = require('./src/services/topupBridgeServer');
+const { createSociabuzzTopupService } = require('./src/services/sociabuzzTopupService');
 const { createTopupHandler } = require('./src/handlers/topupHandler');
 const { createMinecraftBridgeHandler } = require('./src/handlers/minecraftBridgeHandler');
 const {
@@ -35,6 +36,7 @@ const {
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
 } = require('./src/config');
 const { TOPUP_BRIDGE_HOST, TOPUP_BRIDGE_PORT, TOPUP_BRIDGE_TOKEN } = require('./src/config');
+const { SOCIABUZZ_WEBHOOK_TOKEN } = require('./src/config');
 const { isAllowedBotOutputChannel } = require('./src/utils/channelPolicy');
 
 const LOCK_FILE = process.env.RIZEBOT_LOCK_FILE || path.join(os.tmpdir(), 'rizebot.lock');
@@ -122,8 +124,15 @@ const topupBridge = createTopupBridgeService({
   registerStore: minecraftRegisterStore,
   client
 });
+const sociabuzzTopup = createSociabuzzTopupService({
+  bridge: topupBridge,
+  registerStore: minecraftRegisterStore,
+  client
+});
 const topupBridgeServer = createTopupBridgeServer({
   bridge: topupBridge,
+  sociabuzz: sociabuzzTopup,
+  sociabuzzToken: SOCIABUZZ_WEBHOOK_TOKEN,
   host: TOPUP_BRIDGE_HOST,
   port: TOPUP_BRIDGE_PORT,
   token: TOPUP_BRIDGE_TOKEN
@@ -337,11 +346,17 @@ async function reloadMinecraftDataFromMessage(msg) {
 
 async function handleMessageCreate(msg) {
   if (await reloadMinecraftDataFromMessage(msg)) return;
-  if (!isAllowedBotOutputChannel(msg)) return;
   if (wasContentProcessed(msg)) return;
   if (!claimMessageAcrossProcesses(msg)) return;
   rememberProcessedContent(msg);
 
+  const handledSociabuzz = await sociabuzzTopup.handleDiscordMessage(msg).catch(err => {
+    console.error('SociaBuzz topup handler error:', err);
+    return false;
+  });
+  if (handledSociabuzz) return;
+
+  if (!isAllowedBotOutputChannel(msg)) return;
   await baseHandleMessage(msg);
 }
 
@@ -367,6 +382,12 @@ async function handleMessageUpdate(oldMsg, newMsg) {
 client.on('messageCreate', handleMessageCreate);
 client.on('messageUpdate', handleMessageUpdate);
 client.on('interactionCreate', async interaction => {
+  const handledSociabuzz = await sociabuzzTopup.handleInteraction(interaction).catch(err => {
+    console.error('SociaBuzz topup interaction error:', err);
+    return false;
+  });
+  if (handledSociabuzz) return;
+
   if (!isAllowedBotOutputChannel(interaction)) return;
   const handledMinecraft = await minecraftRegisterInteractionHandler(interaction);
   if (handledMinecraft) return;

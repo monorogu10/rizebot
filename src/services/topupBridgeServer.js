@@ -48,7 +48,20 @@ function isAuthorized(req, token) {
   return Boolean(token && bearerToken(req) === token);
 }
 
-function createTopupBridgeServer({ bridge, host, port, token }) {
+function webhookToken(req) {
+  return String(
+    req.headers['x-sociabuzz-token'] ||
+    req.headers['x-webhook-token'] ||
+    bearerToken(req) ||
+    ''
+  ).trim();
+}
+
+function isWebhookAuthorized(req, token) {
+  return Boolean(token && webhookToken(req) === token);
+}
+
+function createTopupBridgeServer({ bridge, host, port, token, sociabuzz = null, sociabuzzToken = '' }) {
   if (!bridge) throw new Error('Topup bridge service is required');
 
   const server = http.createServer(async (req, res) => {
@@ -56,6 +69,25 @@ function createTopupBridgeServer({ bridge, host, port, token }) {
 
     if (req.method === 'GET' && url.pathname === '/health') {
       sendJson(res, 200, { ok: true, service: 'rizebot-topup-bridge' });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/sociabuzz/payment') {
+      if (!sociabuzz || !sociabuzzToken) {
+        sendJson(res, 404, { ok: false, code: 'sociabuzz-webhook-disabled' });
+        return;
+      }
+      if (!isWebhookAuthorized(req, sociabuzzToken)) {
+        sendJson(res, 401, { ok: false, code: 'unauthorized' });
+        return;
+      }
+      try {
+        const body = await readJsonBody(req);
+        const result = await sociabuzz.handleWebhookPayload(body);
+        sendJson(res, result.ok ? 200 : 400, result);
+      } catch (err) {
+        sendJson(res, 400, { ok: false, code: err?.message || 'bad-request' });
+      }
       return;
     }
 
