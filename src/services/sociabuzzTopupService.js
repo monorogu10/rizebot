@@ -30,6 +30,17 @@ const UNKNOWN_NAMES = new Set([
   'tanpa nama',
   'orang baik',
 ]);
+const IDENTITY_LABELS = [
+  'GT',
+  'GAMERTAG',
+  'MC',
+  'MINECRAFT',
+  'IGN',
+  'DC',
+  'DISCORD',
+  'DISCORD ID',
+  'DISCORD USER',
+];
 
 const RATE_TIERS = [
   { rupiah: 1000, geon: 100 },
@@ -204,9 +215,21 @@ function extractRupiah(text) {
   return 0;
 }
 
-function extractLabel(text, labels) {
-  const label = labels.map(item => item.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-  const pattern = new RegExp(`(?:^|[\\s|,;])(?:${label})\\s*[:=\\-]\\s*([^|\\n\\r;,]+)`, 'i');
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function labelPattern(labels) {
+  return labels.map(escapeRegExp).join('|');
+}
+
+function extractLabel(text, labels, stopLabels = IDENTITY_LABELS) {
+  const label = labelPattern(labels);
+  const stops = ['[|\\n\\r;,]', '$'];
+  if (Array.isArray(stopLabels) && stopLabels.length) {
+    stops.unshift(`\\s+(?:${labelPattern(stopLabels)})\\s*[:=\\-]`);
+  }
+  const pattern = new RegExp(`(?:^|[\\s|,;])(?:${label})\\s*[:=\\-]\\s*([\\s\\S]*?)(?=${stops.join('|')})`, 'i');
   const match = text.match(pattern);
   return compact(match?.[1] || '', 80);
 }

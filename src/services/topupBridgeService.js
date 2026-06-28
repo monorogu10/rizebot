@@ -6,6 +6,7 @@ const {
   MINECRAFT_CHAT_LOG_CHANNEL_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
   MINECRAFT_REGISTER_ROLE_ID,
+  PRIVATE_CHAT_CHANNEL_ID,
 } = require('../config');
 
 const JOB_LEASE_MS = 2 * 60 * 1000;
@@ -23,6 +24,7 @@ const EMBED_COLOR_CHAT = 0x2f80ed;
 const EMBED_COLOR_TRANS = 0xf2c94c;
 const EMBED_COLOR_JOIN = 0x2ecc71;
 const EMBED_COLOR_LEAVE = 0xe74c3c;
+const EMBED_COLOR_TOPUP = 0x27ae60;
 const VERIFY_BYPASS_GAMERTAGS = new Set(['xylofly', 'monoguraa']);
 
 function n(value) {
@@ -217,6 +219,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
   const discordUserCache = new Map();
   let jobsLoaded = false;
   let chatChannelPromise = null;
+  let privateChatChannelPromise = null;
   const bridgeStats = {
     lastJobPollAt: null,
     lastJobPollHadJobsAt: null,
@@ -775,7 +778,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
   async function sendTopupResult(record, result) {
     const message = record.context?.message;
     const requester = message?.author || await resolveDiscordUser(record.job?.requestedBy);
-    if (!message && !requester) return;
+    const canNotifyRequester = Boolean(message || requester);
 
     const targetName = result.targetName || record.context?.target?.gamertag || record.job?.targetName || '-';
     const geon = result.geon || record.job?.geon || 0;
@@ -788,12 +791,76 @@ function createTopupBridgeService({ registerStore, client = null }) {
       )
       : `TOPUP gagal untuk \`${targetName}\`: \`${result.code || 'unknown'}\`.`;
     if (result.ok) {
+      await sendTopupSuccessEmbed(record, result).catch(err => {
+        console.error('Failed to send topup success embed:', err);
+      });
+      if (!canNotifyRequester) return;
       if (message) await message.reply(text).catch(() => {});
       else await requester.send(text).catch(() => {});
     } else {
+      if (!canNotifyRequester) return;
       if (message) await message.reply(text).catch(() => {});
       else await requester.send(text).catch(() => {});
     }
+  }
+
+  async function resolvePrivateChatChannel() {
+    if (!client || !PRIVATE_CHAT_CHANNEL_ID) return null;
+    if (!privateChatChannelPromise) {
+      privateChatChannelPromise = client.channels.fetch(PRIVATE_CHAT_CHANNEL_ID).catch(err => {
+        privateChatChannelPromise = null;
+        console.error('Failed to fetch private chat topup channel:', err);
+        return null;
+      });
+    }
+    return privateChatChannelPromise;
+  }
+
+  async function sendTopupSuccessEmbed(record, result) {
+    if (!result?.ok || result.status === 'pending') return false;
+
+    const channel = await resolvePrivateChatChannel();
+    if (!channel?.send) return false;
+
+    const targetName = cleanText(
+      result.targetName || record.context?.target?.gamertag || record.job?.targetName || '-',
+      80
+    );
+    const geon = result.geon || record.job?.geon || 0;
+    const rupiah = result.rupiah || record.job?.rupiah || 0;
+    const linked = record.job?.discordUserId
+      ? { userId: record.job.discordUserId, entry: record.context?.target || {} }
+      : registerStore.findUserByGamertag?.(targetName);
+    const user = await resolveDiscordUser(linked?.userId);
+    const source = cleanText(record.job?.source || 'manual', 80);
+    const paymentId = cleanText(record.job?.paymentId || '', 120);
+
+    const embed = new EmbedBuilder()
+      .setColor(EMBED_COLOR_TOPUP)
+      .setTitle('Topup Berhasil')
+      .setDescription(`\`${targetName}\` berhasil menerima **${formatNumber(geon)} Geon**.`)
+      .addFields(
+        { name: 'Gamertag', value: `\`${targetName}\``, inline: true },
+        { name: 'Geon', value: `${formatNumber(geon)} Geon`, inline: true },
+        { name: 'Nominal', value: rupiahText(rupiah), inline: true },
+        {
+          name: 'Discord',
+          value: linked?.userId ? `<@${linked.userId}>` : 'Belum terhubung',
+          inline: true,
+        },
+        { name: 'Sumber', value: source || 'manual', inline: true }
+      )
+      .setFooter({ text: paymentId ? `Payment ${paymentId}` : `Job ${record.job?.id || record.id || '-'}` })
+      .setTimestamp();
+
+    const avatarUrl = discordAvatarUrl(user);
+    if (avatarUrl) embed.setThumbnail(avatarUrl);
+
+    await channel.send({
+      embeds: [embed],
+      allowedMentions: { parse: [] },
+    });
+    return true;
   }
 
   async function sendWalletResult(record, result) {
