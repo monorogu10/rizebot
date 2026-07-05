@@ -9,13 +9,8 @@ const { maybeReplyKeyword } = require('./src/features/keywordReply');
 const { createMessageHandler } = require('./src/handlers/messageHandler');
 const { registerMemberEvents } = require('./src/handlers/memberEvents');
 const { registerPrivateRoleEvents } = require('./src/handlers/privateRoleHandler');
-const { createRegisterHandler } = require('./src/handlers/registerHandler');
-const {
-  createMinecraftRegisterHandler,
-  createMinecraftRegisterInteractionHandler,
-  syncMinecraftRegistrationRolesFromStore,
-  syncMinecraftRoleForMember
-} = require('./src/handlers/minecraftRegisterHandler');
+const { createRegisterHandler, createRegisterInteractionHandler } = require('./src/handlers/registerHandler');
+const { registerEthergeonCitizenRoleEvents } = require('./src/handlers/ethergeonCitizenRoleHandler');
 const {
   createModerationHandler,
   createModerationReactionHandler,
@@ -24,19 +19,12 @@ const {
 const { createSubmissionStore } = require('./src/services/submissionStore');
 const { createRegisterStore } = require('./src/services/registerStore');
 const { createModerationStore } = require('./src/services/moderationStore');
-const { createTopupBridgeService } = require('./src/services/topupBridgeService');
-const { createTopupBridgeServer } = require('./src/services/topupBridgeServer');
-const { createSociabuzzTopupService } = require('./src/services/sociabuzzTopupService');
-const { createTopupHandler } = require('./src/handlers/topupHandler');
-const { createMinecraftBridgeHandler } = require('./src/handlers/minecraftBridgeHandler');
 const {
   REGISTER_ROLE_ID,
   LEGACY_ROLE_ID,
   MINECRAFT_REGISTER_ROLE_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
 } = require('./src/config');
-const { TOPUP_BRIDGE_HOST, TOPUP_BRIDGE_PORT, TOPUP_BRIDGE_TOKEN } = require('./src/config');
-const { SOCIABUZZ_WEBHOOK_TOKEN } = require('./src/config');
 const { isAllowedBotOutputChannel } = require('./src/utils/channelPolicy');
 
 const LOCK_FILE = process.env.RIZEBOT_LOCK_FILE || path.join(os.tmpdir(), 'rizebot.lock');
@@ -118,36 +106,15 @@ const client = new Client({
 });
 
 const submissionStore = createSubmissionStore();
-const minecraftRegisterStore = createRegisterStore();
+const legacyRegisterStore = createRegisterStore();
 const moderationStore = createModerationStore();
-const topupBridge = createTopupBridgeService({
-  registerStore: minecraftRegisterStore,
-  client
-});
-const sociabuzzTopup = createSociabuzzTopupService({
-  bridge: topupBridge,
-  registerStore: minecraftRegisterStore,
-  client
-});
-const topupBridgeServer = createTopupBridgeServer({
-  bridge: topupBridge,
-  sociabuzz: sociabuzzTopup,
-  sociabuzzToken: SOCIABUZZ_WEBHOOK_TOKEN,
-  host: TOPUP_BRIDGE_HOST,
-  port: TOPUP_BRIDGE_PORT,
-  token: TOPUP_BRIDGE_TOKEN
-});
-const minecraftRegisterHandler = createMinecraftRegisterHandler({
-  pendingRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
-  verifiedRoleId: MINECRAFT_REGISTER_ROLE_ID,
-  registerStore: minecraftRegisterStore
-});
-const minecraftRegisterInteractionHandler = createMinecraftRegisterInteractionHandler({
-  registerStore: minecraftRegisterStore
-});
 const registerHandler = createRegisterHandler({
-  roleId: REGISTER_ROLE_ID,
+  roleId: MINECRAFT_REGISTER_ROLE_ID,
+  legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
   submissionStore
+});
+const registerInteractionHandler = createRegisterInteractionHandler({
+  roleId: MINECRAFT_REGISTER_ROLE_ID
 });
 const moderationHandler = createModerationHandler({
   moderationStore,
@@ -157,20 +124,10 @@ const moderationReactionHandler = createModerationReactionHandler({
   moderationStore,
   privateRoleId: REGISTER_ROLE_ID
 });
-const topupHandler = createTopupHandler({
-  bridge: topupBridge
-});
-const minecraftBridgeHandler = createMinecraftBridgeHandler({
-  bridge: topupBridge,
-  registerStore: minecraftRegisterStore
-});
 
 const baseHandleMessage = createMessageHandler({
   linkBlocker: maybeBlockLink,
   keywordReply: maybeReplyKeyword,
-  topupHandler,
-  minecraftBridgeHandler,
-  minecraftRegisterHandler,
   registerHandler,
   moderationHandler
 });
@@ -181,45 +138,33 @@ const privateRoleEvents = registerPrivateRoleEvents(client, {
   privateRoleId: REGISTER_ROLE_ID,
   legacyRoleId: LEGACY_ROLE_ID
 });
+const ethergeonCitizenRoleEvents = registerEthergeonCitizenRoleEvents(client, {
+  registerStore: legacyRegisterStore,
+  citizenRoleId: MINECRAFT_REGISTER_ROLE_ID,
+  legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID
+});
 
 client.once('clientReady', async () => {
   await submissionStore.init(client).catch(err => {
     console.error('Failed to init submission store:', err);
   });
-  await minecraftRegisterStore.init(client).catch(err => {
-    console.error('Failed to init minecraft register store:', err);
+  await legacyRegisterStore.init(client).catch(err => {
+    console.error('Failed to init legacy register store:', err);
   });
   await moderationStore.init(client).catch(err => {
     console.error('Failed to init moderation store:', err);
   });
-  try {
-    await topupBridgeServer.start();
-    console.log(`Topup bridge HTTP ready at http://${TOPUP_BRIDGE_HOST}:${TOPUP_BRIDGE_PORT}`);
-  } catch (err) {
-    console.error('Failed to start topup bridge HTTP server:', err);
-    console.error('Stopping this rizebot process to prevent duplicate Discord command handling.');
-    await client.destroy().catch(() => null);
-    process.exit(1);
-    return;
-  }
   await privateRoleEvents.sync().catch(err => {
     console.error('Failed to sync private roles:', err);
   });
-  await syncMinecraftRegistrationRolesFromStore(
-    client,
-    minecraftRegisterStore,
-    {
-      pendingRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
-      verifiedRoleId: MINECRAFT_REGISTER_ROLE_ID,
-    }
-  )
+  await ethergeonCitizenRoleEvents.sync()
     .then(stats => {
       console.log(
-        `Minecraft role sync selesai. scanned=${stats.scanned}, synced=${stats.synced}, failed=${stats.failed}, skipped=${stats.skipped}, duplicateEntriesRemoved=${stats.duplicateEntriesRemoved || 0}, duplicateRolesRemoved=${stats.duplicateRolesRemoved || 0}, duplicateRoleRemoveFailed=${stats.duplicateRoleRemoveFailed || 0}`
+        `Ethergeon Citizen role sync selesai. scanned=${stats.scanned}, migrated=${stats.migrated}, failed=${stats.failed}, skipped=${stats.skipped}, fromLegacyRole=${stats.fromLegacyRole || 0}, fromRegisterData=${stats.fromRegisterData || 0}`
       );
     })
     .catch(err => {
-      console.error('Failed to sync minecraft registration roles:', err);
+      console.error('Failed to sync Ethergeon Citizen roles:', err);
     });
   await syncActivePetitions(client, moderationStore).catch(err => {
     console.error('Failed to sync petitions:', err);
@@ -336,25 +281,19 @@ function claimMessageAcrossProcesses(msg) {
   return false;
 }
 
-async function reloadMinecraftDataFromMessage(msg) {
-  const reloadedMinecraftData = await minecraftRegisterStore.reloadFromMessage(msg).catch(err => {
-    console.error('Failed to reload minecraft register data from message:', err);
+async function reloadLegacyRegisterDataFromMessage(msg) {
+  const reloadedLegacyRegisterData = await legacyRegisterStore.reloadFromMessage(msg).catch(err => {
+    console.error('Failed to reload legacy register data from message:', err);
     return false;
   });
-  return reloadedMinecraftData;
+  return reloadedLegacyRegisterData;
 }
 
 async function handleMessageCreate(msg) {
-  if (await reloadMinecraftDataFromMessage(msg)) return;
+  if (await reloadLegacyRegisterDataFromMessage(msg)) return;
   if (wasContentProcessed(msg)) return;
   if (!claimMessageAcrossProcesses(msg)) return;
   rememberProcessedContent(msg);
-
-  const handledSociabuzz = await sociabuzzTopup.handleDiscordMessage(msg).catch(err => {
-    console.error('SociaBuzz topup handler error:', err);
-    return false;
-  });
-  if (handledSociabuzz) return;
 
   if (!isAllowedBotOutputChannel(msg)) return;
   await baseHandleMessage(msg);
@@ -367,7 +306,7 @@ async function handleMessageUpdate(oldMsg, newMsg) {
   }
   if (!msg) return;
 
-  if (await reloadMinecraftDataFromMessage(msg)) return;
+  if (await reloadLegacyRegisterDataFromMessage(msg)) return;
   if (!isAllowedBotOutputChannel(msg)) return;
   if (wasContentProcessed(msg)) return;
 
@@ -382,27 +321,9 @@ async function handleMessageUpdate(oldMsg, newMsg) {
 client.on('messageCreate', handleMessageCreate);
 client.on('messageUpdate', handleMessageUpdate);
 client.on('interactionCreate', async interaction => {
-  const handledSociabuzz = await sociabuzzTopup.handleInteraction(interaction).catch(err => {
-    console.error('SociaBuzz topup interaction error:', err);
-    return false;
-  });
-  if (handledSociabuzz) return;
-
   if (!isAllowedBotOutputChannel(interaction)) return;
-  const handledMinecraft = await minecraftRegisterInteractionHandler(interaction);
-  if (handledMinecraft) return;
-});
-client.on('guildMemberAdd', async member => {
-  await syncMinecraftRoleForMember(
-    member,
-    minecraftRegisterStore,
-    {
-      pendingRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
-      verifiedRoleId: MINECRAFT_REGISTER_ROLE_ID,
-    }
-  ).catch(err => {
-    console.error('Failed to sync minecraft role for joined member:', err);
-  });
+  const handledRegister = await registerInteractionHandler(interaction);
+  if (handledRegister) return;
 });
 client.on('messageReactionAdd', async (reaction, user) => {
   await moderationReactionHandler(reaction, user);

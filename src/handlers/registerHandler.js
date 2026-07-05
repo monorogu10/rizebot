@@ -1,5 +1,12 @@
 const {
-  REGISTER_ROLE_ID,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+} = require('discord.js');
+const {
+  MINECRAFT_REGISTER_ROLE_ID,
+  MINECRAFT_REGISTER_PENDING_ROLE_ID,
   PRIVATE_CHAT_CHANNEL_ID,
   REGISTRATION_INBOX_CHANNEL_ID,
   MINECRAFT_REGISTER_RESET_ADMIN_ID,
@@ -7,6 +14,10 @@ const {
 } = require('../config');
 const { isAdmin } = require('../utils/permissions');
 const { createRizebotHelpPayload } = require('./helpPayload');
+const { moveMemberToCitizenRole } = require('./ethergeonCitizenRoleHandler');
+
+const LIST_PAGE_SIZE = 20;
+const LIST_BUTTON_PREFIX = 'citizenlist';
 
 function isTargetChannelOrThread(msg, targetChannelId) {
   if (!targetChannelId) return true;
@@ -46,26 +57,194 @@ async function markApprovedIfPossible(submissionStore, client, userId, source) {
 }
 
 async function handleRegisterCommand(msg, options) {
-  void options;
+  const {
+    roleId,
+    legacyRoleId,
+    submissionStore
+  } = options;
   const content = (msg.content || '').trim();
-  if (!/^!daftar\b/i.test(content) && !/^!register\b/i.test(content)) return false;
+  if (!/^!(?:reg|daftar|register)\b/i.test(content)) return false;
   if (!msg.guild) return false;
 
-  await msg.reply(
-    'Command ini sudah dialihkan ke register Minecraft. Pakai `!reg <gamertag>` atau `!daftar <gamertag>` sesuai nama Minecraft kamu.'
-  ).catch(() => null);
+  const member = await resolveMember(msg);
+  if (!member) {
+    await msg.reply('Gagal membaca data member kamu, coba lagi.').catch(() => null);
+    return true;
+  }
+
+  const moved = await moveMemberToCitizenRole(member, {
+    citizenRoleId: roleId,
+    legacyRoleId
+  });
+
+  if (!moved) {
+    await msg.reply(
+      'Gagal memberi role Ethergeon Citizen. Cek permission dan posisi role bot, lalu coba lagi.'
+    ).catch(() => null);
+    return true;
+  }
+
+  await markApprovedIfPossible(submissionStore, msg.client, member.id, 'reg').catch(err => {
+    console.error('Failed to mark !reg approval:', err);
+  });
+
+  await msg.reply('Registrasi berhasil. Role Ethergeon Citizen sudah diberikan.').catch(() => null);
   return true;
 }
 
 async function handleStatusCommand(msg, options) {
-  void options;
   const content = (msg.content || '').trim();
   if (!/^!status\b/i.test(content)) return false;
+  if (!msg.guild) return false;
 
+  const member = await resolveMember(msg);
+  const registered = Boolean(member?.roles?.cache?.has(options.roleId));
   await msg.reply(
-    '`!status` sekarang dipakai untuk status verify Minecraft. Coba lagi, atau hubungi admin jika pesan ini muncul.'
+    registered
+      ? 'Status: kamu sudah menjadi Ethergeon Citizen.'
+      : 'Status: kamu belum punya role Ethergeon Citizen. Pakai `!reg` untuk daftar.'
   ).catch(() => null);
   return true;
+}
+
+function parseListCommand(content) {
+  const match = String(content || '').trim().match(/^!list(?:\s+(\d+))?$/i);
+  if (!match) return null;
+  const page = match[1] ? parseInt(match[1], 10) : 1;
+  return Number.isFinite(page) && page > 0 ? page : 1;
+}
+
+function formatRegisteredMember(member, index) {
+  const name = member.displayName || member.user?.username || member.id;
+  return `${index + 1}. <@${member.id}> - ${name}`;
+}
+
+async function getRegisteredMembers(guild, roleId) {
+  const members = await guild?.members.fetch().catch(() => null);
+  if (!members) {
+    return null;
+  }
+
+  return [...members.values()]
+    .filter(member => !member.user?.bot && member.roles.cache.has(roleId))
+    .sort((left, right) => (
+      (left.displayName || left.user?.username || '').localeCompare(
+        right.displayName || right.user?.username || '',
+        'id',
+        { sensitivity: 'base' }
+      )
+    ));
+}
+
+function buildListButtonId(page) {
+  return `${LIST_BUTTON_PREFIX}:${page}`;
+}
+
+function parseListButtonId(customId) {
+  const match = String(customId || '').match(new RegExp(`^${LIST_BUTTON_PREFIX}:(\\d+)$`));
+  if (!match) return null;
+  const page = parseInt(match[1], 10);
+  return Number.isFinite(page) && page > 0 ? page : 1;
+}
+
+function buildListButtons(page, totalPages) {
+  const previousPage = Math.max(1, page - 1);
+  const nextPage = Math.min(totalPages, page + 1);
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(buildListButtonId(previousPage))
+      .setLabel('Prev')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page <= 1),
+    new ButtonBuilder()
+      .setCustomId(buildListButtonId(nextPage))
+      .setLabel('Next')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(page >= totalPages)
+  );
+}
+
+function buildListPayload(registered, page) {
+  if (!registered.length) {
+    return {
+      content: 'Belum ada user yang terdaftar sebagai Ethergeon Citizen.',
+      embeds: [],
+      components: [],
+      allowedMentions: { parse: [], repliedUser: false }
+    };
+  }
+
+  const totalPages = Math.max(1, Math.ceil(registered.length / LIST_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * LIST_PAGE_SIZE;
+  const rows = registered
+    .slice(start, start + LIST_PAGE_SIZE)
+    .map((member, index) => formatRegisteredMember(member, start + index));
+
+  const embed = new EmbedBuilder()
+    .setColor(0x36a269)
+    .setTitle('Daftar Ethergeon Citizen')
+    .setDescription(rows.join('\n'))
+    .setFooter({
+      text: `Halaman ${safePage}/${totalPages} | Total ${registered.length} user`
+    })
+    .setTimestamp(new Date());
+
+  return {
+    embeds: [embed],
+    components: [buildListButtons(safePage, totalPages)],
+    allowedMentions: { parse: [], repliedUser: false }
+  };
+}
+
+async function buildListPayloadForGuild(guild, roleId, page) {
+  const registered = await getRegisteredMembers(guild, roleId);
+  if (!registered) {
+    return {
+      content: 'Gagal membaca daftar member, coba lagi.',
+      embeds: [],
+      components: [],
+      allowedMentions: { parse: [], repliedUser: false }
+    };
+  }
+  return buildListPayload(registered, page);
+}
+
+async function handleListCommand(msg, options) {
+  const page = parseListCommand(msg.content);
+  if (!page) return false;
+  if (!msg.guild) return false;
+
+  const payload = await buildListPayloadForGuild(msg.guild, options.roleId, page);
+  await msg.reply(payload).catch(() => null);
+  return true;
+}
+
+function createRegisterInteractionHandler({
+  roleId = MINECRAFT_REGISTER_ROLE_ID,
+} = {}) {
+  return async function handleRegisterInteraction(interaction) {
+    try {
+      if (!interaction || !interaction.isButton?.()) return false;
+      const page = parseListButtonId(interaction.customId);
+      if (!page) return false;
+
+      if (!interaction.guild) {
+        await interaction.reply({
+          content: 'List ini hanya bisa dipakai di server.',
+          ephemeral: true
+        }).catch(() => null);
+        return true;
+      }
+
+      const payload = await buildListPayloadForGuild(interaction.guild, roleId, page);
+      await interaction.update(payload).catch(() => null);
+      return true;
+    } catch (err) {
+      console.error('Register interaction handler error:', err);
+      return false;
+    }
+  };
 }
 
 async function handleHelpCommand(msg, options) {
@@ -91,7 +270,8 @@ async function handleHelpCommand(msg, options) {
 }
 
 function createRegisterHandler({
-  roleId = REGISTER_ROLE_ID,
+  roleId = MINECRAFT_REGISTER_ROLE_ID,
+  legacyRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
   submissionStore,
   registrationChannelId = REGISTRATION_INBOX_CHANNEL_ID,
   privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID
@@ -103,6 +283,7 @@ function createRegisterHandler({
 
       const handledRegister = await handleRegisterCommand(msg, {
         roleId,
+        legacyRoleId,
         submissionStore,
         registrationChannelId,
         privateChatChannelId
@@ -114,6 +295,12 @@ function createRegisterHandler({
         privateChatChannelId
       });
       if (handledHelp) return true;
+
+      const handledList = await handleListCommand(msg, {
+        roleId,
+        registrationChannelId
+      });
+      if (handledList) return true;
 
       const handledStatus = await handleStatusCommand(msg, {
         roleId,
@@ -142,6 +329,7 @@ async function scanSubmissionApprovals() {
 
 module.exports = {
   createRegisterHandler,
+  createRegisterInteractionHandler,
   createSubmissionReactionHandler,
   scanSubmissionApprovals
 };
