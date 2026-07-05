@@ -14,7 +14,10 @@ const {
 } = require('../config');
 const { isAdmin } = require('../utils/permissions');
 const { createRizebotHelpPayload } = require('./helpPayload');
-const { moveMemberToCitizenRole } = require('./ethergeonCitizenRoleHandler');
+const {
+  moveMemberToCitizenRole,
+  syncEthergeonCitizenRoles,
+} = require('./ethergeonCitizenRoleHandler');
 
 const LIST_PAGE_SIZE = 20;
 const LIST_BUTTON_PREFIX = 'citizenlist';
@@ -269,9 +272,53 @@ async function handleHelpCommand(msg, options) {
   return true;
 }
 
+function isRegisterAdmin(msg) {
+  return isAdmin(msg.member) ||
+    String(msg.author?.id || '') === String(TOPUP_ADMIN_DISCORD_ID) ||
+    String(msg.author?.id || '') === String(MINECRAFT_REGISTER_RESET_ADMIN_ID);
+}
+
+async function handleSyncCitizenCommand(msg, options) {
+  const content = (msg.content || '').trim();
+  if (!/^!(?:sync-citizen|sync-reg)\b/i.test(content)) return false;
+  if (!msg.guild) return false;
+
+  if (!isRegisterAdmin(msg)) {
+    await msg.reply('Command ini khusus admin.').catch(() => null);
+    return true;
+  }
+
+  const stats = await syncEthergeonCitizenRoles(msg.client, {
+    registerStore: options.registerStore,
+    citizenRoleId: options.roleId,
+    legacyRoleId: options.legacyRoleId,
+  });
+  const failedIds = stats.failedMemberIds || [];
+  const failedLine = failedIds.length
+    ? `\nGagal: ${failedIds.slice(0, 10).map(id => `<@${id}>`).join(', ')}${failedIds.length > 10 ? `, +${failedIds.length - 10} lainnya` : ''}`
+    : '';
+
+  await msg.reply({
+    content: [
+      'Sync Ethergeon Citizen selesai.',
+      `Diproses: ${stats.scanned}`,
+      `Berhasil pindah: ${stats.migrated}`,
+      `Dari role lama: ${stats.fromLegacyRole || 0}`,
+      `Dari data legacy: ${stats.fromRegisterData || 0}`,
+      `Tidak ditemukan: ${stats.skipped}`,
+      `Gagal: ${stats.failed}`,
+      failedLine,
+      stats.failed ? 'Kalau masih gagal, cek permission Manage Roles dan posisi role bot harus di atas role lama + role Ethergeon Citizen.' : ''
+    ].filter(Boolean).join('\n'),
+    allowedMentions: { parse: [], repliedUser: false }
+  }).catch(() => null);
+  return true;
+}
+
 function createRegisterHandler({
   roleId = MINECRAFT_REGISTER_ROLE_ID,
   legacyRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  registerStore,
   submissionStore,
   registrationChannelId = REGISTRATION_INBOX_CHANNEL_ID,
   privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID
@@ -295,6 +342,13 @@ function createRegisterHandler({
         privateChatChannelId
       });
       if (handledHelp) return true;
+
+      const handledSyncCitizen = await handleSyncCitizenCommand(msg, {
+        roleId,
+        legacyRoleId,
+        registerStore
+      });
+      if (handledSyncCitizen) return true;
 
       const handledList = await handleListCommand(msg, {
         roleId,

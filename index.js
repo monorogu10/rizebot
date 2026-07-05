@@ -111,6 +111,7 @@ const moderationStore = createModerationStore();
 const registerHandler = createRegisterHandler({
   roleId: MINECRAFT_REGISTER_ROLE_ID,
   legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  registerStore: legacyRegisterStore,
   submissionStore
 });
 const registerInteractionHandler = createRegisterInteractionHandler({

@@ -60,6 +60,7 @@ function createRizebotHelpPayload({
       {
         name: 'Admin Registrasi & Moderasi',
         value: commandLines([
+          ['!sync-citizen', 'paksa migrasi role lama ke Ethergeon Citizen.'],
           ['!freedom @user', 'batalkan timeout aktif.'],
         ]),
         inline: false,

@@ -67,6 +67,7 @@ async function syncEthergeonCitizenRoles(client, {
     skipped: 0,
     fromLegacyRole: 0,
     fromRegisterData: registeredUserIds.size,
+    failedMemberIds: [],
   };
 
   for (const guild of client.guilds.cache.values()) {
@@ -87,6 +88,7 @@ async function syncEthergeonCitizenRoles(client, {
         stats.migrated += 1;
       } else {
         stats.failed += 1;
+        stats.failedMemberIds.push(member.id);
       }
     }
   }
