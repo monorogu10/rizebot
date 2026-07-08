@@ -3,7 +3,8 @@ function createMessageHandler({
   keywordReply,
   registerHandler,
   moderationHandler,
-  minecraftBridgeHandler
+  minecraftBridgeHandler,
+  topupHandler
 }) {
   return async function handleMessage(msg) {
     if (!msg) return;
@@ -18,6 +19,11 @@ function createMessageHandler({
 
     if (minecraftBridgeHandler) {
       const handled = await minecraftBridgeHandler(msg);
+      if (handled) return;
+    }
+
+    if (topupHandler) {
+      const handled = await topupHandler(msg);
       if (handled) return;
     }
 

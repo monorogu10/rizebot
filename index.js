@@ -11,6 +11,7 @@ const { registerMemberEvents } = require('./src/handlers/memberEvents');
 const { registerPrivateRoleEvents } = require('./src/handlers/privateRoleHandler');
 const { createRegisterHandler, createRegisterInteractionHandler } = require('./src/handlers/registerHandler');
 const { createMinecraftBridgeHandler } = require('./src/handlers/minecraftBridgeHandler');
+const { createTopupHandler } = require('./src/handlers/topupHandler');
 const { registerEthergeonCitizenRoleEvents } = require('./src/handlers/ethergeonCitizenRoleHandler');
 const {
   createModerationHandler,
@@ -22,6 +23,7 @@ const { createRegisterStore } = require('./src/services/registerStore');
 const { createModerationStore } = require('./src/services/moderationStore');
 const { createTopupBridgeService } = require('./src/services/topupBridgeService');
 const { createTopupBridgeServer } = require('./src/services/topupBridgeServer');
+const { createSociabuzzTopupService } = require('./src/services/sociabuzzTopupService');
 const {
   REGISTER_ROLE_ID,
   LEGACY_ROLE_ID,
@@ -120,12 +122,17 @@ const bridgeService = createTopupBridgeService({
   registerStore: legacyRegisterStore,
   client,
 });
+const sociabuzzTopupService = createSociabuzzTopupService({
+  bridge: bridgeService,
+  registerStore: legacyRegisterStore,
+  client,
+});
 const bridgeServer = createTopupBridgeServer({
   bridge: bridgeService,
   host: TOPUP_BRIDGE_HOST,
   port: TOPUP_BRIDGE_PORT,
   token: TOPUP_BRIDGE_TOKEN,
-  sociabuzz: null,
+  sociabuzz: sociabuzzTopupService,
   sociabuzzToken: SOCIABUZZ_WEBHOOK_TOKEN,
 });
 const registerHandler = createRegisterHandler({
@@ -140,11 +147,15 @@ const registerInteractionHandler = createRegisterInteractionHandler({
   roleId: MINECRAFT_REGISTER_ROLE_ID,
   legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
   rejectedRoleId: MINECRAFT_REGISTER_REJECTED_ROLE_ID,
-  registerStore: legacyRegisterStore
+  registerStore: legacyRegisterStore,
+  bridge: bridgeService
 });
 const minecraftBridgeHandler = createMinecraftBridgeHandler({
   bridge: bridgeService,
   registerStore: legacyRegisterStore,
+});
+const topupHandler = createTopupHandler({
+  bridge: bridgeService,
 });
 const moderationHandler = createModerationHandler({
   moderationStore,
@@ -160,7 +171,8 @@ const baseHandleMessage = createMessageHandler({
   keywordReply: maybeReplyKeyword,
   registerHandler,
   moderationHandler,
-  minecraftBridgeHandler
+  minecraftBridgeHandler,
+  topupHandler
 });
 
 registerMemberEvents(client);
@@ -334,6 +346,12 @@ async function handleMessageCreate(msg) {
   if (!claimMessageAcrossProcesses(msg)) return;
   rememberProcessedContent(msg);
 
+  const handledSociabuzz = await sociabuzzTopupService.handleDiscordMessage(msg).catch(err => {
+    console.error('Failed to process SociaBuzz message:', err);
+    return false;
+  });
+  if (handledSociabuzz) return;
+
   if (!isAllowedBotOutputChannel(msg)) return;
   await baseHandleMessage(msg);
 }
@@ -346,6 +364,12 @@ async function handleMessageUpdate(oldMsg, newMsg) {
   if (!msg) return;
 
   if (await reloadLegacyRegisterDataFromMessage(msg)) return;
+  const handledSociabuzz = await sociabuzzTopupService.handleDiscordMessage(msg).catch(err => {
+    console.error('Failed to process updated SociaBuzz message:', err);
+    return false;
+  });
+  if (handledSociabuzz) return;
+
   if (!isAllowedBotOutputChannel(msg)) return;
   if (wasContentProcessed(msg)) return;
 
@@ -362,6 +386,11 @@ client.on('messageUpdate', handleMessageUpdate);
 client.on('interactionCreate', async interaction => {
   const handledRegister = await registerInteractionHandler(interaction);
   if (handledRegister) return;
+  const handledSociabuzz = await sociabuzzTopupService.handleInteraction(interaction).catch(err => {
+    console.error('Failed to process SociaBuzz interaction:', err);
+    return false;
+  });
+  if (handledSociabuzz) return;
   if (!isAllowedBotOutputChannel(interaction)) return;
 });
 client.on('messageReactionAdd', async (reaction, user) => {

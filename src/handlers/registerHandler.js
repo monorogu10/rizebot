@@ -9,6 +9,7 @@ const {
 const {
   INTERVIEW_ADMIN_ROLE_IDS,
   INTERVIEW_ARCHIVE_CATEGORY_ID,
+  INTERVIEW_ARCHIVE_CATEGORY_NAME,
   INTERVIEW_CATEGORY_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
   MINECRAFT_REGISTER_REJECTED_ROLE_ID,
@@ -29,6 +30,9 @@ const GAMERTAG_REGEX = /^[A-Za-z0-9_ ]{3,32}$/;
 const LIST_PAGE_SIZE = 10;
 const LIST_BUTTON_PREFIX = 'citizenlist';
 const INTERVIEW_BUTTON_PREFIX = 'interview';
+const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
+const DISCORD_SERVER_CATEGORY_LIMIT = 50;
+const DISCORD_SERVER_CHANNEL_LIMIT = 500;
 
 function noPing(payload) {
   if (typeof payload === 'string') {
@@ -63,10 +67,23 @@ function parseRegisterCommand(content) {
 }
 
 function parseListCommand(content) {
-  const match = String(content || '').trim().match(/^!list(?:\s+(\d+))?$/i);
+  const match = String(content || '').trim().match(/^!list(?:\s+(.+))?$/i);
   if (!match) return null;
-  const page = match[1] ? parseInt(match[1], 10) : 1;
-  return Number.isFinite(page) && page > 0 ? page : 1;
+  const tokens = String(match[1] || '').split(/\s+/g).map(item => item.trim()).filter(Boolean);
+  let page = 1;
+  let filter = 'all';
+  for (const token of tokens) {
+    const lowered = token.toLowerCase();
+    if (/^\d+$/.test(lowered)) {
+      page = Math.max(1, parseInt(lowered, 10));
+      continue;
+    }
+    if (['all', 'semua', 'registered', 'register'].includes(lowered)) filter = 'all';
+    else if (['legal', 'approved', 'acc', 'citizen'].includes(lowered)) filter = 'approved';
+    else if (['pending', 'antri', 'queue', 'interview'].includes(lowered)) filter = 'pending';
+    else if (['rejected', 'reject', 'gagal', 'failed'].includes(lowered)) filter = 'rejected';
+  }
+  return { page, filter };
 }
 
 function formatDateId(iso) {
@@ -234,6 +251,35 @@ async function moveMemberToRejectedRole(member, {
   return addedRejected && removedPending && removedVerified;
 }
 
+async function setNicknameToGamertag(member, gamertag) {
+  const nickname = normalizeGamertag(gamertag).slice(0, 32);
+  if (!member || !nickname) return false;
+  if (member.nickname === nickname) return true;
+  if (!member.nickname && member.user?.username === nickname) return true;
+
+  const botMember = member.guild?.members?.me;
+  const canManageNicknames = botMember?.permissions?.has(PermissionsBitField.Flags.ManageNicknames);
+  if (!canManageNicknames || member.manageable === false) return false;
+
+  try {
+    const updated = await member.setNickname(nickname, 'Ethergeon gamertag registration sync');
+    return updated?.nickname === nickname || member.nickname === nickname;
+  } catch (err) {
+    if (err?.code === 50013) return false;
+    throw err;
+  }
+}
+
+async function syncGamertagNickname(member, gamertag, context = 'registration') {
+  const ok = await setNicknameToGamertag(member, gamertag).catch(err => {
+    console.error(`Failed to sync Discord nickname for ${context}:`, err);
+    return false;
+  });
+  return ok
+    ? ''
+    : ' Catatan: nickname Discord gagal diubah otomatis. Cek permission Manage Nicknames dan posisi role bot.';
+}
+
 function isRegisterAdmin(target) {
   return isAdmin(target?.member) ||
     String(target?.author?.id || target?.user?.id || '') === String(TOPUP_ADMIN_DISCORD_ID) ||
@@ -252,11 +298,30 @@ function memberHasAnyRole(member, roleIds) {
   if (Array.isArray(roles)) {
     return roles.some(roleId => roleIds.has(String(roleId)));
   }
+  if (Array.isArray(member._roles)) {
+    return member._roles.some(roleId => roleIds.has(String(roleId)));
+  }
+  if (roles instanceof Set) {
+    for (const roleId of roleIds) {
+      if (roles.has(roleId)) return true;
+    }
+  }
   return false;
 }
 
-function isInterviewAdmin(target) {
-  return isRegisterAdmin(target) || memberHasAnyRole(target?.member, INTERVIEW_ADMIN_ROLE_IDS);
+async function fetchInteractionMember(target) {
+  const userId = String(target?.author?.id || target?.user?.id || '').trim();
+  if (!target?.guild || !userId) return target?.member || null;
+  if (memberHasAnyRole(target.member, INTERVIEW_ADMIN_ROLE_IDS)) return target.member;
+  if (isAdmin(target.member)) return target.member;
+  return target.guild.members.fetch(userId).catch(() => target.member || null);
+}
+
+async function isInterviewAdmin(target) {
+  if (isRegisterAdmin(target)) return true;
+  if (memberHasAnyRole(target?.member, INTERVIEW_ADMIN_ROLE_IDS)) return true;
+  const member = await fetchInteractionMember(target);
+  return memberHasAnyRole(member, INTERVIEW_ADMIN_ROLE_IDS);
 }
 
 function adminUserIds() {
@@ -395,55 +460,326 @@ function buildStatusPayload(entry, user, minecraftProfile = null) {
   return noPing({ embeds: [embed] });
 }
 
-function buildListButtonId(page) {
-  return `${LIST_BUTTON_PREFIX}:${page}`;
+function normalizeListFilter(filterRaw) {
+  const filter = String(filterRaw || 'all').toLowerCase();
+  if (filter === 'approved' || filter === 'legal') return 'approved';
+  if (filter === 'pending') return 'pending';
+  if (filter === 'rejected') return 'rejected';
+  return 'all';
+}
+
+function listFilterLabel(filterRaw) {
+  const filter = normalizeListFilter(filterRaw);
+  if (filter === 'approved') return 'Legal';
+  if (filter === 'pending') return 'Pending';
+  if (filter === 'rejected') return 'Rejected';
+  return 'All';
+}
+
+function listFilterCommand(filterRaw) {
+  const filter = normalizeListFilter(filterRaw);
+  if (filter === 'approved') return 'legal';
+  if (filter === 'pending') return 'pending';
+  if (filter === 'rejected') return 'rejected';
+  return '';
+}
+
+function buildListButtonId(page, filter = 'all') {
+  return `${LIST_BUTTON_PREFIX}:${normalizeListFilter(filter)}:${Math.max(1, Number(page) || 1)}`;
 }
 
 function parseListButtonId(customId) {
-  const match = String(customId || '').match(new RegExp(`^${LIST_BUTTON_PREFIX}:(\\d+)$`));
-  if (!match) return null;
-  const page = parseInt(match[1], 10);
-  return Number.isFinite(page) && page > 0 ? page : 1;
+  const raw = String(customId || '');
+  const next = raw.match(new RegExp(`^${LIST_BUTTON_PREFIX}:(all|approved|pending|rejected):(\\d+)$`));
+  if (next) {
+    const page = parseInt(next[2], 10);
+    return {
+      filter: normalizeListFilter(next[1]),
+      page: Number.isFinite(page) && page > 0 ? page : 1,
+    };
+  }
+
+  const legacy = raw.match(new RegExp(`^${LIST_BUTTON_PREFIX}:(\\d+)$`));
+  if (!legacy) return null;
+  const page = parseInt(legacy[1], 10);
+  return {
+    filter: 'all',
+    page: Number.isFinite(page) && page > 0 ? page : 1,
+  };
 }
 
-function buildListButtons(page, totalPages) {
+function buildListButtons(page, totalPages, filter = 'all') {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(Math.max(1, page - 1)))
+      .setCustomId(buildListButtonId(1, filter))
+      .setLabel('First')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page <= 1),
+    new ButtonBuilder()
+      .setCustomId(buildListButtonId(Math.max(1, page - 1), filter))
       .setLabel('Prev')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 1),
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(Math.min(totalPages, page + 1)))
+      .setCustomId(buildListButtonId(Math.min(totalPages, page + 1), filter))
       .setLabel('Next')
       .setStyle(ButtonStyle.Primary)
+      .setDisabled(page >= totalPages),
+    new ButtonBuilder()
+      .setCustomId(buildListButtonId(totalPages, filter))
+      .setLabel('Last')
+      .setStyle(ButtonStyle.Secondary)
       .setDisabled(page >= totalPages)
   );
 }
 
-function buildListPayload(entries, page) {
-  const totalPages = Math.max(1, Math.ceil(entries.length / LIST_PAGE_SIZE));
+function buildListFilterButtons(activeFilter = 'all') {
+  const filter = normalizeListFilter(activeFilter);
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(buildListButtonId(1, 'all'))
+      .setLabel('All')
+      .setStyle(filter === 'all' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(buildListButtonId(1, 'approved'))
+      .setLabel('Legal')
+      .setStyle(filter === 'approved' ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(buildListButtonId(1, 'pending'))
+      .setLabel('Pending')
+      .setStyle(filter === 'pending' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(buildListButtonId(1, 'rejected'))
+      .setLabel('Rejected')
+      .setStyle(filter === 'rejected' ? ButtonStyle.Danger : ButtonStyle.Secondary)
+  );
+}
+
+function listStats(entries = []) {
+  return entries.reduce((stats, entry) => {
+    const status = String(entry?.status || '').toLowerCase();
+    stats.total += 1;
+    if (status === 'approved') stats.approved += 1;
+    else if (status === 'rejected') stats.rejected += 1;
+    else stats.pending += 1;
+    return stats;
+  }, { total: 0, approved: 0, pending: 0, rejected: 0 });
+}
+
+function filterListEntries(entries, filterRaw) {
+  const filter = normalizeListFilter(filterRaw);
+  if (filter === 'all') return entries;
+  return entries.filter(entry => String(entry?.status || '').toLowerCase() === filter);
+}
+
+function formatListEntry(entry, rowNumber) {
+  const status = String(entry?.status || '').toLowerCase();
+  const badge = status === 'approved'
+    ? '[LEGAL]'
+    : status === 'rejected'
+      ? '[REJECTED]'
+      : '[PENDING]';
+  const user = entry?.userId ? `<@${entry.userId}>` : '-';
+  const interview = entry?.interviewChannelId
+    ? `<#${entry.interviewChannelId}>`
+    : (entry?.interviewId || '-');
+  const updated = formatDateId(entry?.updatedAt || entry?.registeredAt);
+  return [
+    `**${rowNumber}. ${badge}** \`${entry?.gamertag || '-'}\``,
+    `${user} | Interview: ${interview} | Update: ${updated}`,
+  ].join('\n');
+}
+
+function buildListPayload(entries, pageOrOptions = 1) {
+  const options = typeof pageOrOptions === 'object' && pageOrOptions !== null
+    ? pageOrOptions
+    : { page: pageOrOptions, filter: 'all' };
+  const filter = normalizeListFilter(options.filter);
+  const allEntries = Array.isArray(entries) ? entries : [];
+  const filtered = filterListEntries(allEntries, filter);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / LIST_PAGE_SIZE));
+  const page = Number(options.page) || 1;
   const safePage = Math.min(Math.max(Number(page) || 1, 1), totalPages);
   const start = (safePage - 1) * LIST_PAGE_SIZE;
-  const rows = entries.slice(start, start + LIST_PAGE_SIZE).map((entry, index) => (
-    `${start + index + 1}. ${statusLabel(entry.status)} | \`${entry.gamertag}\` | <@${entry.userId}> | ${entry.interviewId || '-'}`
-  ));
+  const rows = filtered
+    .slice(start, start + LIST_PAGE_SIZE)
+    .map((entry, index) => formatListEntry(entry, start + index + 1));
+  const stats = listStats(allEntries);
 
   const embed = new EmbedBuilder()
     .setColor(0x36a269)
-    .setTitle('Daftar Register Minecraft')
-    .setDescription(rows.join('\n') || 'Belum ada registrasi baru.')
-    .setFooter({ text: `Halaman ${safePage}/${totalPages} | Total ${entries.length}` })
+    .setTitle('Ethergeon Citizen Registry')
+    .setDescription(rows.join('\n\n') || `Belum ada data untuk filter ${listFilterLabel(filter)}.`)
+    .addFields(
+      { name: 'Total', value: String(stats.total), inline: true },
+      { name: 'Legal', value: String(stats.approved), inline: true },
+      { name: 'Pending', value: String(stats.pending), inline: true },
+      { name: 'Rejected', value: String(stats.rejected), inline: true },
+      { name: 'Filter', value: listFilterLabel(filter), inline: true },
+      { name: 'Shown', value: `${filtered.length}`, inline: true }
+    )
+    .setFooter({ text: `Halaman ${safePage}/${totalPages} | !list ${listFilterCommand(filter)}`.trim() })
     .setTimestamp(new Date());
+
+  const components = [buildListFilterButtons(filter)];
+  if (totalPages > 1) components.push(buildListButtons(safePage, totalPages, filter));
 
   return noPing({
     embeds: [embed],
-    components: totalPages > 1 ? [buildListButtons(safePage, totalPages)] : [],
+    components,
   });
 }
 
 function channelMention(channelId) {
   return channelId ? `<#${channelId}>` : 'channel interview';
+}
+
+function cleanCategoryName(value) {
+  return String(value || 'interview-archive')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100) || 'interview-archive';
+}
+
+function archiveCategoryStem(seedCategory = null) {
+  const configuredName = String(INTERVIEW_ARCHIVE_CATEGORY_NAME || '').trim()
+    ? cleanCategoryName(INTERVIEW_ARCHIVE_CATEGORY_NAME)
+    : '';
+  const sourceName = configuredName || cleanCategoryName(seedCategory?.name || 'interview-archive');
+  return cleanCategoryName(sourceName.replace(/\s+\d{1,4}$/g, ''));
+}
+
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function archiveCategoryIndex(category, stem) {
+  const name = cleanCategoryName(category?.name).toLowerCase();
+  const safeStem = cleanCategoryName(stem).toLowerCase();
+  if (name === safeStem) return 1;
+  const match = name.match(new RegExp(`^${escapeRegex(safeStem)}\\s+(\\d{1,4})$`, 'i'));
+  if (!match) return null;
+  const index = parseInt(match[1], 10);
+  return Number.isFinite(index) && index > 0 ? index : null;
+}
+
+function categoryChannelCount(guild, categoryId) {
+  if (!guild || !categoryId) return DISCORD_CATEGORY_CHANNEL_LIMIT;
+  return guild.channels.cache.filter(channel => channel.parentId === categoryId).size;
+}
+
+function buildArchiveCategoryOverwrites(guild) {
+  const botId = guild.members.me?.id || guild.client.user?.id;
+  const overwrites = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [PermissionsBitField.Flags.ViewChannel],
+    },
+  ];
+
+  if (botId) {
+    overwrites.push({
+      id: botId,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.ManageChannels,
+        PermissionsBitField.Flags.ManageMessages,
+        PermissionsBitField.Flags.EmbedLinks,
+      ],
+    });
+  }
+
+  for (const roleId of INTERVIEW_ADMIN_ROLE_IDS || []) {
+    overwrites.push({
+      id: roleId,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.EmbedLinks,
+      ],
+    });
+  }
+
+  for (const userId of adminUserIds()) {
+    overwrites.push({
+      id: userId,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.EmbedLinks,
+      ],
+    });
+  }
+
+  return overwrites;
+}
+
+async function fetchChannelSafe(guild, channelId) {
+  if (!guild || !channelId) return null;
+  return guild.channels.cache.get(channelId) ||
+    guild.channels.fetch(channelId).catch(() => null);
+}
+
+function nextArchiveCategoryName(categories, stem) {
+  let maxIndex = 0;
+  for (const category of categories) {
+    const index = archiveCategoryIndex(category, stem);
+    if (index && index > maxIndex) maxIndex = index;
+  }
+  return cleanCategoryName(`${stem} ${String(maxIndex + 1).padStart(3, '0')}`);
+}
+
+async function resolveArchiveCategory(guild) {
+  if (!guild) return { category: null, code: 'guild-missing' };
+
+  await guild.channels.fetch().catch(() => null);
+  const seedCategory = await fetchChannelSafe(guild, INTERVIEW_ARCHIVE_CATEGORY_ID);
+  const stem = archiveCategoryStem(seedCategory);
+  const allCategories = [...guild.channels.cache.values()]
+    .filter(channel => channel.type === ChannelType.GuildCategory);
+
+  const candidates = allCategories
+    .filter(category => (
+      category.id === INTERVIEW_ARCHIVE_CATEGORY_ID ||
+      archiveCategoryIndex(category, stem) !== null
+    ))
+    .sort((a, b) => {
+      const ai = archiveCategoryIndex(a, stem) || 0;
+      const bi = archiveCategoryIndex(b, stem) || 0;
+      if (ai !== bi) return ai - bi;
+      return a.rawPosition - b.rawPosition;
+    });
+
+  for (const category of candidates) {
+    if (categoryChannelCount(guild, category.id) < DISCORD_CATEGORY_CHANNEL_LIMIT) {
+      return { category, created: false };
+    }
+  }
+
+  if (allCategories.length >= DISCORD_SERVER_CATEGORY_LIMIT) {
+    return { category: null, code: 'server-category-limit' };
+  }
+  if (guild.channels.cache.size >= DISCORD_SERVER_CHANNEL_LIMIT) {
+    return { category: null, code: 'server-channel-limit' };
+  }
+
+  const category = await guild.channels.create({
+    name: nextArchiveCategoryName(candidates, stem),
+    type: ChannelType.GuildCategory,
+    permissionOverwrites: buildArchiveCategoryOverwrites(guild),
+    reason: 'Create next interview archive category',
+  }).catch(err => {
+    console.error('Failed to create interview archive category:', err);
+    return null;
+  });
+
+  if (!category) return { category: null, code: 'create-failed' };
+  return { category, created: true };
 }
 
 async function createInterviewChannel(msg, interviewId, applicant) {
@@ -561,14 +897,19 @@ async function handleRegisterCommand(msg, options) {
       console.error('Failed to refresh legal role after gamertag update:', err);
       return false;
     });
+    const nicknameNote = await syncGamertagNickname(member, gamertag, 'approved gamertag update');
 
     const oldText = updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(gamertag)
       ? ` dari \`${updated.oldGamertag}\``
       : '';
     await replyNoPing(
       msg,
-      `Gamertag legal kamu diperbarui${oldText} menjadi \`${gamertag}\`. Tidak perlu interview ulang. Relog Minecraft atau tunggu cek ulang akses.`
+      `Gamertag legal kamu diperbarui${oldText} menjadi \`${gamertag}\`. Nickname Discord disync ke gamertag. Tidak perlu interview ulang. Relog Minecraft atau tunggu cek ulang akses.${nicknameNote}`
     );
+    if (updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(gamertag)) {
+      queueLegalAccessJob(options.bridge, 'revoke', { gamertag: updated.oldGamertag }, msg.author.id, msg.author);
+    }
+    queueLegalAccessJob(options.bridge, 'approve', updated.entry, msg.author.id, msg.author);
     return true;
   }
   if (existing?.status === 'pending' && existing.interviewChannelId) {
@@ -615,6 +956,7 @@ async function handleRegisterCommand(msg, options) {
     console.error('Failed to set pending register role:', err);
     return false;
   });
+  const nicknameNote = await syncGamertagNickname(member, gamertag, 'pending register');
 
   const entry = { ...saved.entry, userId: msg.author.id };
   await channel.send({
@@ -628,7 +970,7 @@ async function handleRegisterCommand(msg, options) {
 
   await replyNoPing(
     msg,
-    `Register diterima. Channel interview kamu: ${channelMention(channel.id)}.`
+    `Register diterima. Nickname Discord disync ke \`${gamertag}\`. Channel interview kamu: ${channelMention(channel.id)}.${nicknameNote}`
   );
   return true;
 }
@@ -651,17 +993,17 @@ async function handleStatusCommand(msg, options) {
 }
 
 async function handleListCommand(msg, options) {
-  const page = parseListCommand(msg.content);
-  if (!page) return false;
-  if (!isRegisterAdmin(msg)) {
-    await replyNoPing(msg, 'Command list register khusus admin.');
+  const listOptions = parseListCommand(msg.content);
+  if (!listOptions) return false;
+  if (!await isInterviewAdmin(msg)) {
+    await replyNoPing(msg, 'Command list register khusus admin/interviewer.');
     return true;
   }
   if (!await ensureRegisterStore(options.registerStore, msg.client)) {
     await replyNoPing(msg, 'Sistem register belum aktif. Hubungi admin.');
     return true;
   }
-  await replyNoPing(msg, buildListPayload(options.registerStore.getEntries(), page));
+  await replyNoPing(msg, buildListPayload(options.registerStore.getEntries(), listOptions));
   return true;
 }
 
@@ -698,9 +1040,23 @@ async function handleSyncCitizenCommand(msg, options) {
       `Berhasil: ${stats.migrated}`,
       `Tidak ditemukan: ${stats.skipped}`,
       `Gagal: ${stats.failed}`,
+      `Nickname sync: ${stats.nicknameSynced || 0} sukses, ${stats.nicknameFailed || 0} gagal`,
     ].join('\n')
   );
   return true;
+}
+
+function queueLegalAccessJob(bridge, action, entry, userId, reviewer) {
+  if (!bridge?.enqueueBridgeQuery || !entry?.gamertag) return null;
+  return bridge.enqueueBridgeQuery('legal_access', {
+    action,
+    targetName: entry.gamertag,
+    targetKey: gamertagKey(entry.gamertag),
+    discordUserId: userId,
+    approvedAt: entry.approvedAt || '',
+    requestedBy: reviewer?.id || '',
+    requestedByTag: reviewer?.tag || reviewer?.username || '',
+  });
 }
 
 async function approveInterview(interaction, registerStore, entryUserId, options) {
@@ -722,6 +1078,7 @@ async function approveInterview(interaction, registerStore, entryUserId, options
       console.error('Failed to move approved member role:', err);
       return false;
     });
+    await syncGamertagNickname(member, entry.gamertag, 'approve interview');
   }
   await interaction.update({
     embeds: [buildInterviewEmbed({ ...entry, userId: entryUserId }, { id: entryUserId })],
@@ -730,6 +1087,7 @@ async function approveInterview(interaction, registerStore, entryUserId, options
   await interaction.channel?.send(
     `Approved. <@${entryUserId}> sekarang LEGAL dan boleh masuk Minecraft sebagai \`${entry.gamertag}\`.`
   ).catch(() => null);
+  queueLegalAccessJob(options.bridge, 'approve', entry, entryUserId, interaction.user);
   return true;
 }
 
@@ -757,6 +1115,7 @@ async function rejectInterview(interaction, registerStore, entryUserId, options)
   await interaction.channel?.send(
     `Rejected. <@${entryUserId}> belum mendapat akses legal Minecraft, tapi masih bisa coba lagi dengan register ulang.`
   ).catch(() => null);
+  queueLegalAccessJob(options.bridge, 'revoke', entry, entryUserId, interaction.user);
   return true;
 }
 
@@ -781,20 +1140,30 @@ async function closeInterview(interaction, registerStore, entryUserId, options =
   const closedName = `closed-${entry.interviewId || 'interview'}`.slice(0, 100);
   await interaction.channel?.setName(closedName, 'Interview closed').catch(() => null);
   let archived = false;
-  const archiveCategoryId = String(options.archiveCategoryId || '').trim();
-  if (archiveCategoryId && interaction.channel?.setParent) {
+  let archiveNotice = '';
+  const archiveResult = await resolveArchiveCategory(interaction.guild);
+  if (archiveResult.category && interaction.channel?.setParent) {
     const moved = await interaction.channel
-      .setParent(archiveCategoryId, { lockPermissions: false, reason: 'Interview archived' })
+      .setParent(archiveResult.category.id, { lockPermissions: false, reason: 'Interview archived' })
       .catch(err => {
         console.error('Failed to move interview channel to archive:', err);
         return null;
       });
     archived = Boolean(moved);
+    if (archived && archiveResult.created) {
+      archiveNotice = ` Category archive baru dibuat: ${archiveResult.category.name}.`;
+    }
+  } else if (archiveResult.code === 'server-category-limit') {
+    archiveNotice = ' Archive tidak dipindahkan karena server sudah mencapai limit category Discord.';
+  } else if (archiveResult.code === 'server-channel-limit') {
+    archiveNotice = ' Archive tidak dipindahkan karena server sudah mencapai limit total channel Discord.';
+  } else if (archiveResult.code) {
+    archiveNotice = ` Archive tidak dipindahkan (${archiveResult.code}).`;
   }
   await interaction.channel?.send(
     archived
-      ? 'Interview ditutup, channel dikunci dari applicant, lalu dipindahkan ke archive.'
-      : 'Interview ditutup dan channel dikunci dari applicant.'
+      ? `Interview ditutup, channel dikunci dari applicant, lalu dipindahkan ke archive.${archiveNotice}`
+      : `Interview ditutup dan channel dikunci dari applicant.${archiveNotice}`
   ).catch(() => null);
   return true;
 }
@@ -804,6 +1173,7 @@ function createRegisterInteractionHandler({
   legacyRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
   rejectedRoleId = MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   registerStore,
+  bridge = null,
 } = {}) {
   return async function handleRegisterInteraction(interaction) {
     try {
@@ -811,8 +1181,8 @@ function createRegisterInteractionHandler({
 
       const listPage = parseListButtonId(interaction.customId);
       if (listPage) {
-        if (!interaction.guild || !isRegisterAdmin(interaction)) {
-          await interaction.reply({ content: 'Pagination ini khusus admin.', ephemeral: true }).catch(() => null);
+        if (!interaction.guild || !await isInterviewAdmin(interaction)) {
+          await interaction.reply({ content: 'Registry ini khusus admin/interviewer.', ephemeral: true }).catch(() => null);
           return true;
         }
         await ensureRegisterStore(registerStore, interaction.client);
@@ -822,7 +1192,7 @@ function createRegisterInteractionHandler({
 
       const interview = parseInterviewButtonId(interaction.customId);
       if (!interview) return false;
-      if (!interaction.guild || !isInterviewAdmin(interaction)) {
+      if (!interaction.guild || !await isInterviewAdmin(interaction)) {
         await interaction.reply({ content: 'Tombol interview khusus admin.', ephemeral: true }).catch(() => null);
         return true;
       }
@@ -832,7 +1202,7 @@ function createRegisterInteractionHandler({
         roleId,
         legacyRoleId,
         rejectedRoleId,
-        archiveCategoryId: INTERVIEW_ARCHIVE_CATEGORY_ID,
+        bridge,
       };
       if (interview.action === 'approve') return approveInterview(interaction, registerStore, interview.userId, options);
       if (interview.action === 'reject') return rejectInterview(interaction, registerStore, interview.userId, options);

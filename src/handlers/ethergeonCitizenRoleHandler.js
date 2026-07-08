@@ -1,3 +1,4 @@
+const { PermissionsBitField } = require('discord.js');
 const {
   MINECRAFT_REGISTER_ROLE_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
@@ -45,14 +46,34 @@ async function moveMemberToCitizenRole(member, {
   return added && removedLegacy && removedRejected;
 }
 
-async function collectRegisteredUserIds(registerStore, client) {
-  if (!registerStore) return new Set();
+function normalizeGamertag(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 32);
+}
+
+async function setNicknameToGamertag(member, gamertag) {
+  const nickname = normalizeGamertag(gamertag);
+  if (!member || !nickname) return false;
+  if (member.nickname === nickname) return true;
+  if (!member.nickname && member.user?.username === nickname) return true;
+
+  const botMember = member.guild?.members?.me;
+  const canManageNicknames = botMember?.permissions?.has(PermissionsBitField.Flags.ManageNicknames);
+  if (!canManageNicknames || member.manageable === false) return false;
+
+  const updated = await member
+    .setNickname(nickname, 'Ethergeon gamertag registration sync')
+    .catch(() => null);
+  return Boolean(updated?.nickname === nickname || member.nickname === nickname);
+}
+
+async function collectRegisteredEntries(registerStore, client) {
+  if (!registerStore) return new Map();
   await registerStore.init(client);
-  return new Set(
+  return new Map(
     registerStore.getEntries()
       .filter(entry => entry.status === 'approved' || entry.legal === true)
-      .map(entry => String(entry.userId || '').trim())
-      .filter(Boolean)
+      .map(entry => [String(entry.userId || '').trim(), entry])
+      .filter(([userId]) => Boolean(userId))
   );
 }
 
@@ -66,14 +87,16 @@ async function syncEthergeonCitizenRoles(client, {
     return { scanned: 0, migrated: 0, failed: 0, skipped: 0, fromLegacyRole: 0, fromRegisterData: 0 };
   }
 
-  const registeredUserIds = await collectRegisteredUserIds(registerStore, client);
+  const registeredEntries = await collectRegisteredEntries(registerStore, client);
   const stats = {
     scanned: 0,
     migrated: 0,
     failed: 0,
     skipped: 0,
+    nicknameSynced: 0,
+    nicknameFailed: 0,
     fromLegacyRole: 0,
-    fromRegisterData: registeredUserIds.size,
+    fromRegisterData: registeredEntries.size,
     failedMemberIds: [],
   };
 
@@ -83,12 +106,15 @@ async function syncEthergeonCitizenRoles(client, {
 
     for (const member of members.values()) {
       if (member.user?.bot) continue;
-      const hasRegisterData = registeredUserIds.has(member.id);
-      if (!hasRegisterData) continue;
+      const entry = registeredEntries.get(member.id);
+      if (!entry) continue;
 
       stats.scanned += 1;
 
       const ok = await moveMemberToCitizenRole(member, { citizenRoleId, legacyRoleId, rejectedRoleId });
+      const nicknameOk = await setNicknameToGamertag(member, entry.gamertag);
+      if (nicknameOk) stats.nicknameSynced += 1;
+      else stats.nicknameFailed += 1;
       if (ok) {
         stats.migrated += 1;
       } else {
@@ -98,7 +124,7 @@ async function syncEthergeonCitizenRoles(client, {
     }
   }
 
-  stats.skipped = Math.max(0, registeredUserIds.size - stats.scanned);
+  stats.skipped = Math.max(0, registeredEntries.size - stats.scanned);
   return stats;
 }
 
@@ -115,9 +141,11 @@ function registerEthergeonCitizenRoleEvents(client, {
   client.on('guildMemberAdd', async member => {
     try {
       if (member.user?.bot) return;
-      const registeredUserIds = await collectRegisteredUserIds(registerStore, member.client);
-      if (registeredUserIds.has(member.id)) {
+      const registeredEntries = await collectRegisteredEntries(registerStore, member.client);
+      const entry = registeredEntries.get(member.id);
+      if (entry) {
         await moveMemberToCitizenRole(member, { citizenRoleId, legacyRoleId, rejectedRoleId });
+        await setNicknameToGamertag(member, entry.gamertag);
       }
     } catch (err) {
       console.error('Ethergeon Citizen add handler error:', err);
