@@ -33,6 +33,14 @@ const INTERVIEW_BUTTON_PREFIX = 'interview';
 const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
 const DISCORD_SERVER_CATEGORY_LIMIT = 50;
 const DISCORD_SERVER_CHANNEL_LIMIT = 500;
+const INTERVIEW_TRANSCRIPT_MESSAGE_LIMIT = Math.max(
+  100,
+  Math.min(5000, Number(process.env.INTERVIEW_TRANSCRIPT_MESSAGE_LIMIT) || 1000)
+);
+const COMPILE_COMMAND_MAX_CHANNELS = Math.max(
+  1,
+  Math.min(500, Number(process.env.INTERVIEW_COMPILE_MAX_CHANNELS) || 500)
+);
 
 function noPing(payload) {
   if (typeof payload === 'string') {
@@ -90,6 +98,17 @@ function parseArchiveInterviewsCommand(content) {
   const match = String(content || '').trim().match(/^!(?:archive-interviews|archiveinterviews|arsip-interviews|arsipinterviews)(?:\s+(\d+))?$/i);
   if (!match) return null;
   const limit = Math.min(100, Math.max(1, parseInt(match[1] || '25', 10) || 25));
+  return { limit };
+}
+
+function parseCompileCommand(content) {
+  const match = String(content || '').trim().match(/^!(?:compile|compile-interviews|compileinterviews)(?:\s+(\d+|all|semua))?$/i);
+  if (!match) return null;
+  const rawLimit = String(match[1] || 'all').toLowerCase();
+  if (rawLimit === 'all' || rawLimit === 'semua') {
+    return { limit: COMPILE_COMMAND_MAX_CHANNELS };
+  }
+  const limit = Math.min(COMPILE_COMMAND_MAX_CHANNELS, Math.max(1, parseInt(rawLimit, 10) || COMPILE_COMMAND_MAX_CHANNELS));
   return { limit };
 }
 
@@ -1195,6 +1214,360 @@ async function handleArchiveInterviewsCommand(msg) {
   return true;
 }
 
+function isClosedInterviewAnyChannel(channel) {
+  const name = String(channel?.name || '').toLowerCase();
+  return channel?.type === ChannelType.GuildText && /^closed[-_ ]*interview/i.test(name);
+}
+
+function interviewIdFromChannelName(channel) {
+  const match = String(channel?.name || '').match(/(interview-\d{3,})/i);
+  return match ? match[1].toLowerCase() : '';
+}
+
+function jsonClone(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+}
+
+function serializeCollection(collection, mapper) {
+  if (!collection?.values) return [];
+  return [...collection.values()].map(mapper).filter(Boolean);
+}
+
+function serializeMessageForTranscript(message) {
+  return {
+    id: message.id,
+    type: message.type,
+    createdAt: message.createdAt?.toISOString?.() || '',
+    editedAt: message.editedAt?.toISOString?.() || null,
+    pinned: Boolean(message.pinned),
+    system: Boolean(message.system),
+    author: {
+      id: message.author?.id || '',
+      username: message.author?.username || '',
+      tag: message.author?.tag || '',
+      bot: Boolean(message.author?.bot),
+    },
+    memberDisplayName: message.member?.displayName || '',
+    content: message.content || '',
+    attachments: serializeCollection(message.attachments, attachment => ({
+      id: attachment.id,
+      name: attachment.name || '',
+      url: attachment.url || '',
+      proxyUrl: attachment.proxyURL || '',
+      contentType: attachment.contentType || '',
+      size: attachment.size || 0,
+      width: attachment.width || null,
+      height: attachment.height || null,
+    })),
+    embeds: Array.isArray(message.embeds)
+      ? message.embeds.map(embed => embed?.toJSON?.() || jsonClone(embed)).filter(Boolean)
+      : [],
+    components: Array.isArray(message.components)
+      ? message.components.map(component => component?.toJSON?.() || jsonClone(component)).filter(Boolean)
+      : [],
+    stickers: serializeCollection(message.stickers, sticker => ({
+      id: sticker.id,
+      name: sticker.name || '',
+      format: sticker.format || '',
+    })),
+    reactions: serializeCollection(message.reactions?.cache, reaction => ({
+      emoji: reaction.emoji?.toString?.() || reaction.emoji?.name || '',
+      count: reaction.count || 0,
+    })),
+    mentions: {
+      users: serializeCollection(message.mentions?.users, user => user.id),
+      roles: serializeCollection(message.mentions?.roles, role => role.id),
+      channels: serializeCollection(message.mentions?.channels, channel => channel.id),
+    },
+    reference: message.reference ? {
+      messageId: message.reference.messageId || '',
+      channelId: message.reference.channelId || '',
+      guildId: message.reference.guildId || '',
+    } : null,
+  };
+}
+
+async function fetchInterviewMessages(channel, limit = INTERVIEW_TRANSCRIPT_MESSAGE_LIMIT) {
+  const messages = [];
+  let before = null;
+
+  while (messages.length < limit) {
+    const batchLimit = Math.min(100, limit - messages.length);
+    const options = before ? { limit: batchLimit, before } : { limit: batchLimit };
+    const batch = await channel.messages.fetch(options).catch(err => {
+      console.error('Failed to fetch interview messages:', err);
+      return null;
+    });
+    if (!batch?.size) break;
+
+    messages.push(...batch.values());
+    before = batch.last()?.id || null;
+    if (!before || batch.size < batchLimit) break;
+  }
+
+  return messages.sort((a, b) => Number(a.createdTimestamp || 0) - Number(b.createdTimestamp || 0));
+}
+
+function resolveInterviewEntry(registerStore, channel, entryUserId = '', entry = null) {
+  if (entry && entryUserId) return { userId: entryUserId, entry };
+
+  const byChannel = registerStore?.findUserByInterviewChannel?.(channel?.id);
+  if (byChannel) return byChannel;
+
+  const interviewId = interviewIdFromChannelName(channel);
+  if (interviewId && registerStore?.getEntries) {
+    const found = registerStore.getEntries()
+      .find(item => String(item.interviewId || '').toLowerCase() === interviewId);
+    if (found) return { userId: found.userId, entry: found };
+  }
+
+  if (entryUserId && registerStore?.getUser) {
+    const fallbackEntry = registerStore.getUser(entryUserId);
+    if (fallbackEntry) return { userId: entryUserId, entry: fallbackEntry };
+  }
+
+  return { userId: entryUserId || '', entry: entry || null };
+}
+
+function buildInterviewTranscript(channel, messages, {
+  registerStore,
+  actor,
+  entryUserId = '',
+  entry = null,
+  source = 'manual-compile',
+} = {}) {
+  const resolved = resolveInterviewEntry(registerStore, channel, entryUserId, entry);
+  const participants = new Map();
+  for (const message of messages) {
+    const authorId = message.author?.id || '';
+    if (!authorId || participants.has(authorId)) continue;
+    participants.set(authorId, {
+      id: authorId,
+      username: message.author?.username || '',
+      tag: message.author?.tag || '',
+      bot: Boolean(message.author?.bot),
+      displayName: message.member?.displayName || '',
+    });
+  }
+
+  const compiledAt = new Date().toISOString();
+  const transcriptId = `${channel.guild?.id || 'guild'}:${channel.id}`;
+  return {
+    version: 1,
+    type: 'ethergeon-interview-transcript',
+    source,
+    transcriptId,
+    compiledAt,
+    compiledBy: {
+      id: actor?.id || '',
+      username: actor?.username || '',
+      tag: actor?.tag || '',
+    },
+    guild: {
+      id: channel.guild?.id || '',
+      name: channel.guild?.name || '',
+    },
+    channel: {
+      id: channel.id,
+      name: channel.name || '',
+      parentId: channel.parentId || '',
+      topic: channel.topic || '',
+      createdAt: channel.createdAt?.toISOString?.() || '',
+    },
+    applicant: {
+      discordUserId: resolved.userId || '',
+      gamertag: resolved.entry?.gamertag || '',
+      username: resolved.entry?.username || '',
+      status: resolved.entry?.status || '',
+    },
+    interview: {
+      id: resolved.entry?.interviewId || interviewIdFromChannelName(channel),
+      createdAt: resolved.entry?.interviewCreatedAt || null,
+      closedAt: resolved.entry?.interviewClosedAt || null,
+      approvedAt: resolved.entry?.approvedAt || null,
+      approvedBy: resolved.entry?.approvedBy || '',
+      rejectedAt: resolved.entry?.rejectedAt || null,
+      rejectedBy: resolved.entry?.rejectedBy || '',
+    },
+    participants: [...participants.values()],
+    messageCount: messages.length,
+    truncated: messages.length >= INTERVIEW_TRANSCRIPT_MESSAGE_LIMIT,
+    messages: messages.map(serializeMessageForTranscript),
+  };
+}
+
+async function compileInterviewChannel(channel, {
+  registerStore,
+  transcriptStore,
+  actor,
+  entryUserId = '',
+  entry = null,
+  source = 'manual-compile',
+} = {}) {
+  if (!channel || channel.type !== ChannelType.GuildText) {
+    return { ok: false, code: 'not-text-channel' };
+  }
+  if (!transcriptStore?.appendTranscript) {
+    return { ok: false, code: 'transcript-store-missing' };
+  }
+
+  await transcriptStore.init?.(channel.client);
+  const messages = await fetchInterviewMessages(channel);
+  const transcript = buildInterviewTranscript(channel, messages, {
+    registerStore,
+    actor,
+    entryUserId,
+    entry,
+    source,
+  });
+  const saved = await transcriptStore.appendTranscript(transcript);
+  return {
+    ok: true,
+    saved,
+    transcriptId: saved.transcriptId,
+    fileName: saved.fileName,
+    shard: saved.shard,
+    duplicate: Boolean(saved.duplicate),
+    messageCount: messages.length,
+  };
+}
+
+async function deleteCompiledInterviewChannel(channel, transcriptStore, reason = 'Interview transcript compiled') {
+  const deleted = await channel.delete(reason).then(() => true).catch(err => {
+    console.error('Failed to delete compiled interview channel:', err);
+    return false;
+  });
+  if (deleted) {
+    await transcriptStore?.markChannelDeleted?.(channel.id).catch(err => {
+      console.error('Failed to mark transcript channel deleted:', err);
+      return false;
+    });
+  }
+  return deleted;
+}
+
+async function compileAndDeleteInterviewChannel(channel, options = {}) {
+  const compiled = await compileInterviewChannel(channel, options).catch(err => {
+    console.error('Failed to compile interview transcript:', err);
+    return { ok: false, code: 'compile-failed', error: err };
+  });
+  if (!compiled.ok) return { ...compiled, deleted: false };
+
+  const deleted = await deleteCompiledInterviewChannel(
+    channel,
+    options.transcriptStore,
+    'Closed interview transcript saved to JSON'
+  );
+  return { ...compiled, deleted };
+}
+
+async function sendCompileLog(client, lines) {
+  const channel = await client.channels.fetch(REGISTRATION_INBOX_CHANNEL_ID).catch(() => null);
+  if (!channel?.send) return false;
+  await channel.send({
+    content: Array.isArray(lines) ? lines.filter(Boolean).join('\n') : String(lines || ''),
+    allowedMentions: { parse: [] },
+  }).catch(err => {
+    console.error('Failed to send compile log:', err);
+  });
+  return true;
+}
+
+async function compileClosedInterviewBacklogForGuild(guild, {
+  limit = COMPILE_COMMAND_MAX_CHANNELS,
+  registerStore,
+  transcriptStore,
+  actor,
+} = {}) {
+  const summary = {
+    scanned: 0,
+    compiled: 0,
+    duplicates: 0,
+    deleted: 0,
+    failed: 0,
+    failedLines: [],
+    files: new Set(),
+  };
+
+  if (!guild) return summary;
+  await guild.channels.fetch().catch(() => null);
+  const candidates = [...guild.channels.cache.values()]
+    .filter(isClosedInterviewAnyChannel)
+    .sort((a, b) => Number(a.rawPosition || 0) - Number(b.rawPosition || 0))
+    .slice(0, Math.max(1, Math.min(COMPILE_COMMAND_MAX_CHANNELS, Number(limit) || COMPILE_COMMAND_MAX_CHANNELS)));
+
+  summary.scanned = candidates.length;
+  for (const channel of candidates) {
+    const result = await compileAndDeleteInterviewChannel(channel, {
+      registerStore,
+      transcriptStore,
+      actor,
+      source: 'manual-compile',
+    });
+
+    if (result.ok) {
+      summary.compiled += result.duplicate ? 0 : 1;
+      summary.duplicates += result.duplicate ? 1 : 0;
+      summary.deleted += result.deleted ? 1 : 0;
+      if (result.fileName) summary.files.add(result.fileName);
+    } else {
+      summary.failed += 1;
+      summary.failedLines.push(`${channel.name}: ${result.code || 'compile-failed'}`);
+    }
+  }
+
+  summary.files = [...summary.files];
+  return summary;
+}
+
+async function handleCompileCommand(msg, options) {
+  const parsed = parseCompileCommand(msg.content);
+  if (!parsed) return false;
+  if (!msg.guild) return true;
+  if (!await isInterviewAdmin(msg)) {
+    await replyNoPing(msg, 'Command compile interview khusus admin/interviewer.');
+    return true;
+  }
+  if (!options.transcriptStore?.appendTranscript) {
+    await replyNoPing(msg, 'Transcript store belum aktif.');
+    return true;
+  }
+
+  const progress = await replyNoPing(
+    msg,
+    `Compile interview dimulai. Target maksimal ${parsed.limit} channel closed.`
+  );
+  const result = await compileClosedInterviewBacklogForGuild(msg.guild, {
+    limit: parsed.limit,
+    registerStore: options.registerStore,
+    transcriptStore: options.transcriptStore,
+    actor: msg.author,
+  });
+
+  const summary = [
+    'Compile interview selesai.',
+    `Channel dicek: ${result.scanned}`,
+    `Transcript baru: ${result.compiled}`,
+    `Sudah ada di JSON: ${result.duplicates}`,
+    `Channel terhapus: ${result.deleted}`,
+    `Gagal: ${result.failed}`,
+    result.files.length ? `File JSON: ${result.files.join(', ')}` : '',
+    result.failedLines.length ? `Gagal:\n${result.failedLines.slice(0, 8).join('\n')}` : '',
+  ].filter(Boolean).join('\n');
+
+  if (progress?.edit) {
+    await progress.edit(noPing(summary)).catch(() => null);
+  } else {
+    await replyNoPing(msg, summary);
+  }
+  return true;
+}
+
 async function handleHelpCommand(msg, options) {
   const content = String(msg.content || '').trim();
   if (!/^!help\b/i.test(content)) return false;
@@ -1327,6 +1700,40 @@ async function closeInterview(interaction, registerStore, entryUserId, options =
   }).catch(() => null);
   const closedName = `closed-${entry.interviewId || 'interview'}`.slice(0, 100);
   await interaction.channel?.setName(closedName, 'Interview closed').catch(() => null);
+
+  if (options.transcriptStore?.appendTranscript && interaction.channel) {
+    const compileResult = await compileInterviewChannel(interaction.channel, {
+      registerStore,
+      transcriptStore: options.transcriptStore,
+      actor: interaction.user,
+      entryUserId,
+      entry,
+      source: 'auto-close',
+    }).catch(err => {
+      console.error('Failed to compile closed interview:', err);
+      return { ok: false, code: 'compile-failed' };
+    });
+
+    if (compileResult.ok) {
+      await interaction.followUp({
+        content: `Interview dicompile ke \`${compileResult.fileName}\`, lalu channel ticket akan dihapus.`,
+        ephemeral: true,
+      }).catch(() => null);
+      const deleted = await deleteCompiledInterviewChannel(
+        interaction.channel,
+        options.transcriptStore,
+        'Interview closed and transcript saved to JSON'
+      );
+      await sendCompileLog(interaction.client, [
+        `Interview compiled: \`${closedName}\``,
+        `Applicant: <@${entryUserId}> | Gamertag: \`${entry.gamertag || '-'}\``,
+        `JSON: \`${compileResult.fileName}\` | Messages: ${compileResult.messageCount}`,
+        `Channel deleted: ${deleted ? 'yes' : 'no'}`,
+      ]);
+      return true;
+    }
+  }
+
   let archiveNotice = '';
   const archiveResult = await moveChannelToArchive(interaction.guild, interaction.channel, 'Interview archived');
   if (archiveResult.ok && archiveResult.created) {
@@ -1352,6 +1759,7 @@ function createRegisterInteractionHandler({
   rejectedRoleId = MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   registerStore,
   bridge = null,
+  transcriptStore = null,
 } = {}) {
   return async function handleRegisterInteraction(interaction) {
     try {
@@ -1381,6 +1789,7 @@ function createRegisterInteractionHandler({
         legacyRoleId,
         rejectedRoleId,
         bridge,
+        transcriptStore,
       };
       if (interview.action === 'approve') return approveInterview(interaction, registerStore, interview.userId, options);
       if (interview.action === 'reject') return rejectInterview(interaction, registerStore, interview.userId, options);
@@ -1399,6 +1808,7 @@ function createRegisterHandler({
   rejectedRoleId = MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   registerStore,
   bridge = null,
+  transcriptStore = null,
   registrationChannelId = REGISTRATION_INBOX_CHANNEL_ID,
   privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID,
 }) {
@@ -1415,6 +1825,7 @@ function createRegisterHandler({
         verifiedRoleId: roleId,
         registerStore,
         bridge,
+        transcriptStore,
         registrationChannelId,
         privateChatChannelId,
       };
@@ -1422,6 +1833,7 @@ function createRegisterHandler({
       if (await handleRegisterCommand(msg, options)) return true;
       if (await handleHelpCommand(msg, options)) return true;
       if (await handleSyncCitizenCommand(msg, options)) return true;
+      if (await handleCompileCommand(msg, options)) return true;
       if (await handleArchiveInterviewsCommand(msg)) return true;
       if (await handleListCommand(msg, options)) return true;
       if (await handleStatusCommand(msg, options)) return true;

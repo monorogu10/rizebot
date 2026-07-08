@@ -1,6 +1,8 @@
 const https = require('node:https');
 const { AttachmentBuilder } = require('discord.js');
 
+const DEFAULT_SCAN_LIMIT = 2000;
+
 function downloadAttachment(url) {
   return new Promise((resolve, reject) => {
     https
@@ -24,6 +26,10 @@ function escapeRegExp(text) {
 function createEditableJsonMessageStore({ channelId, fileName }) {
   const marker = `rizebot-json:${fileName}`;
   const markerLine = `<!-- ${marker} -->`;
+  const maxScanMessages = Math.max(
+    100,
+    Math.min(10000, Number(process.env.SAVE_CHANNEL_SCAN_LIMIT) || DEFAULT_SCAN_LIMIT)
+  );
   let channelCache = null;
   let lastMessageId = null;
   let saveQueue = Promise.resolve();
@@ -72,8 +78,24 @@ function createEditableJsonMessageStore({ channelId, fileName }) {
   }
 
   async function findLatestDataMessage(channel) {
-    const messages = await channel.messages.fetch({ limit: 100 });
-    return messages.find(isDataMessage) || null;
+    let before = null;
+    let scanned = 0;
+
+    while (scanned < maxScanMessages) {
+      const limit = Math.min(100, maxScanMessages - scanned);
+      const options = before ? { limit, before } : { limit };
+      const messages = await channel.messages.fetch(options);
+      if (!messages.size) break;
+
+      const found = messages.find(isDataMessage);
+      if (found) return found;
+
+      scanned += messages.size;
+      before = messages.last()?.id || null;
+      if (!before || messages.size < limit) break;
+    }
+
+    return null;
   }
 
   function buildPayload(data) {

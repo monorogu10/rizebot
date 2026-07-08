@@ -1114,9 +1114,23 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const message = cleanText(event.message || '', 1600);
     if (!message) return { ok: false, code: 'empty-message' };
 
+    const player = normalizeOnlinePlayer(event.player || event);
+    const onlineCountRaw = Number(event.onlineCount);
+    const onlineCount = Number.isFinite(onlineCountRaw) && onlineCountRaw >= 0
+      ? Math.floor(onlineCountRaw)
+      : getOnlinePlayers().length;
+    const wallet = normalizeWalletProfile(event.wallet || event.player?.wallet || player.wallet);
+    const source = cleanText(event.source || event.chatSource || 'global', 40) || 'global';
     const linked = findLinkedUserForPlayer(event);
     const user = await resolveDiscordUser(linked?.userId);
     const rank = cleanText(event.rank || 'Player', 180) || 'Player';
+    const fields = [
+      { name: 'Online', value: `${formatNumber(onlineCount)} player`, inline: true },
+      { name: 'Geon', value: wallet ? `${formatNumber(wallet.geon)} Geon` : '-', inline: true },
+      { name: 'Ether', value: wallet ? `${formatNumber(wallet.ether)} Ether` : '-', inline: true },
+      { name: 'Rank', value: rank, inline: false },
+      { name: 'Source', value: source, inline: true },
+    ];
     const footerParts = [
       `💬 Rank: ${rank}`,
       linked?.userId ? `Discord ID: ${linked.userId}` : 'Discord: belum register',
@@ -1128,6 +1142,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
         title: name,
         description: message,
         footerParts,
+        fields,
         thumbnailUrl: discordAvatarUrl(user),
       })],
       allowedMentions: { parse: [] },

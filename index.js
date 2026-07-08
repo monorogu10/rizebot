@@ -25,6 +25,7 @@ const {
 const { createSubmissionStore } = require('./src/services/submissionStore');
 const { createRegisterStore } = require('./src/services/registerStore');
 const { createModerationStore } = require('./src/services/moderationStore');
+const { createInterviewTranscriptStore } = require('./src/services/interviewTranscriptStore');
 const { createTopupBridgeService } = require('./src/services/topupBridgeService');
 const { createTopupBridgeServer } = require('./src/services/topupBridgeServer');
 const { createSociabuzzTopupService } = require('./src/services/sociabuzzTopupService');
@@ -123,6 +124,7 @@ const client = new Client({
 const submissionStore = createSubmissionStore();
 const legacyRegisterStore = createRegisterStore();
 const moderationStore = createModerationStore();
+const interviewTranscriptStore = createInterviewTranscriptStore();
 const bridgeService = createTopupBridgeService({
   registerStore: legacyRegisterStore,
   client,
@@ -146,6 +148,7 @@ const registerHandler = createRegisterHandler({
   rejectedRoleId: MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   registerStore: legacyRegisterStore,
   bridge: bridgeService,
+  transcriptStore: interviewTranscriptStore,
   submissionStore
 });
 const registerInteractionHandler = createRegisterInteractionHandler({
@@ -153,7 +156,8 @@ const registerInteractionHandler = createRegisterInteractionHandler({
   legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
   rejectedRoleId: MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   registerStore: legacyRegisterStore,
-  bridge: bridgeService
+  bridge: bridgeService,
+  transcriptStore: interviewTranscriptStore
 });
 const minecraftBridgeHandler = createMinecraftBridgeHandler({
   bridge: bridgeService,
@@ -266,6 +270,17 @@ async function sendBridgeAlert(message) {
   return true;
 }
 
+async function sendBotReloadNotice() {
+  const tag = client.user?.tag || client.user?.username || 'unknown';
+  await sendBridgeAlert(
+    bridgeLogLine(
+      'INFO',
+      '[rizebot][system]',
+      `Bot reload selesai. User=${tag} | PID=${process.pid} | Node=${process.version}`
+    )
+  );
+}
+
 async function checkBridgeHealth() {
   const now = Date.now();
   const status = bridgeService.getBridgeStatus();
@@ -328,6 +343,9 @@ client.once('clientReady', async () => {
   await moderationStore.init(client).catch(err => {
     console.error('Failed to init moderation store:', err);
   });
+  await interviewTranscriptStore.init(client).catch(err => {
+    console.error('Failed to init interview transcript store:', err);
+  });
   await privateRoleEvents.sync().catch(err => {
     console.error('Failed to sync private roles:', err);
   });
@@ -363,6 +381,7 @@ client.once('clientReady', async () => {
   }, BRIDGE_MONITOR_INTERVAL_MS);
   bridgeMonitorInterval.unref?.();
 
+  await sendBotReloadNotice();
   console.log(`バ. Bot ready as ${client.user.tag}`);
 });
 
@@ -483,8 +502,17 @@ async function reloadLegacyRegisterDataFromMessage(msg) {
   return reloadedLegacyRegisterData;
 }
 
+async function reloadInterviewTranscriptDataFromMessage(msg) {
+  const reloadedTranscriptData = await interviewTranscriptStore.reloadFromMessage(msg).catch(err => {
+    console.error('Failed to reload interview transcript data from message:', err);
+    return false;
+  });
+  return reloadedTranscriptData;
+}
+
 async function handleMessageCreate(msg) {
   if (await reloadLegacyRegisterDataFromMessage(msg)) return;
+  if (await reloadInterviewTranscriptDataFromMessage(msg)) return;
   if (wasContentProcessed(msg)) return;
   if (!claimMessageAcrossProcesses(msg)) return;
   rememberProcessedContent(msg);
@@ -507,6 +535,7 @@ async function handleMessageUpdate(oldMsg, newMsg) {
   if (!msg) return;
 
   if (await reloadLegacyRegisterDataFromMessage(msg)) return;
+  if (await reloadInterviewTranscriptDataFromMessage(msg)) return;
   const handledSociabuzz = await sociabuzzTopupService.handleDiscordMessage(msg).catch(err => {
     console.error('Failed to process updated SociaBuzz message:', err);
     return false;

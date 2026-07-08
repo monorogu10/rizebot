@@ -61,6 +61,7 @@ function createRizebotHelpPayload({
         value: commandLines([
           ['!sync-citizen', 'paksa migrasi role lama ke Ethergeon Citizen.'],
           ['!list [all|legal|pending|rejected] [halaman]', 'lihat registry Minecraft dengan tombol filter/page.'],
+          ['!compile [jumlah|all]', 'compile closed interview lama ke JSON save channel, lalu hapus channel ticket.'],
           ['!archive-interviews [jumlah]', 'pindahkan backlog closed interview ke archive.'],
           ['!freedom @user', 'batalkan timeout aktif.'],
         ]),
