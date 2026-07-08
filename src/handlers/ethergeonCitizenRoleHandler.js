@@ -1,6 +1,7 @@
 const {
   MINECRAFT_REGISTER_ROLE_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  MINECRAFT_REGISTER_REJECTED_ROLE_ID,
 } = require('../config');
 
 async function fetchRole(guild, roleId) {
@@ -31,13 +32,17 @@ async function removeRoleIfPresent(member, roleId) {
 async function moveMemberToCitizenRole(member, {
   citizenRoleId = MINECRAFT_REGISTER_ROLE_ID,
   legacyRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  rejectedRoleId = MINECRAFT_REGISTER_REJECTED_ROLE_ID,
 } = {}) {
   if (!member || member.user?.bot) return false;
   const added = await addRoleIfMissing(member, citizenRoleId);
   const removedLegacy = citizenRoleId === legacyRoleId
     ? true
     : await removeRoleIfPresent(member, legacyRoleId);
-  return added && removedLegacy;
+  const removedRejected = rejectedRoleId === citizenRoleId || rejectedRoleId === legacyRoleId
+    ? true
+    : await removeRoleIfPresent(member, rejectedRoleId);
+  return added && removedLegacy && removedRejected;
 }
 
 async function collectRegisteredUserIds(registerStore, client) {
@@ -45,6 +50,7 @@ async function collectRegisteredUserIds(registerStore, client) {
   await registerStore.init(client);
   return new Set(
     registerStore.getEntries()
+      .filter(entry => entry.status === 'approved' || entry.legal === true)
       .map(entry => String(entry.userId || '').trim())
       .filter(Boolean)
   );
@@ -54,6 +60,7 @@ async function syncEthergeonCitizenRoles(client, {
   registerStore,
   citizenRoleId = MINECRAFT_REGISTER_ROLE_ID,
   legacyRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  rejectedRoleId = MINECRAFT_REGISTER_REJECTED_ROLE_ID,
 } = {}) {
   if (!client || !citizenRoleId) {
     return { scanned: 0, migrated: 0, failed: 0, skipped: 0, fromLegacyRole: 0, fromRegisterData: 0 };
@@ -76,14 +83,12 @@ async function syncEthergeonCitizenRoles(client, {
 
     for (const member of members.values()) {
       if (member.user?.bot) continue;
-      const hasLegacyRole = Boolean(legacyRoleId && member.roles.cache.has(legacyRoleId));
       const hasRegisterData = registeredUserIds.has(member.id);
-      if (!hasLegacyRole && !hasRegisterData) continue;
+      if (!hasRegisterData) continue;
 
       stats.scanned += 1;
-      if (hasLegacyRole) stats.fromLegacyRole += 1;
 
-      const ok = await moveMemberToCitizenRole(member, { citizenRoleId, legacyRoleId });
+      const ok = await moveMemberToCitizenRole(member, { citizenRoleId, legacyRoleId, rejectedRoleId });
       if (ok) {
         stats.migrated += 1;
       } else {
@@ -101,6 +106,7 @@ function registerEthergeonCitizenRoleEvents(client, {
   registerStore,
   citizenRoleId = MINECRAFT_REGISTER_ROLE_ID,
   legacyRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  rejectedRoleId = MINECRAFT_REGISTER_REJECTED_ROLE_ID,
 } = {}) {
   if (!client || !citizenRoleId) {
     return { sync: async () => ({ scanned: 0, migrated: 0, failed: 0, skipped: 0 }) };
@@ -110,8 +116,8 @@ function registerEthergeonCitizenRoleEvents(client, {
     try {
       if (member.user?.bot) return;
       const registeredUserIds = await collectRegisteredUserIds(registerStore, member.client);
-      if (registeredUserIds.has(member.id) || (legacyRoleId && member.roles.cache.has(legacyRoleId))) {
-        await moveMemberToCitizenRole(member, { citizenRoleId, legacyRoleId });
+      if (registeredUserIds.has(member.id)) {
+        await moveMemberToCitizenRole(member, { citizenRoleId, legacyRoleId, rejectedRoleId });
       }
     } catch (err) {
       console.error('Ethergeon Citizen add handler error:', err);
@@ -121,18 +127,15 @@ function registerEthergeonCitizenRoleEvents(client, {
   client.on('guildMemberUpdate', async (oldMember, newMember) => {
     try {
       if (newMember.user?.bot) return;
-      const hadLegacy = legacyRoleId && oldMember.roles.cache.has(legacyRoleId);
-      const hasLegacy = legacyRoleId && newMember.roles.cache.has(legacyRoleId);
-      if (!hadLegacy && hasLegacy) {
-        await moveMemberToCitizenRole(newMember, { citizenRoleId, legacyRoleId });
-      }
+      void oldMember;
+      void newMember;
     } catch (err) {
       console.error('Ethergeon Citizen update handler error:', err);
     }
   });
 
   return {
-    sync: async () => syncEthergeonCitizenRoles(client, { registerStore, citizenRoleId, legacyRoleId })
+    sync: async () => syncEthergeonCitizenRoles(client, { registerStore, citizenRoleId, legacyRoleId, rejectedRoleId })
   };
 }
 

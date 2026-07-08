@@ -30,11 +30,10 @@ function createRizebotHelpPayload({
         name: 'User biasa',
         value: commandLines([
           ['!help', 'lihat daftar command.'],
-          ['!reg', 'daftar sebagai Ethergeon Citizen.'],
+          ['!reg <gamertag>', 'daftar Minecraft dan buka interview akses.'],
           ['!daftar', 'alias dari `!reg`.'],
           ['!register', 'alias dari `!reg`.'],
-          ['!status', 'cek status role Ethergeon Citizen.'],
-          ['!list [halaman]', 'lihat daftar Ethergeon Citizen.'],
+          ['!status', 'lihat Ethergeon ID Card.'],
         ]),
         inline: false,
       },
@@ -61,6 +60,7 @@ function createRizebotHelpPayload({
         name: 'Admin Registrasi & Moderasi',
         value: commandLines([
           ['!sync-citizen', 'paksa migrasi role lama ke Ethergeon Citizen.'],
+          ['!list [halaman]', 'lihat daftar register Minecraft baru.'],
           ['!freedom @user', 'batalkan timeout aktif.'],
         ]),
         inline: false,

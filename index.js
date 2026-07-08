@@ -10,6 +10,7 @@ const { createMessageHandler } = require('./src/handlers/messageHandler');
 const { registerMemberEvents } = require('./src/handlers/memberEvents');
 const { registerPrivateRoleEvents } = require('./src/handlers/privateRoleHandler');
 const { createRegisterHandler, createRegisterInteractionHandler } = require('./src/handlers/registerHandler');
+const { createMinecraftBridgeHandler } = require('./src/handlers/minecraftBridgeHandler');
 const { registerEthergeonCitizenRoleEvents } = require('./src/handlers/ethergeonCitizenRoleHandler');
 const {
   createModerationHandler,
@@ -19,11 +20,18 @@ const {
 const { createSubmissionStore } = require('./src/services/submissionStore');
 const { createRegisterStore } = require('./src/services/registerStore');
 const { createModerationStore } = require('./src/services/moderationStore');
+const { createTopupBridgeService } = require('./src/services/topupBridgeService');
+const { createTopupBridgeServer } = require('./src/services/topupBridgeServer');
 const {
   REGISTER_ROLE_ID,
   LEGACY_ROLE_ID,
   MINECRAFT_REGISTER_ROLE_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  MINECRAFT_REGISTER_REJECTED_ROLE_ID,
+  TOPUP_BRIDGE_HOST,
+  TOPUP_BRIDGE_PORT,
+  TOPUP_BRIDGE_TOKEN,
+  SOCIABUZZ_WEBHOOK_TOKEN,
 } = require('./src/config');
 const { isAllowedBotOutputChannel } = require('./src/utils/channelPolicy');
 
@@ -108,14 +116,34 @@ const client = new Client({
 const submissionStore = createSubmissionStore();
 const legacyRegisterStore = createRegisterStore();
 const moderationStore = createModerationStore();
+const bridgeService = createTopupBridgeService({
+  registerStore: legacyRegisterStore,
+  client,
+});
+const bridgeServer = createTopupBridgeServer({
+  bridge: bridgeService,
+  host: TOPUP_BRIDGE_HOST,
+  port: TOPUP_BRIDGE_PORT,
+  token: TOPUP_BRIDGE_TOKEN,
+  sociabuzz: null,
+  sociabuzzToken: SOCIABUZZ_WEBHOOK_TOKEN,
+});
 const registerHandler = createRegisterHandler({
   roleId: MINECRAFT_REGISTER_ROLE_ID,
   legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  rejectedRoleId: MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   registerStore: legacyRegisterStore,
   submissionStore
 });
 const registerInteractionHandler = createRegisterInteractionHandler({
-  roleId: MINECRAFT_REGISTER_ROLE_ID
+  roleId: MINECRAFT_REGISTER_ROLE_ID,
+  legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  rejectedRoleId: MINECRAFT_REGISTER_REJECTED_ROLE_ID,
+  registerStore: legacyRegisterStore
+});
+const minecraftBridgeHandler = createMinecraftBridgeHandler({
+  bridge: bridgeService,
+  registerStore: legacyRegisterStore,
 });
 const moderationHandler = createModerationHandler({
   moderationStore,
@@ -130,7 +158,8 @@ const baseHandleMessage = createMessageHandler({
   linkBlocker: maybeBlockLink,
   keywordReply: maybeReplyKeyword,
   registerHandler,
-  moderationHandler
+  moderationHandler,
+  minecraftBridgeHandler
 });
 
 registerMemberEvents(client);
@@ -142,7 +171,8 @@ const privateRoleEvents = registerPrivateRoleEvents(client, {
 const ethergeonCitizenRoleEvents = registerEthergeonCitizenRoleEvents(client, {
   registerStore: legacyRegisterStore,
   citizenRoleId: MINECRAFT_REGISTER_ROLE_ID,
-  legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID
+  legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  rejectedRoleId: MINECRAFT_REGISTER_REJECTED_ROLE_ID
 });
 
 client.once('clientReady', async () => {
@@ -170,6 +200,13 @@ client.once('clientReady', async () => {
   await syncActivePetitions(client, moderationStore).catch(err => {
     console.error('Failed to sync petitions:', err);
   });
+  await bridgeServer.start()
+    .then(() => {
+      console.log(`Minecraft bridge server ready on ${TOPUP_BRIDGE_HOST}:${TOPUP_BRIDGE_PORT}`);
+    })
+    .catch(err => {
+      console.error('Failed to start Minecraft bridge server:', err);
+    });
   console.log(`バ. Bot ready as ${client.user.tag}`);
 });
 
@@ -322,9 +359,9 @@ async function handleMessageUpdate(oldMsg, newMsg) {
 client.on('messageCreate', handleMessageCreate);
 client.on('messageUpdate', handleMessageUpdate);
 client.on('interactionCreate', async interaction => {
-  if (!isAllowedBotOutputChannel(interaction)) return;
   const handledRegister = await registerInteractionHandler(interaction);
   if (handledRegister) return;
+  if (!isAllowedBotOutputChannel(interaction)) return;
 });
 client.on('messageReactionAdd', async (reaction, user) => {
   await moderationReactionHandler(reaction, user);

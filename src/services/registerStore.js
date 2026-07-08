@@ -33,6 +33,9 @@ function normalizeUsers(users = {}) {
         .filter(Boolean)
         .slice(-10)
       : [];
+    const status = normalizeStatus(entry?.status);
+    const interviewId = typeof entry?.interviewId === 'string' ? entry.interviewId.trim() : '';
+    const interviewChannelId = typeof entry?.interviewChannelId === 'string' ? entry.interviewChannelId.trim() : '';
     normalized[userId] = {
       gamertag,
       username,
@@ -45,10 +48,30 @@ function normalizeUsers(users = {}) {
       verifiedAt,
       lastSeenAt,
       lastSeenName,
-      nameHistory
+      nameHistory,
+      status,
+      legal: status === 'approved',
+      interviewId,
+      interviewChannelId,
+      interviewCreatedAt: typeof entry?.interviewCreatedAt === 'string' ? entry.interviewCreatedAt : null,
+      interviewClosedAt: typeof entry?.interviewClosedAt === 'string' ? entry.interviewClosedAt : null,
+      approvedAt: typeof entry?.approvedAt === 'string' ? entry.approvedAt : null,
+      approvedBy: typeof entry?.approvedBy === 'string' ? entry.approvedBy : '',
+      approvedByName: typeof entry?.approvedByName === 'string' ? entry.approvedByName : '',
+      rejectedAt: typeof entry?.rejectedAt === 'string' ? entry.rejectedAt : null,
+      rejectedBy: typeof entry?.rejectedBy === 'string' ? entry.rejectedBy : '',
+      rejectedByName: typeof entry?.rejectedByName === 'string' ? entry.rejectedByName : '',
+      rejectionReason: typeof entry?.rejectionReason === 'string' ? entry.rejectionReason.trim().slice(0, 240) : ''
     };
   }
   return normalized;
+}
+
+function normalizeStatus(rawStatus) {
+  const status = String(rawStatus || '').trim().toLowerCase();
+  if (status === 'approved' || status === 'legal') return 'approved';
+  if (status === 'rejected') return 'rejected';
+  return 'pending';
 }
 
 function normalizeGamertagKey(gamertag) {
@@ -123,6 +146,7 @@ function createRegisterStore() {
   });
 
   const state = { users: {}, order: [] };
+  let interviewSequence = 0;
   const lastCleanup = { removedDuplicateUserIds: [] };
   let lastLoadRemovedDuplicateCount = 0;
   let clientRef = null;
@@ -132,6 +156,7 @@ function createRegisterStore() {
     return {
       users: state.users,
       order: state.order,
+      interviewSequence,
       updatedAt: new Date().toISOString()
     };
   }
@@ -183,6 +208,19 @@ function createRegisterStore() {
       nameHistory: Array.isArray(state.users[userId]?.nameHistory)
         ? [...state.users[userId].nameHistory]
         : [],
+      status: state.users[userId]?.status || 'pending',
+      legal: state.users[userId]?.status === 'approved',
+      interviewId: state.users[userId]?.interviewId || '',
+      interviewChannelId: state.users[userId]?.interviewChannelId || '',
+      interviewCreatedAt: state.users[userId]?.interviewCreatedAt || null,
+      interviewClosedAt: state.users[userId]?.interviewClosedAt || null,
+      approvedAt: state.users[userId]?.approvedAt || null,
+      approvedBy: state.users[userId]?.approvedBy || '',
+      approvedByName: state.users[userId]?.approvedByName || '',
+      rejectedAt: state.users[userId]?.rejectedAt || null,
+      rejectedBy: state.users[userId]?.rejectedBy || '',
+      rejectedByName: state.users[userId]?.rejectedByName || '',
+      rejectionReason: state.users[userId]?.rejectionReason || '',
       rank: idx + 1
     }));
   }
@@ -230,6 +268,13 @@ function createRegisterStore() {
 
     state.users = deduped.users;
     state.order = deduped.order;
+    const loadedSequence = Math.max(0, Math.floor(Number(loaded.interviewSequence) || 0));
+    const maxInterviewNumber = Object.values(state.users).reduce((max, entry) => {
+      const match = String(entry?.interviewId || '').match(/(\d+)$/);
+      const value = match ? Number(match[1]) : 0;
+      return Number.isFinite(value) && value > max ? value : max;
+    }, 0);
+    interviewSequence = Math.max(loadedSequence, maxInterviewNumber);
     lastLoadRemovedDuplicateCount = deduped.removedUserIds.length;
     if (deduped.removedUserIds.length) {
       const pending = new Set(lastCleanup.removedDuplicateUserIds);
@@ -268,7 +313,100 @@ function createRegisterStore() {
       verifiedAt: null,
       lastSeenAt: null,
       lastSeenName: '',
-      nameHistory: []
+      nameHistory: [],
+      status: 'pending',
+      legal: false,
+      interviewId: '',
+      interviewChannelId: '',
+      interviewCreatedAt: null,
+      interviewClosedAt: null,
+      approvedAt: null,
+      approvedBy: '',
+      approvedByName: '',
+      rejectedAt: null,
+      rejectedBy: '',
+      rejectedByName: '',
+      rejectionReason: ''
+    };
+    state.users[userId] = entry;
+    state.order.push(userId);
+    await persist();
+    return { created: true, entry };
+  }
+
+  async function nextInterviewId() {
+    await ensureReady();
+    interviewSequence += 1;
+    await persist();
+    return `interview-${String(interviewSequence).padStart(4, '0')}`;
+  }
+
+  async function upsertPendingUser(userId, gamertag, username = '', metadata = {}) {
+    await ensureReady();
+    const existing = state.users[userId];
+    const nowIso = new Date().toISOString();
+    if (existing) {
+      existing.gamertag = gamertag;
+      existing.username = username || existing.username || '';
+      existing.updatedAt = nowIso;
+      existing.status = 'pending';
+      existing.legal = false;
+      existing.interviewId = metadata.interviewId || existing.interviewId || '';
+      existing.interviewChannelId = metadata.interviewChannelId || existing.interviewChannelId || '';
+      existing.interviewCreatedAt = metadata.interviewCreatedAt || existing.interviewCreatedAt || nowIso;
+      existing.interviewClosedAt = null;
+      existing.approvedAt = null;
+      existing.approvedBy = '';
+      existing.approvedByName = '';
+      existing.rejectedAt = null;
+      existing.rejectedBy = '';
+      existing.rejectedByName = '';
+      existing.rejectionReason = '';
+      if (normalizeGamertagKey(gamertag) !== normalizeGamertagKey(existing.lastSeenName || '')) {
+        existing.verified = false;
+        existing.persistentId = '';
+        existing.verifiedAt = null;
+      }
+      await persist();
+      return { created: false, entry: existing };
+    }
+
+    const duplicate = findUserByGamertag(gamertag);
+    if (duplicate) {
+      return {
+        created: false,
+        duplicate: true,
+        duplicateUserId: duplicate.userId,
+        entry: duplicate.entry
+      };
+    }
+
+    const entry = {
+      gamertag,
+      username,
+      registeredAt: nowIso,
+      updatedAt: nowIso,
+      answered: false,
+      answeredAt: null,
+      persistentId: '',
+      verified: false,
+      verifiedAt: null,
+      lastSeenAt: null,
+      lastSeenName: '',
+      nameHistory: [],
+      status: 'pending',
+      legal: false,
+      interviewId: metadata.interviewId || '',
+      interviewChannelId: metadata.interviewChannelId || '',
+      interviewCreatedAt: metadata.interviewCreatedAt || nowIso,
+      interviewClosedAt: null,
+      approvedAt: null,
+      approvedBy: '',
+      approvedByName: '',
+      rejectedAt: null,
+      rejectedBy: '',
+      rejectedByName: '',
+      rejectionReason: ''
     };
     state.users[userId] = entry;
     state.order.push(userId);
@@ -290,6 +428,8 @@ function createRegisterStore() {
     state.users[userId].gamertag = gamertag;
     state.users[userId].username = username || state.users[userId].username || '';
     state.users[userId].updatedAt = new Date().toISOString();
+    state.users[userId].status = 'pending';
+    state.users[userId].legal = false;
     if (normalizeGamertagKey(gamertag) !== normalizeGamertagKey(state.users[userId].lastSeenName || '')) {
       state.users[userId].verified = false;
       state.users[userId].persistentId = '';
@@ -325,6 +465,63 @@ function createRegisterStore() {
     entry.nameHistory = nextHistory.slice(-10);
     await persist();
     return entry;
+  }
+
+  async function approveUser(userId, reviewer = {}) {
+    await ensureReady();
+    const entry = state.users[userId];
+    if (!entry) return null;
+    const nowIso = new Date().toISOString();
+    entry.status = 'approved';
+    entry.legal = true;
+    entry.approvedAt = nowIso;
+    entry.approvedBy = String(reviewer.id || '').trim();
+    entry.approvedByName = String(reviewer.name || reviewer.tag || '').trim();
+    entry.rejectedAt = null;
+    entry.rejectedBy = '';
+    entry.rejectedByName = '';
+    entry.rejectionReason = '';
+    entry.updatedAt = nowIso;
+    await persist();
+    return entry;
+  }
+
+  async function rejectUser(userId, reviewer = {}, reasonRaw = '') {
+    await ensureReady();
+    const entry = state.users[userId];
+    if (!entry) return null;
+    const nowIso = new Date().toISOString();
+    entry.status = 'rejected';
+    entry.legal = false;
+    entry.rejectedAt = nowIso;
+    entry.rejectedBy = String(reviewer.id || '').trim();
+    entry.rejectedByName = String(reviewer.name || reviewer.tag || '').trim();
+    entry.rejectionReason = String(reasonRaw || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    entry.updatedAt = nowIso;
+    await persist();
+    return entry;
+  }
+
+  async function closeInterview(userId, reviewer = {}) {
+    await ensureReady();
+    const entry = state.users[userId];
+    if (!entry) return null;
+    entry.interviewClosedAt = new Date().toISOString();
+    entry.updatedAt = entry.interviewClosedAt;
+    entry.closedBy = String(reviewer.id || '').trim();
+    entry.closedByName = String(reviewer.name || reviewer.tag || '').trim();
+    await persist();
+    return entry;
+  }
+
+  function findUserByInterviewChannel(channelIdRaw) {
+    const channelId = String(channelIdRaw || '').trim();
+    if (!channelId) return null;
+    for (const userId of state.order) {
+      const entry = state.users[userId];
+      if (entry?.interviewChannelId === channelId) return { userId, entry };
+    }
+    return null;
   }
 
   async function markSeenByPersistentId(persistentIdRaw, gamertagRaw = '') {
@@ -441,8 +638,14 @@ function createRegisterStore() {
     getLastCleanup,
     clearLastCleanup,
     registerUser,
+    nextInterviewId,
+    upsertPendingUser,
     updateUser,
     markVerified,
+    approveUser,
+    rejectUser,
+    closeInterview,
+    findUserByInterviewChannel,
     markSeenByPersistentId,
     markSeenByGamertag,
     findUserByPersistentId,

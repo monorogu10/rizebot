@@ -5,6 +5,7 @@ const { EmbedBuilder } = require('discord.js');
 const {
   MINECRAFT_CHAT_LOG_CHANNEL_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   MINECRAFT_REGISTER_ROLE_ID,
   PRIVATE_CHAT_CHANNEL_ID,
 } = require('../config');
@@ -125,7 +126,12 @@ function createLogEmbed({ color, title, description, footerParts = [], thumbnail
   return embed;
 }
 
+function isApprovedRegistrationEntry(entry) {
+  return Boolean(entry && (entry.status === 'approved' || entry.legal === true));
+}
+
 function isVerifiedMinecraftLink(linked, player = {}) {
+  if (!isApprovedRegistrationEntry(linked?.entry)) return false;
   if (!linked?.entry?.verified) return false;
   const playerName = n(player.name);
   const playerPersistentId = String(player.persistentId || '').trim();
@@ -135,6 +141,7 @@ function isVerifiedMinecraftLink(linked, player = {}) {
 }
 
 function isRegisteredMinecraftLink(linked, player = {}) {
+  if (!isApprovedRegistrationEntry(linked?.entry)) return false;
   const playerName = n(player.name || player.gamertag || player.key);
   return Boolean(linked?.entry?.gamertag && playerName && n(linked.entry.gamertag) === playerName);
 }
@@ -529,7 +536,11 @@ function createTopupBridgeService({ registerStore, client = null }) {
       const removedPending = MINECRAFT_REGISTER_PENDING_ROLE_ID === MINECRAFT_REGISTER_ROLE_ID
         ? true
         : await removeRoleIfPresent(member, MINECRAFT_REGISTER_PENDING_ROLE_ID);
-      return added && removedPending;
+      const removedRejected = MINECRAFT_REGISTER_REJECTED_ROLE_ID === MINECRAFT_REGISTER_ROLE_ID ||
+        MINECRAFT_REGISTER_REJECTED_ROLE_ID === MINECRAFT_REGISTER_PENDING_ROLE_ID
+        ? true
+        : await removeRoleIfPresent(member, MINECRAFT_REGISTER_REJECTED_ROLE_ID);
+      return added && removedPending && removedRejected;
     }
 
     return false;
@@ -1204,10 +1215,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
       const linked = linkedByPersistentId || linkedByGamertag;
       const bypass = Boolean(eventRaw.verifyBypass) || isVerifyBypassGamertag(player?.name);
       const verified = bypass || isVerifiedMinecraftLink(linked, player);
-      const registeredMatch = Boolean(
-        linkedByGamertag?.entry?.gamertag &&
-        n(linkedByGamertag.entry.gamertag) === n(player?.name)
-      );
+      const registeredMatch = isRegisteredMinecraftLink(linkedByGamertag, player);
       const accessAllowed = bypass || verified || registeredMatch;
       let roleSynced = false;
       if (!bypass && accessAllowed && linked?.userId) {
