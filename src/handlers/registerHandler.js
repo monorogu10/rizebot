@@ -86,6 +86,13 @@ function parseListCommand(content) {
   return { page, filter };
 }
 
+function parseArchiveInterviewsCommand(content) {
+  const match = String(content || '').trim().match(/^!(?:archive-interviews|archiveinterviews|arsip-interviews|arsipinterviews)(?:\s+(\d+))?$/i);
+  if (!match) return null;
+  const limit = Math.min(100, Math.max(1, parseInt(match[1] || '25', 10) || 25));
+  return { limit };
+}
+
 function formatDateId(iso) {
   if (!iso) return '-';
   const parsed = new Date(iso);
@@ -782,6 +789,39 @@ async function resolveArchiveCategory(guild) {
   return { category, created: true };
 }
 
+async function moveChannelToArchive(guild, channel, reason = 'Interview archived') {
+  const archiveResult = await resolveArchiveCategory(guild);
+  if (!archiveResult.category) {
+    return {
+      ok: false,
+      code: archiveResult.code || 'archive-unavailable',
+      created: false,
+      category: null,
+    };
+  }
+  if (!channel?.setParent) {
+    return {
+      ok: false,
+      code: 'channel-move-unavailable',
+      created: archiveResult.created,
+      category: archiveResult.category,
+    };
+  }
+
+  const moved = await channel
+    .setParent(archiveResult.category.id, { lockPermissions: true, reason })
+    .catch(err => {
+      console.error('Failed to move interview channel to archive:', err);
+      return null;
+    });
+  return {
+    ok: Boolean(moved),
+    code: moved ? 'archived' : 'move-failed',
+    created: archiveResult.created,
+    category: archiveResult.category,
+  };
+}
+
 async function createInterviewChannel(msg, interviewId, applicant) {
   const guild = msg.guild;
   const botId = guild.members.me?.id || msg.client.user?.id;
@@ -1007,6 +1047,70 @@ async function handleListCommand(msg, options) {
   return true;
 }
 
+function isClosedInterviewChannel(channel) {
+  const name = String(channel?.name || '').toLowerCase();
+  return channel?.type === ChannelType.GuildText &&
+    String(channel.parentId || '') === String(INTERVIEW_CATEGORY_ID || '') &&
+    /^closed[-_ ]*interview/i.test(name);
+}
+
+async function handleArchiveInterviewsCommand(msg) {
+  const parsed = parseArchiveInterviewsCommand(msg.content);
+  if (!parsed) return false;
+  if (!msg.guild) return true;
+  if (!await isInterviewAdmin(msg)) {
+    await replyNoPing(msg, 'Command archive interview khusus admin/interviewer.');
+    return true;
+  }
+
+  if (!INTERVIEW_CATEGORY_ID) {
+    await replyNoPing(msg, 'INTERVIEW_CATEGORY_ID belum diset.');
+    return true;
+  }
+
+  await msg.guild.channels.fetch().catch(() => null);
+  const backlog = [...msg.guild.channels.cache.values()]
+    .filter(isClosedInterviewChannel)
+    .sort((a, b) => Number(a.rawPosition || 0) - Number(b.rawPosition || 0))
+    .slice(0, parsed.limit);
+
+  if (!backlog.length) {
+    await replyNoPing(msg, 'Tidak ada channel `closed-interview-*` yang masih nyangkut di category interview.');
+    return true;
+  }
+
+  let moved = 0;
+  let failed = 0;
+  const createdCategories = new Set();
+  const failedLines = [];
+
+  for (const channel of backlog) {
+    const result = await moveChannelToArchive(msg.guild, channel, 'Bulk archive closed interview channels');
+    if (result.ok) {
+      moved += 1;
+      if (result.created && result.category?.name) createdCategories.add(result.category.name);
+    } else {
+      failed += 1;
+      failedLines.push(`${channel.name}: ${result.code || 'move-failed'}`);
+    }
+  }
+
+  const remaining = [...msg.guild.channels.cache.values()].filter(isClosedInterviewChannel).length;
+  await replyNoPing(
+    msg,
+    [
+      'Archive sweep selesai.',
+      `Dipindahkan: ${moved}/${backlog.length}`,
+      `Gagal: ${failed}`,
+      `Sisa backlog di Interview Area: ${remaining}`,
+      createdCategories.size ? `Category baru: ${[...createdCategories].join(', ')}` : '',
+      failedLines.length ? `Gagal:\n${failedLines.slice(0, 5).join('\n')}` : '',
+      remaining > 0 ? 'Jalankan lagi `!archive-interviews` untuk lanjut batch berikutnya.' : '',
+    ].filter(Boolean).join('\n')
+  );
+  return true;
+}
+
 async function handleHelpCommand(msg, options) {
   const content = String(msg.content || '').trim();
   if (!/^!help\b/i.test(content)) return false;
@@ -1139,29 +1243,19 @@ async function closeInterview(interaction, registerStore, entryUserId, options =
   }).catch(() => null);
   const closedName = `closed-${entry.interviewId || 'interview'}`.slice(0, 100);
   await interaction.channel?.setName(closedName, 'Interview closed').catch(() => null);
-  let archived = false;
   let archiveNotice = '';
-  const archiveResult = await resolveArchiveCategory(interaction.guild);
-  if (archiveResult.category && interaction.channel?.setParent) {
-    const moved = await interaction.channel
-      .setParent(archiveResult.category.id, { lockPermissions: false, reason: 'Interview archived' })
-      .catch(err => {
-        console.error('Failed to move interview channel to archive:', err);
-        return null;
-      });
-    archived = Boolean(moved);
-    if (archived && archiveResult.created) {
-      archiveNotice = ` Category archive baru dibuat: ${archiveResult.category.name}.`;
-    }
+  const archiveResult = await moveChannelToArchive(interaction.guild, interaction.channel, 'Interview archived');
+  if (archiveResult.ok && archiveResult.created) {
+    archiveNotice = ` Category archive baru dibuat: ${archiveResult.category.name}.`;
   } else if (archiveResult.code === 'server-category-limit') {
     archiveNotice = ' Archive tidak dipindahkan karena server sudah mencapai limit category Discord.';
   } else if (archiveResult.code === 'server-channel-limit') {
     archiveNotice = ' Archive tidak dipindahkan karena server sudah mencapai limit total channel Discord.';
-  } else if (archiveResult.code) {
+  } else if (!archiveResult.ok && archiveResult.code) {
     archiveNotice = ` Archive tidak dipindahkan (${archiveResult.code}).`;
   }
   await interaction.channel?.send(
-    archived
+    archiveResult.ok
       ? `Interview ditutup, channel dikunci dari applicant, lalu dipindahkan ke archive.${archiveNotice}`
       : `Interview ditutup dan channel dikunci dari applicant.${archiveNotice}`
   ).catch(() => null);
@@ -1244,6 +1338,7 @@ function createRegisterHandler({
       if (await handleRegisterCommand(msg, options)) return true;
       if (await handleHelpCommand(msg, options)) return true;
       if (await handleSyncCitizenCommand(msg, options)) return true;
+      if (await handleArchiveInterviewsCommand(msg)) return true;
       if (await handleListCommand(msg, options)) return true;
       if (await handleStatusCommand(msg, options)) return true;
       return false;
