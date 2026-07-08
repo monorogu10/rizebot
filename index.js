@@ -9,7 +9,11 @@ const { maybeReplyKeyword } = require('./src/features/keywordReply');
 const { createMessageHandler } = require('./src/handlers/messageHandler');
 const { registerMemberEvents } = require('./src/handlers/memberEvents');
 const { registerPrivateRoleEvents } = require('./src/handlers/privateRoleHandler');
-const { createRegisterHandler, createRegisterInteractionHandler } = require('./src/handlers/registerHandler');
+const {
+  archiveClosedInterviewBacklog,
+  createRegisterHandler,
+  createRegisterInteractionHandler,
+} = require('./src/handlers/registerHandler');
 const { createMinecraftBridgeHandler } = require('./src/handlers/minecraftBridgeHandler');
 const { createTopupHandler } = require('./src/handlers/topupHandler');
 const { registerEthergeonCitizenRoleEvents } = require('./src/handlers/ethergeonCitizenRoleHandler');
@@ -30,6 +34,7 @@ const {
   MINECRAFT_REGISTER_ROLE_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
   MINECRAFT_REGISTER_REJECTED_ROLE_ID,
+  REGISTRATION_INBOX_CHANNEL_ID,
   TOPUP_BRIDGE_HOST,
   TOPUP_BRIDGE_PORT,
   TOPUP_BRIDGE_TOKEN,
@@ -188,6 +193,131 @@ const ethergeonCitizenRoleEvents = registerEthergeonCitizenRoleEvents(client, {
   rejectedRoleId: MINECRAFT_REGISTER_REJECTED_ROLE_ID
 });
 
+const ARCHIVE_SWEEP_INTERVAL_MS = Math.max(
+  60_000,
+  Number(process.env.INTERVIEW_ARCHIVE_SWEEP_INTERVAL_MS) || 5 * 60_000
+);
+const ARCHIVE_SWEEP_LIMIT = Math.max(
+  1,
+  Math.min(100, Number(process.env.INTERVIEW_ARCHIVE_SWEEP_LIMIT) || 50)
+);
+const BRIDGE_MONITOR_INTERVAL_MS = Math.max(
+  5_000,
+  Number(process.env.MINECRAFT_BRIDGE_MONITOR_INTERVAL_MS) || 10_000
+);
+const BRIDGE_STALE_MS = Math.max(
+  15_000,
+  Number(process.env.MINECRAFT_BRIDGE_STALE_MS) || 30_000
+);
+const BRIDGE_STARTUP_GRACE_MS = Math.max(
+  BRIDGE_STALE_MS,
+  Number(process.env.MINECRAFT_BRIDGE_STARTUP_GRACE_MS) || 60_000
+);
+
+let bridgeAlertChannelPromise = null;
+let bridgeMonitorStartedAt = Date.now();
+let bridgeMonitorState = 'unknown';
+let archiveSweepRunning = false;
+
+function bridgePollTimeMs(status) {
+  const raw = status?.lastJobPollAt || status?.lastEventAt || status?.lastSnapshotAt;
+  if (!raw) return 0;
+  const parsed = new Date(raw).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatLogTimestamp(date = new Date()) {
+  const pad = (value, size = 2) => String(value).padStart(size, '0');
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}:${pad(date.getMilliseconds(), 3)}`,
+  ].join(' ');
+}
+
+function bridgeLogLine(level, scope, message) {
+  return `[${formatLogTimestamp()} ${level}] [Scripting] ${scope} ${message}`;
+}
+
+function redactedBridgeUrl() {
+  return 'http://[REDACTED_IP]';
+}
+
+async function resolveBridgeAlertChannel() {
+  if (!REGISTRATION_INBOX_CHANNEL_ID) return null;
+  if (!bridgeAlertChannelPromise) {
+    bridgeAlertChannelPromise = client.channels.fetch(REGISTRATION_INBOX_CHANNEL_ID).catch(err => {
+      bridgeAlertChannelPromise = null;
+      console.error('Failed to fetch bridge alert channel:', err);
+      return null;
+    });
+  }
+  return bridgeAlertChannelPromise;
+}
+
+async function sendBridgeAlert(message) {
+  const channel = await resolveBridgeAlertChannel();
+  if (!channel?.send) return false;
+  await channel.send({
+    content: message,
+    allowedMentions: { parse: [] },
+  }).catch(err => {
+    console.error('Failed to send bridge alert:', err);
+  });
+  return true;
+}
+
+async function checkBridgeHealth() {
+  const now = Date.now();
+  const status = bridgeService.getBridgeStatus();
+  const lastPollMs = bridgePollTimeMs(status);
+  const ageMs = lastPollMs ? now - lastPollMs : Number.POSITIVE_INFINITY;
+  const inGrace = now - bridgeMonitorStartedAt < BRIDGE_STARTUP_GRACE_MS;
+  const connected = lastPollMs > 0 && ageMs <= BRIDGE_STALE_MS;
+
+  if (connected) {
+    if (bridgeMonitorState !== 'connected') {
+      bridgeMonitorState = 'connected';
+      await sendBridgeAlert(
+        bridgeLogLine('INFO', '[secRules][bridge]', `HTTP Discord bridge connected: ${redactedBridgeUrl()}.`)
+      );
+    }
+    return;
+  }
+
+  if (inGrace || bridgeMonitorState === 'disconnected') return;
+  bridgeMonitorState = 'disconnected';
+  const staleText = Number.isFinite(ageMs)
+    ? `${Math.ceil(ageMs / 1000)} detik`
+    : 'belum pernah sejak bot start';
+  await sendBridgeAlert(
+    bridgeLogLine(
+      'WARN',
+      '[secRules][access]',
+      `Discord bridge check gagal: Minecraft BP tidak polling bridge selama ${staleText}. Jika BDS menampilkan InternalHttpRequestError code 111, cek rizebot bridge di port ${TOPUP_BRIDGE_PORT}.`
+    )
+  );
+}
+
+async function runArchiveSweep(reason = 'auto') {
+  if (archiveSweepRunning) return;
+  archiveSweepRunning = true;
+  try {
+    const summary = await archiveClosedInterviewBacklog(client, {
+      limit: ARCHIVE_SWEEP_LIMIT,
+      reason: `Interview archive sweep (${reason})`,
+    });
+    if (summary.moved || summary.failed) {
+      console.log(
+        `Interview archive sweep (${reason}) moved=${summary.moved}, failed=${summary.failed}, remaining=${summary.remaining}`
+      );
+    }
+  } catch (err) {
+    console.error('Interview archive sweep failed:', err);
+  } finally {
+    archiveSweepRunning = false;
+  }
+}
+
 client.once('clientReady', async () => {
   await submissionStore.init(client).catch(err => {
     console.error('Failed to init submission store:', err);
@@ -220,6 +350,19 @@ client.once('clientReady', async () => {
     .catch(err => {
       console.error('Failed to start Minecraft bridge server:', err);
     });
+
+  await runArchiveSweep('startup');
+  const archiveInterval = setInterval(() => {
+    void runArchiveSweep('interval');
+  }, ARCHIVE_SWEEP_INTERVAL_MS);
+  archiveInterval.unref?.();
+
+  void checkBridgeHealth();
+  const bridgeMonitorInterval = setInterval(() => {
+    void checkBridgeHealth();
+  }, BRIDGE_MONITOR_INTERVAL_MS);
+  bridgeMonitorInterval.unref?.();
+
   console.log(`バ. Bot ready as ${client.user.tag}`);
 });
 

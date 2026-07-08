@@ -331,6 +331,27 @@ async function isInterviewAdmin(target) {
   return memberHasAnyRole(member, INTERVIEW_ADMIN_ROLE_IDS);
 }
 
+function isInterviewTicketChannel(channel) {
+  const name = String(channel?.name || '').toLowerCase();
+  return /^interview-\d{3,}$/.test(name) ||
+    /^closed-interview-\d{3,}$/.test(name) ||
+    String(channel?.parentId || '') === String(INTERVIEW_CATEGORY_ID || '');
+}
+
+async function canUseInterviewButton(interaction, applicantUserId) {
+  if (await isInterviewAdmin(interaction)) return true;
+  const actorId = String(interaction?.user?.id || '').trim();
+  if (!actorId || actorId === String(applicantUserId || '')) return false;
+  if (!isInterviewTicketChannel(interaction?.channel)) return false;
+
+  const member = await fetchInteractionMember(interaction);
+  const permissions = interaction.channel?.permissionsFor?.(member);
+  return Boolean(
+    permissions?.has(PermissionsBitField.Flags.ViewChannel) &&
+    permissions?.has(PermissionsBitField.Flags.SendMessages)
+  );
+}
+
 function adminUserIds() {
   return [...new Set([TOPUP_ADMIN_DISCORD_ID, MINECRAFT_REGISTER_RESET_ADMIN_ID].filter(Boolean))];
 }
@@ -669,6 +690,14 @@ function archiveCategoryIndex(category, stem) {
   if (!match) return null;
   const index = parseInt(match[1], 10);
   return Number.isFinite(index) && index > 0 ? index : null;
+}
+
+function isArchiveCategory(channelOrCategory, stem = INTERVIEW_ARCHIVE_CATEGORY_NAME || 'interview-archive') {
+  if (!channelOrCategory) return false;
+  if (INTERVIEW_ARCHIVE_CATEGORY_ID && String(channelOrCategory.id || '') === String(INTERVIEW_ARCHIVE_CATEGORY_ID)) {
+    return true;
+  }
+  return archiveCategoryIndex(channelOrCategory, archiveCategoryStem({ name: stem })) !== null;
 }
 
 function categoryChannelCount(guild, categoryId) {
@@ -1047,11 +1076,85 @@ async function handleListCommand(msg, options) {
   return true;
 }
 
-function isClosedInterviewChannel(channel) {
+function isClosedInterviewChannel(channel, guild = null) {
   const name = String(channel?.name || '').toLowerCase();
-  return channel?.type === ChannelType.GuildText &&
-    String(channel.parentId || '') === String(INTERVIEW_CATEGORY_ID || '') &&
-    /^closed[-_ ]*interview/i.test(name);
+  if (channel?.type !== ChannelType.GuildText) return false;
+  if (!/^closed[-_ ]*interview/i.test(name)) return false;
+  const parent = guild?.channels?.cache?.get?.(channel.parentId);
+  if (parent && isArchiveCategory(parent)) return false;
+  if (!INTERVIEW_CATEGORY_ID) return true;
+  return String(channel.parentId || '') === String(INTERVIEW_CATEGORY_ID) || !parent;
+}
+
+async function archiveClosedInterviewBacklogForGuild(guild, {
+  limit = 25,
+  reason = 'Auto archive closed interview channels',
+} = {}) {
+  if (!guild) {
+    return { scanned: 0, moved: 0, failed: 0, remaining: 0, createdCategories: [], failedLines: [] };
+  }
+
+  await guild.channels.fetch().catch(() => null);
+  const backlog = [...guild.channels.cache.values()]
+    .filter(channel => isClosedInterviewChannel(channel, guild))
+    .sort((a, b) => Number(a.rawPosition || 0) - Number(b.rawPosition || 0))
+    .slice(0, Math.max(1, Math.min(100, Number(limit) || 25)));
+
+  let moved = 0;
+  let failed = 0;
+  const createdCategories = new Set();
+  const failedLines = [];
+
+  for (const channel of backlog) {
+    const result = await moveChannelToArchive(guild, channel, reason);
+    if (result.ok) {
+      moved += 1;
+      if (result.created && result.category?.name) createdCategories.add(result.category.name);
+    } else {
+      failed += 1;
+      failedLines.push(`${channel.name}: ${result.code || 'move-failed'}`);
+    }
+  }
+
+  const remaining = [...guild.channels.cache.values()]
+    .filter(channel => isClosedInterviewChannel(channel, guild))
+    .length;
+
+  return {
+    scanned: backlog.length,
+    moved,
+    failed,
+    remaining,
+    createdCategories: [...createdCategories],
+    failedLines,
+  };
+}
+
+async function archiveClosedInterviewBacklog(client, options = {}) {
+  const summary = {
+    guilds: 0,
+    scanned: 0,
+    moved: 0,
+    failed: 0,
+    remaining: 0,
+    createdCategories: [],
+    failedLines: [],
+  };
+
+  if (!client?.guilds?.cache) return summary;
+  for (const guild of client.guilds.cache.values()) {
+    summary.guilds += 1;
+    const result = await archiveClosedInterviewBacklogForGuild(guild, options);
+    summary.scanned += result.scanned;
+    summary.moved += result.moved;
+    summary.failed += result.failed;
+    summary.remaining += result.remaining;
+    summary.createdCategories.push(...result.createdCategories);
+    summary.failedLines.push(...result.failedLines);
+  }
+
+  summary.createdCategories = [...new Set(summary.createdCategories)];
+  return summary;
 }
 
 async function handleArchiveInterviewsCommand(msg) {
@@ -1068,44 +1171,25 @@ async function handleArchiveInterviewsCommand(msg) {
     return true;
   }
 
-  await msg.guild.channels.fetch().catch(() => null);
-  const backlog = [...msg.guild.channels.cache.values()]
-    .filter(isClosedInterviewChannel)
-    .sort((a, b) => Number(a.rawPosition || 0) - Number(b.rawPosition || 0))
-    .slice(0, parsed.limit);
+  const result = await archiveClosedInterviewBacklogForGuild(msg.guild, {
+    limit: parsed.limit,
+    reason: 'Bulk archive closed interview channels',
+  });
 
-  if (!backlog.length) {
+  if (!result.scanned) {
     await replyNoPing(msg, 'Tidak ada channel `closed-interview-*` yang masih nyangkut di category interview.');
     return true;
   }
-
-  let moved = 0;
-  let failed = 0;
-  const createdCategories = new Set();
-  const failedLines = [];
-
-  for (const channel of backlog) {
-    const result = await moveChannelToArchive(msg.guild, channel, 'Bulk archive closed interview channels');
-    if (result.ok) {
-      moved += 1;
-      if (result.created && result.category?.name) createdCategories.add(result.category.name);
-    } else {
-      failed += 1;
-      failedLines.push(`${channel.name}: ${result.code || 'move-failed'}`);
-    }
-  }
-
-  const remaining = [...msg.guild.channels.cache.values()].filter(isClosedInterviewChannel).length;
   await replyNoPing(
     msg,
     [
       'Archive sweep selesai.',
-      `Dipindahkan: ${moved}/${backlog.length}`,
-      `Gagal: ${failed}`,
-      `Sisa backlog di Interview Area: ${remaining}`,
-      createdCategories.size ? `Category baru: ${[...createdCategories].join(', ')}` : '',
-      failedLines.length ? `Gagal:\n${failedLines.slice(0, 5).join('\n')}` : '',
-      remaining > 0 ? 'Jalankan lagi `!archive-interviews` untuk lanjut batch berikutnya.' : '',
+      `Dipindahkan: ${result.moved}/${result.scanned}`,
+      `Gagal: ${result.failed}`,
+      `Sisa backlog di Interview Area: ${result.remaining}`,
+      result.createdCategories.length ? `Category baru: ${result.createdCategories.join(', ')}` : '',
+      result.failedLines.length ? `Gagal:\n${result.failedLines.slice(0, 5).join('\n')}` : '',
+      result.remaining > 0 ? 'Jalankan lagi `!archive-interviews` untuk lanjut batch berikutnya.' : '',
     ].filter(Boolean).join('\n')
   );
   return true;
@@ -1286,7 +1370,7 @@ function createRegisterInteractionHandler({
 
       const interview = parseInterviewButtonId(interaction.customId);
       if (!interview) return false;
-      if (!interaction.guild || !await isInterviewAdmin(interaction)) {
+      if (!interaction.guild || !await canUseInterviewButton(interaction, interview.userId)) {
         await interaction.reply({ content: 'Tombol interview khusus admin.', ephemeral: true }).catch(() => null);
         return true;
       }
@@ -1360,6 +1444,7 @@ async function scanSubmissionApprovals() {
 }
 
 module.exports = {
+  archiveClosedInterviewBacklog,
   createRegisterHandler,
   createRegisterInteractionHandler,
   createSubmissionReactionHandler,
