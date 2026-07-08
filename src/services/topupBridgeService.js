@@ -198,6 +198,58 @@ function normalizeTarget(entry) {
   };
 }
 
+function normalizeWalletProfile(wallet) {
+  if (!wallet || typeof wallet !== 'object') return null;
+  return {
+    geon: Math.max(0, Math.floor(Number(wallet.geon) || 0)),
+    ether: Math.max(0, Math.floor(Number(wallet.ether) || 0)),
+  };
+}
+
+function normalizeLandProfile(land) {
+  if (!land || typeof land !== 'object') return null;
+  return {
+    ready: land.ready !== false && land.isReady !== false,
+    count: Math.max(0, Math.floor(Number(land.count ?? land.landCount ?? land.owned) || 0)),
+    totalArea: Math.max(0, Math.floor(Number(land.totalArea ?? land.area) || 0)),
+  };
+}
+
+function normalizeRanksProfile(ranks, fallbackRank = '') {
+  if (!ranks || typeof ranks !== 'object') {
+    const fallback = cleanText(fallbackRank, 180);
+    return fallback ? { ready: true, labels: [fallback] } : null;
+  }
+
+  const labels = Array.isArray(ranks.labels)
+    ? ranks.labels.map(label => cleanText(label, 80)).filter(Boolean)
+    : [];
+  for (const value of [
+    ranks.defaultRankLabel,
+    ranks.default,
+    ranks.customRankLabel,
+    ranks.custom,
+    ranks.organizationLabel,
+    ranks.organization,
+    ranks.companyDivisionName,
+    ranks.companyPowerRoleLabel,
+  ]) {
+    const label = cleanText(value, 80);
+    if (label && !labels.some(existing => n(existing) === n(label))) labels.push(label);
+  }
+
+  const fallback = cleanText(fallbackRank, 180);
+  if (!labels.length && fallback) labels.push(fallback);
+
+  return {
+    ready: ranks.ready !== false && ranks.isReady !== false,
+    labels,
+    defaultRankLabel: cleanText(ranks.defaultRankLabel || ranks.default || '', 80),
+    customRankLabel: cleanText(ranks.customRankLabel || ranks.custom || '', 80),
+    organizationLabel: cleanText(ranks.organizationLabel || ranks.organization || '', 120),
+  };
+}
+
 function formatTargetLine(target, index = 0) {
   const user = target.userId ? `<@${target.userId}>` : '-';
   const status = target.verified ? 'verified' : 'terdaftar';
@@ -447,18 +499,16 @@ function createTopupBridgeService({ registerStore, client = null }) {
   }
 
   function normalizeOnlinePlayer(player = {}, now = Date.now()) {
+    const fallbackRank = cleanText(player.rank || '', 180);
     return {
       name: cleanText(player.name, 80),
       key: cleanText(player.key || player.name, 80).toLowerCase(),
       persistentId: cleanText(player.persistentId, 160),
-      rank: cleanText(player.rank || '', 180),
+      rank: fallbackRank,
       online: player.online !== false,
-      wallet: player.wallet && typeof player.wallet === 'object'
-        ? {
-          geon: Math.max(0, Math.floor(Number(player.wallet.geon) || 0)),
-          ether: Math.max(0, Math.floor(Number(player.wallet.ether) || 0)),
-        }
-        : null,
+      wallet: normalizeWalletProfile(player.wallet),
+      land: normalizeLandProfile(player.land),
+      ranks: normalizeRanksProfile(player.ranks, fallbackRank),
       updatedAt: now,
     };
   }
@@ -592,6 +642,29 @@ function createTopupBridgeService({ registerStore, client = null }) {
       .filter(player => player.online && now - player.updatedAt <= ONLINE_TTL_MS)
       .map(attachRegistrationToOnlinePlayer)
       .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  function getPlayerStatusByGamertag(rawGamertag) {
+    const query = n(rawGamertag);
+    if (!query) return null;
+
+    const now = Date.now();
+    const candidates = [...onlinePlayers.values()]
+      .filter(player => {
+        const names = [player.name, player.key, player.registeredGamertag]
+          .map(value => n(value))
+          .filter(Boolean);
+        return names.includes(query);
+      })
+      .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+
+    const latest = candidates[0];
+    if (!latest) return null;
+    const online = Boolean(latest.online) && now - Number(latest.updatedAt || 0) <= ONLINE_TTL_MS;
+    return attachRegistrationToOnlinePlayer({
+      ...latest,
+      online,
+    });
   }
 
   function searchTargets(rawQuery, limit = 10) {
@@ -1193,6 +1266,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     bridgeStats.lastEventType = type;
     if (type === 'chat') {
       bridgeStats.lastChatAt = bridgeStats.lastEventAt;
+      rememberOnlinePlayer(eventRaw.player || eventRaw);
       return sendChatLog(eventRaw);
     }
     if (type === 'transparency') {
@@ -1289,6 +1363,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     searchTargets,
     resolveTarget,
     getOnlinePlayers,
+    getPlayerStatusByGamertag,
     createVerification,
     enqueueTopup,
     enqueueCoupon,

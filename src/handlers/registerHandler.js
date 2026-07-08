@@ -8,6 +8,7 @@ const {
 } = require('discord.js');
 const {
   INTERVIEW_ADMIN_ROLE_IDS,
+  INTERVIEW_ARCHIVE_CATEGORY_ID,
   INTERVIEW_CATEGORY_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
   MINECRAFT_REGISTER_REJECTED_ROLE_ID,
@@ -81,6 +82,85 @@ function formatDateId(iso) {
   } catch {
     return parsed.toISOString();
   }
+}
+
+function discordDisplayName(user, fallback = '-') {
+  return String(
+    user?.tag ||
+    user?.globalName ||
+    user?.username ||
+    fallback ||
+    '-'
+  ).replace(/\s+/g, ' ').trim() || '-';
+}
+
+function discordAvatarUrl(user) {
+  try {
+    return user?.displayAvatarURL?.({ size: 128 }) || '';
+  } catch {
+    return '';
+  }
+}
+
+function formatNumberId(value) {
+  const number = Math.max(0, Math.floor(Number(value) || 0));
+  try {
+    return new Intl.NumberFormat('id-ID').format(number);
+  } catch {
+    return String(number);
+  }
+}
+
+function formatSnapshotTime(value) {
+  const parsed = new Date(Number(value) || value || 0);
+  if (Number.isNaN(parsed.getTime())) return '-';
+  return formatDateId(parsed.toISOString());
+}
+
+function formatRankLabels(profile) {
+  const labels = Array.isArray(profile?.ranks?.labels)
+    ? profile.ranks.labels.map(label => String(label || '').trim()).filter(Boolean)
+    : [];
+  if (!labels.length && profile?.rank) labels.push(String(profile.rank).trim());
+  return labels.length ? labels.join(', ') : '-';
+}
+
+function buildMinecraftStatusFields(profile) {
+  if (!profile) {
+    return [
+      { name: 'Server', value: 'Belum ada snapshot Minecraft.', inline: false },
+    ];
+  }
+
+  const wallet = profile.wallet || {};
+  const land = profile.land || {};
+  const landCount = Math.max(0, Math.floor(Number(land.count ?? land.landCount ?? land.owned) || 0));
+  const totalArea = Math.max(0, Math.floor(Number(land.totalArea ?? land.area) || 0));
+
+  return [
+    {
+      name: 'Server',
+      value: `${profile.online ? 'Online' : 'Offline'}\nUpdate: ${formatSnapshotTime(profile.updatedAt)}`,
+      inline: true,
+    },
+    {
+      name: 'Geon',
+      value: profile.wallet ? `${formatNumberId(wallet.geon)} Geon` : '-',
+      inline: true,
+    },
+    {
+      name: 'Land',
+      value: profile.land
+        ? `${formatNumberId(landCount)} land${totalArea ? `\nArea: ${formatNumberId(totalArea)} blok` : ''}`
+        : '-',
+      inline: true,
+    },
+    {
+      name: 'Rank',
+      value: formatRankLabels(profile),
+      inline: false,
+    },
+  ];
 }
 
 async function ensureRegisterStore(registerStore, client) {
@@ -243,7 +323,7 @@ function buildInterviewEmbed(entry, user) {
     .setTimestamp(new Date());
 }
 
-function buildStatusPayload(entry, user) {
+function buildStatusPayload(entry, user, minecraftProfile = null) {
   if (!entry) {
     return noPing({
       embeds: [
@@ -288,10 +368,19 @@ function buildStatusPayload(entry, user) {
       inline: false,
     });
   }
+  fields.push(...buildMinecraftStatusFields(minecraftProfile));
 
+  const profileLines = [
+    `Discord: ${user ? `<@${user.id}>` : `\`${entry.userId || '-'}\``}`,
+    `Username: \`${discordDisplayName(user, entry.username)}\``,
+    `Gamertag: \`${entry.gamertag || '-'}\``,
+    `Access: **${statusLabel(entry.status)}**`,
+  ];
+  const avatarUrl = discordAvatarUrl(user);
   const embed = new EmbedBuilder()
     .setColor(statusColor(entry.status))
     .setTitle('Ethergeon ID Card')
+    .setDescription(profileLines.join('\n'))
     .addFields(fields)
     .setFooter({
       text: entry.status === 'approved'
@@ -301,6 +390,7 @@ function buildStatusPayload(entry, user) {
           : 'Akses Minecraft aktif setelah interview di-approve admin.',
     })
     .setTimestamp(new Date());
+  if (avatarUrl) embed.setThumbnail(avatarUrl);
 
   return noPing({ embeds: [embed] });
 }
@@ -447,7 +537,38 @@ async function handleRegisterCommand(msg, options) {
 
   const existing = registerStore.getUser(msg.author.id);
   if (existing?.status === 'approved') {
-    await replyNoPing(msg, buildStatusPayload({ ...existing, userId: msg.author.id }, msg.author));
+    const duplicate = registerStore.findUserByGamertag?.(gamertag, msg.author.id);
+    if (duplicate) {
+      await replyNoPing(msg, `Gamertag \`${gamertag}\` sudah dipakai oleh user lain.`);
+      return true;
+    }
+
+    const updated = await registerStore.updateApprovedGamertag?.(
+      msg.author.id,
+      gamertag,
+      msg.author?.tag || msg.author?.username || ''
+    );
+    if (!updated || updated.duplicate || updated.notApproved) {
+      await replyNoPing(msg, 'Gagal memperbarui gamertag legal. Coba lagi atau hubungi admin.');
+      return true;
+    }
+
+    await moveMemberToCitizenRole(member, {
+      citizenRoleId: verifiedRoleId,
+      legacyRoleId: pendingRoleId,
+      rejectedRoleId,
+    }).catch(err => {
+      console.error('Failed to refresh legal role after gamertag update:', err);
+      return false;
+    });
+
+    const oldText = updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(gamertag)
+      ? ` dari \`${updated.oldGamertag}\``
+      : '';
+    await replyNoPing(
+      msg,
+      `Gamertag legal kamu diperbarui${oldText} menjadi \`${gamertag}\`. Tidak perlu interview ulang. Relog Minecraft atau tunggu cek ulang akses.`
+    );
     return true;
   }
   if (existing?.status === 'pending' && existing.interviewChannelId) {
@@ -519,7 +640,13 @@ async function handleStatusCommand(msg, options) {
     return true;
   }
   const entry = options.registerStore.getUser(msg.author.id);
-  await replyNoPing(msg, buildStatusPayload(entry ? { ...entry, userId: msg.author.id } : null, msg.author));
+  const minecraftProfile = entry?.gamertag
+    ? options.bridge?.getPlayerStatusByGamertag?.(entry.gamertag) || null
+    : null;
+  await replyNoPing(
+    msg,
+    buildStatusPayload(entry ? { ...entry, userId: msg.author.id } : null, msg.author, minecraftProfile)
+  );
   return true;
 }
 
@@ -633,7 +760,7 @@ async function rejectInterview(interaction, registerStore, entryUserId, options)
   return true;
 }
 
-async function closeInterview(interaction, registerStore, entryUserId) {
+async function closeInterview(interaction, registerStore, entryUserId, options = {}) {
   const entry = await registerStore.closeInterview(entryUserId, {
     id: interaction.user?.id,
     tag: interaction.user?.tag || interaction.user?.username || '',
@@ -653,7 +780,22 @@ async function closeInterview(interaction, registerStore, entryUserId) {
   }).catch(() => null);
   const closedName = `closed-${entry.interviewId || 'interview'}`.slice(0, 100);
   await interaction.channel?.setName(closedName, 'Interview closed').catch(() => null);
-  await interaction.channel?.send('Interview ditutup dan channel dikunci dari applicant.').catch(() => null);
+  let archived = false;
+  const archiveCategoryId = String(options.archiveCategoryId || '').trim();
+  if (archiveCategoryId && interaction.channel?.setParent) {
+    const moved = await interaction.channel
+      .setParent(archiveCategoryId, { lockPermissions: false, reason: 'Interview archived' })
+      .catch(err => {
+        console.error('Failed to move interview channel to archive:', err);
+        return null;
+      });
+    archived = Boolean(moved);
+  }
+  await interaction.channel?.send(
+    archived
+      ? 'Interview ditutup, channel dikunci dari applicant, lalu dipindahkan ke archive.'
+      : 'Interview ditutup dan channel dikunci dari applicant.'
+  ).catch(() => null);
   return true;
 }
 
@@ -686,10 +828,15 @@ function createRegisterInteractionHandler({
       }
       await ensureRegisterStore(registerStore, interaction.client);
 
-      const options = { roleId, legacyRoleId, rejectedRoleId };
+      const options = {
+        roleId,
+        legacyRoleId,
+        rejectedRoleId,
+        archiveCategoryId: INTERVIEW_ARCHIVE_CATEGORY_ID,
+      };
       if (interview.action === 'approve') return approveInterview(interaction, registerStore, interview.userId, options);
       if (interview.action === 'reject') return rejectInterview(interaction, registerStore, interview.userId, options);
-      if (interview.action === 'close') return closeInterview(interaction, registerStore, interview.userId);
+      if (interview.action === 'close') return closeInterview(interaction, registerStore, interview.userId, options);
       return false;
     } catch (err) {
       console.error('Register interaction handler error:', err);
@@ -703,6 +850,7 @@ function createRegisterHandler({
   legacyRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
   rejectedRoleId = MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   registerStore,
+  bridge = null,
   registrationChannelId = REGISTRATION_INBOX_CHANNEL_ID,
   privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID,
 }) {
@@ -718,6 +866,7 @@ function createRegisterHandler({
         pendingRoleId: legacyRoleId,
         verifiedRoleId: roleId,
         registerStore,
+        bridge,
         registrationChannelId,
         privateChatChannelId,
       };

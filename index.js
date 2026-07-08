@@ -133,6 +133,7 @@ const registerHandler = createRegisterHandler({
   legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
   rejectedRoleId: MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   registerStore: legacyRegisterStore,
+  bridge: bridgeService,
   submissionStore
 });
 const registerInteractionHandler = createRegisterInteractionHandler({

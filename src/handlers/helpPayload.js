@@ -30,7 +30,7 @@ function createRizebotHelpPayload({
         name: 'User biasa',
         value: commandLines([
           ['!help', 'lihat daftar command.'],
-          ['!reg <gamertag>', 'daftar Minecraft dan buka interview akses.'],
+          ['!reg <gamertag>', 'daftar Minecraft. Kalau sudah legal, command ini update gamertag tanpa interview ulang.'],
           ['!daftar', 'alias dari `!reg`.'],
           ['!register', 'alias dari `!reg`.'],
           ['!status', 'lihat Ethergeon ID Card.'],

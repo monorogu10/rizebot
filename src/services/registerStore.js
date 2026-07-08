@@ -439,6 +439,49 @@ function createRegisterStore() {
     return state.users[userId];
   }
 
+  async function updateApprovedGamertag(userId, gamertag, username = '') {
+    await ensureReady();
+    const entry = state.users[userId];
+    if (!entry) return null;
+    if (entry.status !== 'approved' && entry.legal !== true) {
+      return { notApproved: true, entry };
+    }
+
+    const duplicate = findUserByGamertag(gamertag, userId);
+    if (duplicate) {
+      return {
+        duplicate: true,
+        duplicateUserId: duplicate.userId,
+        entry: duplicate.entry
+      };
+    }
+
+    const oldGamertag = entry.gamertag || '';
+    const nowIso = new Date().toISOString();
+    const history = Array.isArray(entry.nameHistory) ? entry.nameHistory : [];
+    const nextHistory = [...history];
+    for (const name of [oldGamertag, gamertag]) {
+      if (!name) continue;
+      if (!nextHistory.some(item => normalizeGamertagKey(item) === normalizeGamertagKey(name))) {
+        nextHistory.push(name);
+      }
+    }
+
+    entry.gamertag = gamertag;
+    entry.username = username || entry.username || '';
+    entry.updatedAt = nowIso;
+    entry.status = 'approved';
+    entry.legal = true;
+    entry.nameHistory = nextHistory.slice(-10);
+    if (normalizeGamertagKey(gamertag) !== normalizeGamertagKey(entry.lastSeenName || '')) {
+      entry.verified = false;
+      entry.persistentId = '';
+      entry.verifiedAt = null;
+    }
+    await persist();
+    return { updated: true, oldGamertag, entry };
+  }
+
   async function markVerified(userId, payload = {}) {
     await ensureReady();
     const entry = state.users[userId];
@@ -641,6 +684,7 @@ function createRegisterStore() {
     nextInterviewId,
     upsertPendingUser,
     updateUser,
+    updateApprovedGamertag,
     markVerified,
     approveUser,
     rejectUser,
