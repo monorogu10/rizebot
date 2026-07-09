@@ -13,29 +13,43 @@ function channelText(channelId, fallback) {
 
 function createRizebotHelpPayload({
   showAdmin = false,
+  showRegisterAdmin = showAdmin,
+  showInterviewAdmin = showAdmin,
+  showBridgeAdmin = showAdmin,
+  showTopupAdmin = showAdmin,
+  showModerationAdmin = showAdmin,
   privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID,
 } = {}) {
   const privateChannel = channelText(privateChatChannelId, 'channel private');
+  const hasAdminSection = Boolean(
+    showRegisterAdmin ||
+    showInterviewAdmin ||
+    showBridgeAdmin ||
+    showTopupAdmin ||
+    showModerationAdmin
+  );
 
   const embed = new EmbedBuilder()
-    .setColor(showAdmin ? 0xf2c94c : 0x2f80ed)
-    .setTitle(showAdmin ? 'Rizebot Help - Admin' : 'Rizebot Help')
+    .setColor(hasAdminSection ? 0xf2c94c : 0x2f80ed)
+    .setTitle(hasAdminSection ? 'Rizebot Help - Admin' : 'Rizebot Help')
     .setDescription(
-      showAdmin
-        ? 'Command publik + command admin yang tersedia.'
+      hasAdminSection
+        ? 'Command publik + command admin yang tersedia untuk akses kamu.'
         : 'Command yang bisa dipakai user biasa.'
     )
     .addFields(
       {
         name: 'User biasa',
         value: commandLines([
-          ['!help', 'lihat daftar command.'],
+          ['!help', 'lihat daftar command. Alias: `!mc-help`.'],
           ['!reg <gamertag>', 'daftar Minecraft. Kalau sudah legal, command ini update gamertag tanpa interview ulang.'],
           ['!daftar', 'alias dari `!reg`.'],
           ['!register', 'alias dari `!reg`.'],
           ['!status', 'lihat Ethergeon ID Card.'],
           ['!player <nama>', 'cek Ethergeon ID Card player lain, dengan tombol pilihan kalau hasilnya mirip.'],
-          ['!organisasi [nama]', 'lihat daftar organisasi/perusahaan, atau detail anggota dan kas jika nama diisi.'],
+          ['!organisasi [nama]', 'lihat daftar organisasi/perusahaan, atau detail anggota dan kas jika nama diisi. Alias: `!org`.'],
+          ['!geonrate <rupiah>', 'cek estimasi Geon dari nominal rupiah. Alias: `!kurs`, `!harga`, `!rate`.'],
+          ['!member', 'lihat total member Discord saat ini.'],
         ]),
         inline: false,
       },
@@ -51,21 +65,63 @@ function createRizebotHelpPayload({
       }
     )
     .setFooter({
-      text: showAdmin
-        ? 'Admin view: command sensitif hanya muncul untuk admin.'
+      text: hasAdminSection
+        ? 'Admin view: command sensitif hanya muncul sesuai akses.'
         : 'Command admin disembunyikan dari user biasa.',
     });
 
-  if (showAdmin) {
+  const registerAdminLines = [];
+  if (showRegisterAdmin) {
+    registerAdminLines.push(
+      ['!sync-citizen', 'paksa migrasi role lama ke Ethergeon Citizen.']
+    );
+  }
+  if (showInterviewAdmin) {
+    registerAdminLines.push(
+      ['!list [semua|lolos|pending|gagal] [halaman]', 'lihat registry Minecraft dengan tombol filter/page. Alias: `!registrasi`.'],
+      ['!compile [jumlah|all]', 'compile closed interview lama ke JSON save channel, lalu hapus channel ticket.'],
+      ['!archive-interviews [jumlah]', 'pindahkan backlog closed interview ke archive.']
+    );
+  }
+  if (showModerationAdmin) {
+    registerAdminLines.push(
+      ['!freedom @user', 'batalkan timeout aktif.']
+    );
+  }
+  if (registerAdminLines.length) {
     embed.addFields(
       {
         name: 'Admin Registrasi & Moderasi',
+        value: commandLines(registerAdminLines),
+        inline: false,
+      }
+    );
+  }
+
+  if (showBridgeAdmin) {
+    embed.addFields(
+      {
+        name: 'Admin Minecraft Bridge',
         value: commandLines([
-          ['!sync-citizen', 'paksa migrasi role lama ke Ethergeon Citizen.'],
-          ['!list [all|legal|pending|rejected] [halaman]', 'lihat registry Minecraft dengan tombol filter/page.'],
-          ['!compile [jumlah|all]', 'compile closed interview lama ke JSON save channel, lalu hapus channel ticket.'],
-          ['!archive-interviews [jumlah]', 'pindahkan backlog closed interview ke archive.'],
-          ['!freedom @user', 'batalkan timeout aktif.'],
+          ['!mcstatus / !mcping', 'cek status/ping bridge Minecraft BP.'],
+          ['!online', 'lihat snapshot player online dari bridge Minecraft.'],
+          ['!p <pesan>', 'kirim pesan Discord ke chat Minecraft dari channel chat log.'],
+          ['!srcpl <nama>', 'cari player langsung dari data server Minecraft.'],
+          ['!geon <nama>', 'cek wallet Geon/Ether player dari bridge Minecraft.'],
+        ]),
+        inline: false,
+      }
+    );
+  }
+
+  if (showTopupAdmin) {
+    embed.addFields(
+      {
+        name: 'Admin Topup',
+        value: commandLines([
+          ['!tu <nama> <geon> <rupiah>', 'topup admin ke player Minecraft. Alias: `!topup`.'],
+          ['!gnrtkpn <geon> <rupiah> [jumlah] [hari]', 'generate kupon topup. Alias: `!kupon`.'],
+          ['!topup-help', 'lihat bantuan command topup admin.'],
         ]),
         inline: false,
       }

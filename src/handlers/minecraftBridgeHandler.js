@@ -5,6 +5,7 @@ const {
   EmbedBuilder,
 } = require('discord.js');
 const {
+  INTERVIEW_ADMIN_ROLE_IDS,
   MINECRAFT_CHAT_LOG_CHANNEL_ID,
   MINECRAFT_REGISTER_RESET_ADMIN_ID,
   TOPUP_ADMIN_DISCORD_ID,
@@ -19,6 +20,25 @@ const DISCORD_BROADCAST_MAX_LENGTH = 240;
 
 function isBridgeAdmin(userId) {
   return String(userId || '') === TOPUP_ADMIN_DISCORD_ID;
+}
+
+function memberHasAnyRole(member, roleIds) {
+  if (!member || !roleIds?.size) return false;
+  const roles = member.roles;
+  if (roles?.cache) {
+    for (const roleId of roleIds) {
+      if (roles.cache.has(roleId)) return true;
+    }
+    return false;
+  }
+  if (Array.isArray(roles)) return roles.some(roleId => roleIds.has(String(roleId)));
+  if (Array.isArray(member._roles)) return member._roles.some(roleId => roleIds.has(String(roleId)));
+  if (roles instanceof Set) {
+    for (const roleId of roleIds) {
+      if (roles.has(roleId)) return true;
+    }
+  }
+  return false;
 }
 
 function normalizeSpaces(value) {
@@ -278,10 +298,20 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
     if (!parsed) return false;
 
     if (parsed.command === 'mc-help') {
-      const showAdmin = isAdmin(msg.member) ||
-        isBridgeAdmin(msg.author?.id) ||
-        String(msg.author?.id || '') === String(MINECRAFT_REGISTER_RESET_ADMIN_ID);
-      await replyNoPing(msg, createRizebotHelpPayload({ showAdmin }));
+      const userId = String(msg.author?.id || '').trim();
+      const moderationAdmin = isAdmin(msg.member);
+      const bridgeAdmin = isBridgeAdmin(userId);
+      const registerAdmin = moderationAdmin ||
+        bridgeAdmin ||
+        userId === String(MINECRAFT_REGISTER_RESET_ADMIN_ID);
+      const interviewAdmin = registerAdmin || memberHasAnyRole(msg.member, INTERVIEW_ADMIN_ROLE_IDS);
+      await replyNoPing(msg, createRizebotHelpPayload({
+        showRegisterAdmin: registerAdmin,
+        showInterviewAdmin: interviewAdmin,
+        showBridgeAdmin: bridgeAdmin,
+        showTopupAdmin: bridgeAdmin,
+        showModerationAdmin: moderationAdmin,
+      }));
       return true;
     }
 

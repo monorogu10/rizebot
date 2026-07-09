@@ -75,7 +75,7 @@ function parseRegisterCommand(content) {
 }
 
 function parseListCommand(content) {
-  const match = String(content || '').trim().match(/^!list(?:\s+(.+))?$/i);
+  const match = String(content || '').trim().match(/^!(?:list|listreg|list-reg|registry|registrasi|pendaftaran)(?:\s+(.+))?$/i);
   if (!match) return null;
   const tokens = String(match[1] || '').split(/\s+/g).map(item => item.trim()).filter(Boolean);
   let page = 1;
@@ -86,10 +86,10 @@ function parseListCommand(content) {
       page = Math.max(1, parseInt(lowered, 10));
       continue;
     }
-    if (['all', 'semua', 'registered', 'register'].includes(lowered)) filter = 'all';
-    else if (['legal', 'approved', 'acc', 'citizen'].includes(lowered)) filter = 'approved';
-    else if (['pending', 'antri', 'queue', 'interview'].includes(lowered)) filter = 'pending';
-    else if (['rejected', 'reject', 'gagal', 'failed'].includes(lowered)) filter = 'rejected';
+    const nextFilter = normalizeListFilter(lowered);
+    if (nextFilter !== 'all' || ['all', 'semua', 'registered', 'register', 'semuanya'].includes(lowered)) {
+      filter = nextFilter;
+    }
   }
   return { page, filter };
 }
@@ -509,25 +509,25 @@ function buildStatusPayload(entry, user, minecraftProfile = null) {
 
 function normalizeListFilter(filterRaw) {
   const filter = String(filterRaw || 'all').toLowerCase();
-  if (filter === 'approved' || filter === 'legal') return 'approved';
-  if (filter === 'pending') return 'pending';
-  if (filter === 'rejected') return 'rejected';
+  if (['approved', 'legal', 'lolos', 'lulus', 'acc', 'accepted', 'approve', 'diterima', 'sukses', 'citizen'].includes(filter)) return 'approved';
+  if (['pending', 'antri', 'queue', 'interview', 'menunggu', 'proses'].includes(filter)) return 'pending';
+  if (['rejected', 'reject', 'gagal', 'failed', 'fail', 'ditolak', 'tolak'].includes(filter)) return 'rejected';
   return 'all';
 }
 
 function listFilterLabel(filterRaw) {
   const filter = normalizeListFilter(filterRaw);
-  if (filter === 'approved') return 'Legal';
+  if (filter === 'approved') return 'Lolos';
   if (filter === 'pending') return 'Pending';
-  if (filter === 'rejected') return 'Rejected';
-  return 'All';
+  if (filter === 'rejected') return 'Gagal';
+  return 'Semua';
 }
 
 function listFilterCommand(filterRaw) {
   const filter = normalizeListFilter(filterRaw);
-  if (filter === 'approved') return 'legal';
+  if (filter === 'approved') return 'lolos';
   if (filter === 'pending') return 'pending';
-  if (filter === 'rejected') return 'rejected';
+  if (filter === 'rejected') return 'gagal';
   return '';
 }
 
@@ -585,11 +585,11 @@ function buildListFilterButtons(activeFilter = 'all') {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(buildListButtonId(1, 'all'))
-      .setLabel('All')
+      .setLabel('Semua')
       .setStyle(filter === 'all' ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(buildListButtonId(1, 'approved'))
-      .setLabel('Legal')
+      .setLabel('Lolos')
       .setStyle(filter === 'approved' ? ButtonStyle.Success : ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(buildListButtonId(1, 'pending'))
@@ -597,7 +597,7 @@ function buildListFilterButtons(activeFilter = 'all') {
       .setStyle(filter === 'pending' ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(buildListButtonId(1, 'rejected'))
-      .setLabel('Rejected')
+      .setLabel('Gagal')
       .setStyle(filter === 'rejected' ? ButtonStyle.Danger : ButtonStyle.Secondary)
   );
 }
@@ -622,18 +622,26 @@ function filterListEntries(entries, filterRaw) {
 function formatListEntry(entry, rowNumber) {
   const status = String(entry?.status || '').toLowerCase();
   const badge = status === 'approved'
-    ? '[LEGAL]'
+    ? '[LOLOS]'
     : status === 'rejected'
-      ? '[REJECTED]'
+      ? '[GAGAL]'
       : '[PENDING]';
   const user = entry?.userId ? `<@${entry.userId}>` : '-';
   const interview = entry?.interviewChannelId
     ? `<#${entry.interviewChannelId}>`
     : (entry?.interviewId || '-');
   const updated = formatDateId(entry?.updatedAt || entry?.registeredAt);
+  const reviewer = status === 'approved'
+    ? (entry?.approvedBy ? ` | Oleh: <@${entry.approvedBy}>` : '')
+    : status === 'rejected' && entry?.rejectedBy
+      ? ` | Oleh: <@${entry.rejectedBy}>`
+      : '';
+  const reason = status === 'rejected' && entry?.rejectionReason
+    ? `\nAlasan: ${entry.rejectionReason}`
+    : '';
   return [
     `**${rowNumber}. ${badge}** \`${entry?.gamertag || '-'}\``,
-    `${user} | Interview: ${interview} | Update: ${updated}`,
+    `${user} | Interview: ${interview} | Update: ${updated}${reviewer}${reason}`,
   ].join('\n');
 }
 
@@ -659,9 +667,9 @@ function buildListPayload(entries, pageOrOptions = 1) {
     .setDescription(rows.join('\n\n') || `Belum ada data untuk filter ${listFilterLabel(filter)}.`)
     .addFields(
       { name: 'Total', value: String(stats.total), inline: true },
-      { name: 'Legal', value: String(stats.approved), inline: true },
+      { name: 'Lolos', value: String(stats.approved), inline: true },
       { name: 'Pending', value: String(stats.pending), inline: true },
-      { name: 'Rejected', value: String(stats.rejected), inline: true },
+      { name: 'Gagal', value: String(stats.rejected), inline: true },
       { name: 'Filter', value: listFilterLabel(filter), inline: true },
       { name: 'Shown', value: `${filtered.length}`, inline: true }
     )
@@ -1571,9 +1579,17 @@ async function handleCompileCommand(msg, options) {
 async function handleHelpCommand(msg, options) {
   const content = String(msg.content || '').trim();
   if (!/^!help\b/i.test(content)) return false;
-  const showAdmin = isRegisterAdmin(msg);
+  const userId = String(msg.author?.id || '').trim();
+  const registerAdmin = isRegisterAdmin(msg);
+  const interviewAdmin = await isInterviewAdmin(msg);
+  const topupAdmin = userId === String(TOPUP_ADMIN_DISCORD_ID);
+  const moderationAdmin = isAdmin(msg.member);
   await replyNoPing(msg, createRizebotHelpPayload({
-    showAdmin,
+    showRegisterAdmin: registerAdmin,
+    showInterviewAdmin: interviewAdmin,
+    showBridgeAdmin: topupAdmin,
+    showTopupAdmin: topupAdmin,
+    showModerationAdmin: moderationAdmin,
     registrationChannelId: options.registrationChannelId,
     privateChatChannelId: options.privateChatChannelId,
   }));
