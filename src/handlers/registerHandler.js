@@ -28,6 +28,8 @@ const {
 
 const GAMERTAG_REGEX = /^[A-Za-z0-9_ ]{3,32}$/;
 const LIST_PAGE_SIZE = 10;
+const LIST_ENTRY_MAX_LENGTH = 360;
+const LIST_DESCRIPTION_MAX_LENGTH = 3900;
 const LIST_BUTTON_PREFIX = 'citizenlist';
 const INTERVIEW_BUTTON_PREFIX = 'interview';
 const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
@@ -637,12 +639,40 @@ function formatListEntry(entry, rowNumber) {
       ? ` | Oleh: <@${entry.rejectedBy}>`
       : '';
   const reason = status === 'rejected' && entry?.rejectionReason
-    ? `\nAlasan: ${entry.rejectionReason}`
+    ? `\nAlasan: ${truncateListText(entry.rejectionReason, 120)}`
     : '';
-  return [
+  return truncateListText([
     `**${rowNumber}. ${badge}** \`${entry?.gamertag || '-'}\``,
     `${user} | Interview: ${interview} | Update: ${updated}${reviewer}${reason}`,
-  ].join('\n');
+  ].join('\n'), LIST_ENTRY_MAX_LENGTH);
+}
+
+function truncateListText(value, maxLength = LIST_ENTRY_MAX_LENGTH) {
+  const text = String(value || '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+}
+
+function safeListDescription(rows, filter) {
+  const fallback = `Belum ada data untuk filter ${listFilterLabel(filter)}.`;
+  if (!rows.length) return fallback;
+
+  const parts = [];
+  let used = 0;
+  for (const row of rows) {
+    const next = parts.length ? `\n\n${row}` : row;
+    if (used + next.length > LIST_DESCRIPTION_MAX_LENGTH) {
+      const notice = '\n\nData halaman ini dipotong agar tidak terkena limit Discord.';
+      if (used + notice.length <= LIST_DESCRIPTION_MAX_LENGTH) parts.push(notice);
+      break;
+    }
+    parts.push(next);
+    used += next.length;
+  }
+  return parts.join('').slice(0, LIST_DESCRIPTION_MAX_LENGTH) || fallback;
 }
 
 function buildListPayload(entries, pageOrOptions = 1) {
@@ -664,7 +694,7 @@ function buildListPayload(entries, pageOrOptions = 1) {
   const embed = new EmbedBuilder()
     .setColor(0x36a269)
     .setTitle('Ethergeon Citizen Registry')
-    .setDescription(rows.join('\n\n') || `Belum ada data untuk filter ${listFilterLabel(filter)}.`)
+    .setDescription(safeListDescription(rows, filter))
     .addFields(
       { name: 'Total', value: String(stats.total), inline: true },
       { name: 'Lolos', value: String(stats.approved), inline: true },

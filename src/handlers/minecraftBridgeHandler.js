@@ -17,6 +17,8 @@ const ONLINE_PAGE_SIZE = 10;
 const ONLINE_BUTTON_PREFIX = 'mconline';
 const ONLINE_COLLECTOR_MS = 2 * 60 * 1000;
 const DISCORD_BROADCAST_MAX_LENGTH = 240;
+const GEON_TRANSFER_MAX = 100_000_000;
+const LOADING_GIF_URL = 'https://media1.tenor.com/m/UnFx-k_lSckAAAAd/amalie-steiness.gif';
 
 function isBridgeAdmin(userId) {
   return String(userId || '') === TOPUP_ADMIN_DISCORD_ID;
@@ -47,13 +49,13 @@ function normalizeSpaces(value) {
 
 function parseCommand(content) {
   const raw = normalizeSpaces(content);
-  const match = raw.match(/^!(verify|verifyme|verifme|veryfyme|mc-help|mcstatus|mcping|online|srcsrv|srcpl|geon|player|organisasi|organization|org|p)(?:\s+(.+))?$/i);
+  const match = raw.match(/^!(verify|verifyme|verifme|veryfyme|mc-help|mcstatus|mcping|online|srcsrv|srcpl|geon|player|organisasi|organization|org|p|tf|transfer|bonus)(?:\s+(.+))?$/i);
   if (!match) return null;
   const command = match[1].toLowerCase();
   return {
     command: ['verify', 'verifme', 'veryfyme'].includes(command)
       ? 'verifyme'
-      : (command === 'srcpl' ? 'srcsrv' : (['organization', 'org'].includes(command) ? 'organisasi' : command)),
+      : (command === 'srcpl' ? 'srcsrv' : (['organization', 'org'].includes(command) ? 'organisasi' : (command === 'transfer' ? 'tf' : command))),
     args: normalizeSpaces(match[2] || ''),
   };
 }
@@ -88,13 +90,10 @@ function buildCommandEmbed({ color = 0x2f80ed, title, description, footer = '' }
 }
 
 function buildQueuedBridgePayload({ title, description, job }) {
-  return buildCommandEmbed({
+  return buildLoadingPayload({
     title,
-    description: [
-      description,
-      `Job: \`${job?.id || '-'}\``,
-    ].join('\n'),
-    footer: 'Hasil akan dikirim sebagai embed setelah BP membalas.',
+    description,
+    footer: `Diproses oleh Minecraft BP | Ref ${job?.id || '-'}`,
   });
 }
 
@@ -356,32 +355,88 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         await replyNoPing(msg, buildFormatErrorPayload('!player <nama_player>'));
         return true;
       }
-      const job = bridge.enqueueBridgeQuery('player_info', {
+      await enqueueBridgeJobWithLoading(msg, bridge, 'player_info', {
         query: parsed.args,
         requestedBy: msg.author.id,
-      }, { message: msg });
-      await replyNoPing(msg, buildQueuedBridgePayload({
+      }, {
         title: 'Cek Data Player',
         description: `Mencari player yang mendekati \`${parsed.args}\`.`,
-        job,
-      }));
+      });
       return true;
     }
 
     if (parsed.command === 'organisasi') {
       const jobType = parsed.args ? 'organization_info' : 'organization_search';
-      const job = bridge.enqueueBridgeQuery(jobType, {
+      await enqueueBridgeJobWithLoading(msg, bridge, jobType, {
         query: parsed.args,
         limit: parsed.args ? 5 : 15,
         requestedBy: msg.author.id,
-      }, { message: msg });
-      await replyNoPing(msg, buildQueuedBridgePayload({
+      }, {
         title: parsed.args ? 'Cek Detail Organisasi' : 'Daftar Organisasi & Perusahaan',
         description: parsed.args
           ? `Mencari organisasi/perusahaan yang mendekati \`${parsed.args}\`.`
           : 'Mengambil daftar organisasi/perusahaan berdasarkan kas Geon terbesar.',
-        job,
-      }));
+      });
+      return true;
+    }
+
+    if (parsed.command === 'tf') {
+      const transfer = parseGeonTransferArgs(parsed.args, bridge);
+      if (!transfer) {
+        await replyNoPing(msg, buildFormatErrorPayload('!tf <nama_player> <jumlah_geon>'));
+        return true;
+      }
+
+      const entry = registerStore.getUser(msg.author.id);
+      if (!isApprovedRegisterEntry(entry) || !entry?.gamertag) {
+        await replyNoPing(msg, buildCommandEmbed({
+          color: 0xe74c3c,
+          title: 'Transfer Ditolak',
+          description: 'Akun Discord kamu harus sudah legal/approved dan punya gamertag Minecraft untuk mengirim Geon.',
+        }));
+        return true;
+      }
+
+      await enqueueBridgeJobWithLoading(msg, bridge, 'wallet_transfer', {
+        fromKey: entry.gamertag,
+        fromName: entry.gamertag,
+        fromDiscordUserId: msg.author.id,
+        fromDiscordTag: msg.author?.tag || msg.author?.username || '',
+        targetQuery: transfer.target,
+        amount: transfer.amount,
+        requestedBy: msg.author.id,
+      }, {
+        title: 'Transfer Geon',
+        description: `Mengirim **${bridge.formatNumber(transfer.amount)} Geon** dari \`${entry.gamertag}\` ke player yang mendekati \`${transfer.target}\`.`,
+      });
+      return true;
+    }
+
+    if (parsed.command === 'bonus') {
+      if (!isBridgeAdmin(msg.author?.id)) {
+        await replyNoPing(msg, buildCommandEmbed({
+          color: 0xe74c3c,
+          title: 'Command Admin Utama',
+          description: 'Command `!bonus` khusus admin utama.',
+        }));
+        return true;
+      }
+
+      const bonus = parseGeonTransferArgs(parsed.args, bridge);
+      if (!bonus) {
+        await replyNoPing(msg, buildFormatErrorPayload('!bonus <nama_player> <jumlah_geon>'));
+        return true;
+      }
+
+      await enqueueBridgeJobWithLoading(msg, bridge, 'wallet_bonus', {
+        targetQuery: bonus.target,
+        amount: bonus.amount,
+        requestedBy: msg.author.id,
+        requestedByTag: msg.author?.tag || msg.author?.username || '',
+      }, {
+        title: 'Bonus Geon',
+        description: `Memberikan bonus **${bridge.formatNumber(bonus.amount)} Geon** ke player yang mendekati \`${bonus.target}\`.`,
+      });
       return true;
     }
 
@@ -400,8 +455,10 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
     }
 
     if (parsed.command === 'mcping') {
-      const job = bridge.enqueueBridgeQuery('ping', { requestedBy: msg.author.id }, { message: msg });
-      await replyNoPing(msg, `Ping BP masuk antrean. Job: \`${job.id}\``);
+      await enqueueBridgeJobWithLoading(msg, bridge, 'ping', { requestedBy: msg.author.id }, {
+        title: 'Ping Minecraft BP',
+        description: 'Mengecek koneksi bridge Minecraft BP.',
+      });
       return true;
     }
 
@@ -417,12 +474,14 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         return true;
       }
 
-      const job = bridge.enqueueBridgeQuery('discord_broadcast', {
+      await enqueueBridgeJobWithLoading(msg, bridge, 'discord_broadcast', {
         text,
         requestedBy: msg.author.id,
         requestedByTag: msg.author?.tag || msg.author?.username || '',
-      }, { message: msg });
-      await replyNoPing(msg, `Pesan Discord masuk antrean Minecraft. Job: \`${job.id}\``);
+      }, {
+        title: 'Kirim Chat ke Minecraft',
+        description: `Mengirim pesan ke Minecraft: \`${text}\``,
+      });
       return true;
     }
 
@@ -437,11 +496,13 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         await replyNoPing(msg, 'Format: `!srcpl <minimal 2 huruf nama player>`');
         return true;
       }
-      const job = bridge.enqueueBridgeQuery('search_server', {
+      await enqueueBridgeJobWithLoading(msg, bridge, 'search_server', {
         query: parsed.args,
         requestedBy: msg.author.id,
-      }, { message: msg });
-      await replyNoPing(msg, `Search server masuk antrean. Job: \`${job.id}\``);
+      }, {
+        title: 'Search Player Server',
+        description: `Mencari player yang mendekati \`${parsed.args}\`.`,
+      });
       return true;
     }
 
@@ -450,13 +511,80 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         await replyNoPing(msg, 'Format: `!geon <nama_player>`');
         return true;
       }
-      const job = bridge.enqueueBridgeQuery('wallet', { query: parsed.args }, { message: msg });
-      await replyNoPing(msg, `Cek saldo masuk antrean. Job: \`${job.id}\``);
+      await enqueueBridgeJobWithLoading(msg, bridge, 'wallet', {
+        query: parsed.args,
+        requestedBy: msg.author.id,
+      }, {
+        title: 'Cek Saldo Player',
+        description: `Mengambil saldo player yang mendekati \`${parsed.args}\`.`,
+      });
       return true;
     }
 
     return false;
   };
+}
+
+function parseGeonTransferArgs(args, bridge) {
+  const parts = normalizeSpaces(args).split(' ').filter(Boolean);
+  if (parts.length < 2) return null;
+  const amount = bridge.normalizePositiveInt(parts.pop(), GEON_TRANSFER_MAX);
+  const target = normalizeSpaces(parts.join(' '));
+  if (!target || !amount) return null;
+  return { target, amount };
+}
+
+function isApprovedRegisterEntry(entry) {
+  const status = String(entry?.status || '').toLowerCase();
+  return Boolean(entry?.legal === true || status === 'approved');
+}
+
+function loadingMessageRef(message) {
+  if (!message?.id) return null;
+  return {
+    channelId: String(message.channelId || message.channel?.id || ''),
+    messageId: String(message.id || ''),
+  };
+}
+
+function buildLoadingPayload({ title, description, footer = 'Sedang diproses oleh Minecraft BP.' }) {
+  const embed = new EmbedBuilder()
+    .setColor(0x2f80ed)
+    .setTitle(title || 'Loading')
+    .setDescription(description || 'Sedang diproses...')
+    .setImage(LOADING_GIF_URL)
+    .setFooter({ text: footer })
+    .setTimestamp(new Date());
+  return noPing({ embeds: [embed] });
+}
+
+async function sendBridgeLoading(msg, options) {
+  return replyNoPing(msg, buildLoadingPayload(options));
+}
+
+function bridgeJobContext(msg, loadingMessage, extra = {}) {
+  return {
+    ...extra,
+    message: msg,
+    loadingMessage: loadingMessageRef(loadingMessage),
+  };
+}
+
+async function enqueueBridgeJobWithLoading(msg, bridge, type, payload, {
+  title,
+  description,
+  context = {},
+} = {}) {
+  const loading = await sendBridgeLoading(msg, {
+    title,
+    description,
+    footer: 'Menunggu Minecraft BP...',
+  });
+  const job = bridge.enqueueBridgeQuery(type, payload, bridgeJobContext(msg, loading, context));
+  if (loading?.edit) {
+    await loading.edit(buildQueuedBridgePayload({ title, description, job })).catch(() => {});
+  }
+  return job;
 }
 
 module.exports = { createMinecraftBridgeHandler };

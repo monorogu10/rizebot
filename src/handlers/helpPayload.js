@@ -48,6 +48,7 @@ function createRizebotHelpPayload({
           ['!status', 'lihat Ethergeon ID Card.'],
           ['!player <nama>', 'cek Ethergeon ID Card player lain, dengan tombol pilihan kalau hasilnya mirip.'],
           ['!organisasi [nama]', 'lihat daftar organisasi/perusahaan, atau detail anggota dan kas jika nama diisi. Alias: `!org`.'],
+          ['!tf <nama> <geon>', 'transfer Geon ke player lain lewat Discord, diproses langsung oleh finance Minecraft.'],
           ['!geonrate <rupiah>', 'cek estimasi Geon dari nominal rupiah. Alias: `!kurs`, `!harga`, `!rate`.'],
           ['!member', 'lihat total member Discord saat ini.'],
         ]),
@@ -108,6 +109,7 @@ function createRizebotHelpPayload({
           ['!p <pesan>', 'kirim pesan Discord ke chat Minecraft dari channel chat log.'],
           ['!srcpl <nama>', 'cari player langsung dari data server Minecraft.'],
           ['!geon <nama>', 'cek wallet Geon/Ether player dari bridge Minecraft.'],
+          ['!bonus <nama> <geon>', 'beri bonus Geon ke player dengan transparansi finance.'],
         ]),
         inline: false,
       }

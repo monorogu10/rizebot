@@ -1,3 +1,4 @@
+const { EmbedBuilder } = require('discord.js');
 const { TOPUP_ADMIN_DISCORD_ID } = require('../config');
 const { calculateGeon } = require('../services/sociabuzzTopupService');
 
@@ -5,6 +6,7 @@ const GEON_MAX = 100_000_000;
 const RUPIAH_MAX = 2_000_000_000;
 const COUPON_BATCH_MAX = 50;
 const COUPON_EXPIRE_MAX_DAYS = 365;
+const LOADING_GIF_URL = 'https://media1.tenor.com/m/UnFx-k_lSckAAAAd/amalie-steiness.gif';
 
 function isTopupAdmin(userId) {
   return String(userId || '') === TOPUP_ADMIN_DISCORD_ID;
@@ -73,6 +75,39 @@ function helpText() {
   ].join('\n');
 }
 
+function noPing(payload) {
+  return {
+    ...payload,
+    allowedMentions: payload.allowedMentions || { parse: [], repliedUser: false },
+  };
+}
+
+function loadingMessageRef(message) {
+  if (!message?.id) return null;
+  return {
+    channelId: String(message.channelId || message.channel?.id || ''),
+    messageId: String(message.id || ''),
+  };
+}
+
+function buildLoadingPayload({ title, description, ref = '' }) {
+  return noPing({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x2f80ed)
+        .setTitle(title)
+        .setDescription(description)
+        .setImage(LOADING_GIF_URL)
+        .setFooter({ text: ref ? `Diproses oleh Minecraft BP | Ref ${ref}` : 'Menunggu Minecraft BP...' })
+        .setTimestamp(new Date()),
+    ],
+  });
+}
+
+async function sendLoading(msg, options) {
+  return msg.reply(buildLoadingPayload(options)).catch(() => null);
+}
+
 function createTopupHandler({ bridge }) {
   return async function handleTopupCommand(msg) {
     if (!msg || msg.author?.bot) return false;
@@ -108,11 +143,19 @@ function createTopupHandler({ bridge }) {
         return true;
       }
 
+      const loading = await sendLoading(msg, {
+        title: 'Search Player Server',
+        description: `Mencari player yang mendekati \`${parsed.args}\`.`,
+      });
       const job = bridge.enqueueBridgeQuery('search_server', {
         query: parsed.args,
         requestedBy: msg.author.id,
-      }, { message: msg });
-      await msg.reply(`Search player server masuk antrean. Job: \`${job.id}\``).catch(() => {});
+      }, { message: msg, loadingMessage: loadingMessageRef(loading) });
+      await loading?.edit(buildLoadingPayload({
+        title: 'Search Player Server',
+        description: `Mencari player yang mendekati \`${parsed.args}\`.`,
+        ref: job.id,
+      })).catch(() => {});
       return true;
     }
 
@@ -131,17 +174,24 @@ function createTopupHandler({ bridge }) {
         return true;
       }
 
+      const loading = await sendLoading(msg, {
+        title: 'Topup Geon',
+        description: `Mengirim **${bridge.formatNumber(topup.geon)} Geon** ke \`${resolved.target.gamertag}\`.`,
+      });
       const job = bridge.enqueueTopup({
         target: resolved.target,
         geon: topup.geon,
         rupiah: topup.rupiah,
         requestedBy: msg.author.id,
         message: msg,
+        loadingMessage: loadingMessageRef(loading),
       });
 
-      await msg.reply(
-        `TOPUP masuk antrean: \`${resolved.target.gamertag}\` +${bridge.formatNumber(topup.geon)} Geon (${bridge.rupiahText(topup.rupiah)}). Job: \`${job.id}\``
-      ).catch(() => {});
+      await loading?.edit(buildLoadingPayload({
+        title: 'Topup Geon',
+        description: `Mengirim **${bridge.formatNumber(topup.geon)} Geon** ke \`${resolved.target.gamertag}\` (${bridge.rupiahText(topup.rupiah)}).`,
+        ref: job.id,
+      })).catch(() => {});
       return true;
     }
 
@@ -152,15 +202,22 @@ function createTopupHandler({ bridge }) {
         return true;
       }
 
+      const loading = await sendLoading(msg, {
+        title: 'Generate Kupon',
+        description: `Membuat ${coupon.count} kupon, masing-masing **${bridge.formatNumber(coupon.geon)} Geon**.`,
+      });
       const job = bridge.enqueueCoupon({
         ...coupon,
         requestedBy: msg.author.id,
         message: msg,
+        loadingMessage: loadingMessageRef(loading),
       });
 
-      await msg.reply(
-        `Generate kupon masuk antrean: ${coupon.count} kupon, ${bridge.formatNumber(coupon.geon)} Geon, ${bridge.rupiahText(coupon.rupiah)}. Job: \`${job.id}\``
-      ).catch(() => {});
+      await loading?.edit(buildLoadingPayload({
+        title: 'Generate Kupon',
+        description: `Membuat ${coupon.count} kupon, ${bridge.formatNumber(coupon.geon)} Geon, ${bridge.rupiahText(coupon.rupiah)}.`,
+        ref: job.id,
+      })).catch(() => {});
       return true;
     }
 

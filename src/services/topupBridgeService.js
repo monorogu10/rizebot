@@ -32,6 +32,8 @@ const EMBED_COLOR_JOIN = 0x2ecc71;
 const EMBED_COLOR_LEAVE = 0xe74c3c;
 const EMBED_COLOR_TOPUP = 0x27ae60;
 const EMBED_COLOR_INFO = 0x2f80ed;
+const EMBED_COLOR_TRANSFER = 0x27ae60;
+const EMBED_COLOR_BONUS = 0xf2c94c;
 const PLAYER_SELECT_PREFIX = 'mcplayer';
 const ORGANIZATION_SELECT_PREFIX = 'mcorg';
 const QUERY_SELECT_COLLECTOR_MS = 2 * 60 * 1000;
@@ -560,7 +562,7 @@ function buildPlayerCandidateEmbed(record = {}, result = {}) {
       '',
       lines.join('\n') || 'Tidak ada kandidat.',
     ].join('\n'))
-    .setFooter({ text: `Job ${record.id || record.job?.id || '-'}` })
+    .setFooter({ text: `Ref ${record.id || record.job?.id || '-'}` })
     .setTimestamp(new Date());
 }
 
@@ -588,7 +590,7 @@ function buildOrganizationListEmbed(record = {}, result = {}) {
   const footer = [
     `Total ${formatNumber(result.total || entries.length)}`,
     `Ditampilkan ${formatNumber(lines.length)}`,
-    `Job ${record.id || record.job?.id || '-'}`,
+    `Ref ${record.id || record.job?.id || '-'}`,
   ].join(' | ');
 
   return new EmbedBuilder()
@@ -613,7 +615,7 @@ function buildOrganizationCandidateEmbed(record = {}, result = {}) {
       '',
       lines.join('\n') || 'Tidak ada kandidat.',
     ].join('\n'))
-    .setFooter({ text: `Job ${record.id || record.job?.id || '-'}` })
+    .setFooter({ text: `Ref ${record.id || record.job?.id || '-'}` })
     .setTimestamp(new Date());
 }
 
@@ -654,7 +656,7 @@ function buildOrganizationDetailEmbed(organization = {}, record = {}) {
         inline: false,
       }
     )
-    .setFooter({ text: `Job ${record.id || record.job?.id || '-'} | !organisasi ${organization.name || organization.id || ''}`.trim() })
+    .setFooter({ text: `Ref ${record.id || record.job?.id || '-'} | !organisasi ${organization.name || organization.id || ''}`.trim() })
     .setTimestamp(new Date());
 
   if (otherMembers.length) {
@@ -754,8 +756,8 @@ function buildPlayerInfoEmbed({ record = {}, result = {}, registered = null, use
     .addFields(fields.slice(0, 25))
     .setFooter({
       text: isApprovedPlayer(legalProfile, registered)
-        ? `Legal access aktif | Job ${record.id || record.job?.id || '-'}`
-        : `Data player dari bridge | Job ${record.id || record.job?.id || '-'}`,
+        ? `Legal access aktif | Ref ${record.id || record.job?.id || '-'}`
+        : `Data player dari bridge | Ref ${record.id || record.job?.id || '-'}`,
     })
     .setTimestamp(new Date());
 
@@ -767,7 +769,7 @@ function buildResultErrorEmbed(title, result = {}, record = {}) {
     .setColor(0xe74c3c)
     .setTitle(title)
     .setDescription(`Gagal: \`${cleanText(result.code || 'unknown', 80)}\`.`)
-    .setFooter({ text: `Job ${record.id || record.job?.id || '-'}` })
+    .setFooter({ text: `Ref ${record.id || record.job?.id || '-'}` })
     .setTimestamp(new Date());
 }
 
@@ -1124,6 +1126,23 @@ function createTopupBridgeService({ registerStore, client = null }) {
     return false;
   }
 
+  async function deleteLoadingMessage(record = {}) {
+    const ref = record.context?.loadingMessage || record.job?.loadingMessage || null;
+    const channelId = cleanText(ref?.channelId, 40);
+    const messageId = cleanText(ref?.messageId, 40);
+    if (!client || !channelId || !messageId) return false;
+
+    const channel = client.channels.cache.get(channelId) ||
+      await client.channels.fetch(channelId).catch(() => null);
+    if (!channel?.messages?.fetch) return false;
+
+    const message = channel.messages.cache.get(messageId) ||
+      await channel.messages.fetch(messageId).catch(() => null);
+    if (!message?.delete) return false;
+    await message.delete().catch(() => null);
+    return true;
+  }
+
   function rememberOnlinePlayer(player = {}) {
     const normalized = normalizeOnlinePlayer(player);
     const key = onlineKey(normalized);
@@ -1250,7 +1269,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     return job;
   }
 
-  function enqueueTopup({ target, geon, rupiah, requestedBy, message, source = '', paymentId = '' }) {
+  function enqueueTopup({ target, geon, rupiah, requestedBy, message, loadingMessage = null, source = '', paymentId = '' }) {
     return enqueueJob('topup', {
       targetKey: target.gamertag,
       targetName: target.gamertag,
@@ -1260,17 +1279,17 @@ function createTopupBridgeService({ registerStore, client = null }) {
       requestedBy,
       source,
       paymentId,
-    }, { message, target });
+    }, { message, target, loadingMessage });
   }
 
-  function enqueueCoupon({ geon, rupiah, count, days, requestedBy, message }) {
+  function enqueueCoupon({ geon, rupiah, count, days, requestedBy, message, loadingMessage = null }) {
     return enqueueJob('coupon', {
       geon,
       rupiah,
       count,
       days,
       requestedBy,
-    }, { message });
+    }, { message, loadingMessage });
   }
 
   function enqueueBridgeQuery(type, payload, context) {
@@ -1462,7 +1481,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
         },
         { name: 'Sumber', value: source || 'manual', inline: true }
       )
-      .setFooter({ text: paymentId ? `Payment ${paymentId}` : `Job ${record.job?.id || record.id || '-'}` })
+      .setFooter({ text: paymentId ? `Payment ${paymentId}` : `Ref ${record.job?.id || record.id || '-'}` })
       .setTimestamp();
 
     const avatarUrl = discordAvatarUrl(user);
@@ -1600,7 +1619,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
           new EmbedBuilder()
             .setColor(EMBED_COLOR_INFO)
             .setTitle('Pilihan Diproses')
-            .setDescription(`Mengambil detail ${inlineCode(candidateLabels(kind)(candidate), 80)}.\nJob: \`${job.id}\``)
+            .setDescription(`Mengambil detail ${inlineCode(candidateLabels(kind)(candidate), 80)}.\nRef: \`${job.id}\``)
             .setTimestamp(new Date()),
         ],
         ephemeral: true,
@@ -1767,6 +1786,116 @@ function createTopupBridgeService({ registerStore, client = null }) {
     }).catch(() => {});
   }
 
+  function playerNameFromTransferSide(side = {}, fallback = '-') {
+    return cleanText(side.name || side.gamertag || side.key || fallback, 80) || fallback;
+  }
+
+  function transferFailureText(result = {}) {
+    const code = cleanText(result.code || 'unknown', 80);
+    const message = cleanText(result.message || '', 300);
+    return message ? `${code}: ${message}` : code;
+  }
+
+  function transferCandidateLines(result = {}) {
+    const candidates = Array.isArray(result.candidates) ? result.candidates.slice(0, 5) : [];
+    if (!candidates.length) return '';
+    return '\n\nKandidat:\n' + candidates
+      .map((candidate, index) => {
+        const name = playerNameFromTransferSide(candidate, '-');
+        const status = candidate.online ? 'online' : 'offline';
+        return `${index + 1}. ${inlineCode(name, 80)} | ${status}`;
+      })
+      .join('\n');
+  }
+
+  function discordMentionOrDash(...ids) {
+    for (const idRaw of ids) {
+      const id = cleanText(idRaw, 40);
+      if (/^\d{5,30}$/.test(id)) return `<@${id}>`;
+    }
+    return '-';
+  }
+
+  async function sendWalletTransferResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    if (!result.ok) {
+      await message.reply(noPingPayload({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xe74c3c)
+            .setTitle('Transfer Geon Gagal')
+            .setDescription(`Transfer tidak dijalankan.\nAlasan: \`${transferFailureText(result)}\`${transferCandidateLines(result)}`)
+            .setFooter({ text: `Ref ${record.job?.id || record.id || '-'}` })
+            .setTimestamp(new Date()),
+        ],
+      })).catch(() => {});
+      return;
+    }
+
+    const amount = result.amount || record.job?.amount || 0;
+    const from = result.from || {};
+    const to = result.to || {};
+    const fromName = playerNameFromTransferSide(from, record.job?.fromName || '-');
+    const toName = playerNameFromTransferSide(to, record.job?.targetName || record.job?.targetQuery || '-');
+
+    await message.reply(noPingPayload({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(EMBED_COLOR_TRANSFER)
+          .setTitle('Transfer Geon Berhasil')
+          .setDescription(`${inlineCode(fromName, 80)} mengirim **${formatNumber(amount)} Geon** ke ${inlineCode(toName, 80)}.`)
+          .addFields(
+            { name: 'Pengirim', value: `${inlineCode(fromName, 80)}\nSaldo: ${formatNumber(from.balanceGeon)} Geon`, inline: true },
+            { name: 'Penerima', value: `${inlineCode(toName, 80)}\nSaldo: ${formatNumber(to.balanceGeon)} Geon`, inline: true },
+            { name: 'Discord', value: discordMentionOrDash(record.job?.fromDiscordUserId, record.job?.requestedBy, message.author?.id), inline: true }
+          )
+          .setFooter({ text: `Transparansi finance aktif | Ref ${record.job?.id || record.id || '-'}` })
+          .setTimestamp(new Date()),
+      ],
+    })).catch(() => {});
+  }
+
+  async function sendWalletBonusResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    if (!result.ok) {
+      await message.reply(noPingPayload({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xe74c3c)
+            .setTitle('Bonus Geon Gagal')
+            .setDescription(`Bonus tidak dijalankan.\nAlasan: \`${transferFailureText(result)}\`${transferCandidateLines(result)}`)
+            .setFooter({ text: `Ref ${record.job?.id || record.id || '-'}` })
+            .setTimestamp(new Date()),
+        ],
+      })).catch(() => {});
+      return;
+    }
+
+    const amount = result.amount || record.job?.amount || 0;
+    const target = result.target || {};
+    const targetName = playerNameFromTransferSide(target, record.job?.targetQuery || '-');
+    const admin = cleanText(record.job?.requestedByTag || '', 80);
+
+    await message.reply(noPingPayload({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(EMBED_COLOR_BONUS)
+          .setTitle('Bonus Geon Berhasil')
+          .setDescription(`${inlineCode(targetName, 80)} menerima bonus **${formatNumber(amount)} Geon**.`)
+          .addFields(
+            { name: 'Target', value: `${inlineCode(targetName, 80)}\nSaldo: ${formatNumber(target.balanceGeon)} Geon`, inline: true },
+            { name: 'Admin', value: record.job?.requestedBy ? `<@${record.job.requestedBy}>${admin ? `\n${inlineCode(admin, 80)}` : ''}` : (admin || '-'), inline: true }
+          )
+          .setFooter({ text: `Transparansi finance aktif | Ref ${record.job?.id || record.id || '-'}` })
+          .setTimestamp(new Date()),
+      ],
+    })).catch(() => {});
+  }
+
   async function sendQueryResult(record, result) {
     if (record.job.type === 'wallet') {
       await sendWalletResult(record, result);
@@ -1782,6 +1911,10 @@ function createTopupBridgeService({ registerStore, client = null }) {
       await sendPingResult(record, result);
     } else if (record.job.type === 'discord_broadcast') {
       await sendDiscordBroadcastResult(record, result);
+    } else if (record.job.type === 'wallet_transfer') {
+      await sendWalletTransferResult(record, result);
+    } else if (record.job.type === 'wallet_bonus') {
+      await sendWalletBonusResult(record, result);
     }
   }
 
@@ -1797,6 +1930,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     saveJobsToDisk(record.updatedAt);
 
     try {
+      await deleteLoadingMessage(record).catch(() => false);
       if (record.job.type === 'coupon') {
         await sendCouponResult(record, resultRaw);
       } else if (record.job.type === 'topup') {
