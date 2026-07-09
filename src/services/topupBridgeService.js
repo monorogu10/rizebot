@@ -1,7 +1,12 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { EmbedBuilder } = require('discord.js');
+const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+} = require('discord.js');
 const {
   MINECRAFT_CHAT_LOG_CHANNEL_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
@@ -26,6 +31,10 @@ const EMBED_COLOR_TRANS = 0xf2c94c;
 const EMBED_COLOR_JOIN = 0x2ecc71;
 const EMBED_COLOR_LEAVE = 0xe74c3c;
 const EMBED_COLOR_TOPUP = 0x27ae60;
+const EMBED_COLOR_INFO = 0x2f80ed;
+const PLAYER_SELECT_PREFIX = 'mcplayer';
+const ORGANIZATION_SELECT_PREFIX = 'mcorg';
+const QUERY_SELECT_COLLECTOR_MS = 2 * 60 * 1000;
 const VERIFY_BYPASS_GAMERTAGS = new Set(['xylofly', 'monoguraa']);
 
 function n(value) {
@@ -111,15 +120,19 @@ function compactFooter(parts = []) {
   return clean.join(' | ').slice(0, 2048) || formatJakartaTime();
 }
 
-function createLogEmbed({ color, title, description, footerParts = [], thumbnailUrl = '', fields = [], compact = false }) {
+function createLogEmbed({ color, title, description, footerParts = [], thumbnailUrl = '', authorIconUrl = '', fields = [], compact = false }) {
   const embed = new EmbedBuilder()
     .setColor(color)
     .setDescription(cleanEmbedText(description, compact ? 1000 : 3800))
     .setFooter({ text: compactFooter([formatJakartaTime(), ...footerParts]) });
 
   const safeTitle = cleanText(title, 256) || 'Minecraft Log';
+  const safeAuthorIcon = String(authorIconUrl || '').trim();
   if (compact) {
-    embed.setAuthor({ name: safeTitle });
+    embed.setAuthor({
+      name: safeTitle,
+      iconURL: safeAuthorIcon || undefined,
+    });
   } else {
     embed.setTitle(safeTitle);
   }
@@ -284,6 +297,451 @@ function formatServerTargetLine(target, index = 0) {
     : (target.discordUserId ? ((target.registeredMatch || target.accessAllowed) ? '✅ resmi' : '🟢 terdaftar') : '❌ belum register');
   const discord = target.discordUserId ? `<@${target.discordUserId}> (${target.discordUserId})` : '-';
   return `${index + 1}. \`${name}\` | ${online} | ${registerStatus} | Discord=${discord}${geon}${ether}${pid}`;
+}
+
+function noPingPayload(payload) {
+  return {
+    ...payload,
+    allowedMentions: payload.allowedMentions || { parse: [], repliedUser: false },
+  };
+}
+
+function formatDateId(value) {
+  if (!value) return '-';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return cleanText(value, 120) || '-';
+  try {
+    return new Intl.DateTimeFormat('id-ID', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: 'Asia/Jakarta',
+    }).format(parsed);
+  } catch {
+    return parsed.toISOString();
+  }
+}
+
+function discordDisplayName(user, fallback = '-') {
+  return cleanText(
+    user?.tag ||
+    user?.globalName ||
+    user?.username ||
+    fallback ||
+    '-',
+    80
+  ) || '-';
+}
+
+function inlineCode(value, maxLength = 80) {
+  const text = cleanText(value, maxLength).replace(/`/g, "'");
+  return `\`${text || '-'}\``;
+}
+
+function isApprovedPlayer(legalProfile = {}, registered = null) {
+  const entry = registered?.entry || registered || {};
+  const status = String(entry.status || '').toLowerCase();
+  return Boolean(
+    legalProfile?.legal ||
+    entry.legal === true ||
+    status === 'approved'
+  );
+}
+
+function statusLabelForPlayer(legalProfile = {}, registered = null) {
+  if (isApprovedPlayer(legalProfile, registered)) return 'LEGAL';
+  const entry = registered?.entry || registered || null;
+  if (!entry) return 'BELUM REGISTER';
+  const status = String(entry.status || '').toLowerCase();
+  if (status === 'rejected') return 'GAGAL - BISA COBA LAGI';
+  if (status === 'pending') return 'PENDING INTERVIEW';
+  return entry.verified ? 'TERDAFTAR + VERIFIED' : 'TERDAFTAR';
+}
+
+function statusColorForPlayer(legalProfile = {}, registered = null) {
+  if (isApprovedPlayer(legalProfile, registered)) return 0x2ecc71;
+  const status = String((registered?.entry || registered || {}).status || '').toLowerCase();
+  if (!registered || status === 'rejected') return 0xe74c3c;
+  return 0xf2c94c;
+}
+
+function playerDisplayName(target = {}) {
+  const source = target || {};
+  return cleanText(source.name || source.gamertag || source.key || '-', 80) || '-';
+}
+
+function playerDiscordId(result = {}, registered = null) {
+  return cleanText(
+    result.legal?.discordUserId ||
+    result.target?.discordUserId ||
+    registered?.userId ||
+    registered?.entry?.userId ||
+    '',
+    40
+  );
+}
+
+function formatWalletField(wallet = null) {
+  if (!wallet) return '-';
+  return [
+    `${formatNumber(wallet.geon)} Geon`,
+    `${formatNumber(wallet.ether)} Ether`,
+  ].join('\n');
+}
+
+function formatLandField(land = null) {
+  if (!land) return '-';
+  if (land.ready === false) return 'Data land belum siap.';
+  const count = Math.max(0, Math.floor(Number(land.count ?? land.landCount ?? land.owned) || 0));
+  const area = Math.max(0, Math.floor(Number(land.totalArea ?? land.area) || 0));
+  return [
+    `${formatNumber(count)} land`,
+    area ? `Area: ${formatNumber(area)} blok` : '',
+  ].filter(Boolean).join('\n') || '-';
+}
+
+function formatRankField(ranks = null, fallbackRank = '') {
+  const labels = [];
+  if (Array.isArray(ranks?.labels)) {
+    for (const label of ranks.labels) {
+      const clean = cleanText(label, 80);
+      if (clean && !labels.some(existing => n(existing) === n(clean))) labels.push(clean);
+    }
+  }
+  for (const value of [
+    ranks?.defaultRankLabel,
+    ranks?.customRankLabel,
+    ranks?.organizationLabel,
+    ranks?.companyDivisionName,
+    ranks?.companyPowerRoleLabel,
+    fallbackRank,
+  ]) {
+    const clean = cleanText(value, 80);
+    if (clean && !labels.some(existing => n(existing) === n(clean))) labels.push(clean);
+  }
+  return labels.length ? labels.join('\n') : '-';
+}
+
+function organizationTypeLabel(organization = {}) {
+  const source = organization || {};
+  return source.isCompany ? 'Perusahaan' : 'Organisasi';
+}
+
+function organizationDisplayName(organization = {}) {
+  const source = organization || {};
+  const name = cleanText(source.name || source.id || '-', 120) || '-';
+  const ticker = cleanText(source.ticker || source.company?.ticker || '', 24);
+  return ticker ? `${name} (${ticker})` : name;
+}
+
+function formatOrganizationCash(organization = {}) {
+  const source = organization || {};
+  return [
+    `${formatNumber(source.cashGeon)} Geon`,
+    `${formatNumber(source.cashEther)} Ether`,
+  ].join('\n');
+}
+
+function organizationMembers(organization = {}) {
+  const source = organization || {};
+  return Array.isArray(source.members) ? source.members : [];
+}
+
+function organizationDivisions(organization = {}) {
+  const source = organization || {};
+  const divisions = source.company?.divisions || source.divisions || [];
+  return Array.isArray(divisions) ? divisions : [];
+}
+
+function isLegalOrganizationMember(member = {}) {
+  return Boolean(member.legal);
+}
+
+function memberDisplayName(member = {}) {
+  return cleanText(member.name || member.gamertag || member.key || '-', 56) || '-';
+}
+
+function memberRoleText(member = {}) {
+  const labels = [];
+  for (const value of [
+    member.roleLabel,
+    member.isFounder ? 'Founder' : '',
+    member.isLeader ? 'Leader' : '',
+    member.companyDivisionName,
+    member.companyPowerRoleLabel,
+  ]) {
+    const clean = cleanText(value, 56);
+    if (clean && !labels.some(existing => n(existing) === n(clean))) labels.push(clean);
+  }
+  return labels.join(' / ') || 'Member';
+}
+
+function formatMemberLines(members = [], limit = 10) {
+  const safeMembers = members.slice(0, limit);
+  const lines = safeMembers.map((member, index) => {
+    const discord = member.discordUserId ? ` | <@${member.discordUserId}>` : '';
+    const legal = isLegalOrganizationMember(member) ? 'LEGAL' : 'belum legal';
+    return `${index + 1}. ${inlineCode(memberDisplayName(member), 56)} | ${memberRoleText(member)} | ${legal}${discord}`;
+  });
+  if (members.length > limit) lines.push(`+${formatNumber(members.length - limit)} anggota lain`);
+  return cleanEmbedText(lines.join('\n'), 1024);
+}
+
+function formatDivisionLines(divisions = [], limit = 8) {
+  const lines = divisions.slice(0, limit).map((division, index) => {
+    const name = cleanText(division.name || division.id || `Divisi ${index + 1}`, 60);
+    const manager = cleanText(division.managerName || division.managerKey || '', 60);
+    const members = Math.max(0, Math.floor(Number(division.memberCount || division.members?.length) || 0));
+    return `${index + 1}. ${inlineCode(name, 60)}${manager ? ` | Manager: ${manager}` : ''}${members ? ` | ${formatNumber(members)} anggota` : ''}`;
+  });
+  if (divisions.length > limit) lines.push(`+${formatNumber(divisions.length - limit)} divisi lain`);
+  return cleanEmbedText(lines.join('\n'), 1024);
+}
+
+function formatOrganizationForPlayer(organization = null) {
+  if (!organization) return 'Tidak ada organisasi/perusahaan legal terdaftar.';
+  return cleanEmbedText([
+    `${organizationTypeLabel(organization)}: **${escapeDiscordMarkdown(organizationDisplayName(organization))}**`,
+    `Kas: ${formatNumber(organization.cashGeon)} Geon | ${formatNumber(organization.cashEther)} Ether`,
+    `Anggota: ${formatNumber(organization.legalMemberCount || 0)} legal / ${formatNumber(organization.memberCount || organizationMembers(organization).length)} total`,
+    organization.founderName ? `Founder: ${organization.founderName}` : '',
+    organization.leaderName ? `Leader: ${organization.leaderName}` : '',
+  ].filter(Boolean).join('\n'), 1024);
+}
+
+function buildPlayerCandidateEmbed(record = {}, result = {}) {
+  const candidates = Array.isArray(result.candidates) ? result.candidates.slice(0, 5) : [];
+  const query = cleanText(record.job?.query || result.query || '', 80) || '-';
+  const lines = candidates.map((candidate, index) => {
+    const name = playerDisplayName(candidate);
+    const online = candidate.online ? 'Online' : 'Offline';
+    const pid = candidate.persistentId ? ` | pid ${candidate.persistentId.slice(0, 10)}...` : '';
+    return `${index + 1}. ${inlineCode(name, 56)} | ${online}${pid}`;
+  });
+
+  return new EmbedBuilder()
+    .setColor(EMBED_COLOR_INFO)
+    .setTitle('Pilih Player')
+    .setDescription([
+      `Ada ${formatNumber(candidates.length)} player yang mendekati ${inlineCode(query, 80)}.`,
+      'Pilih salah satu tombol di bawah untuk membuka Ethergeon ID Card.',
+      '',
+      lines.join('\n') || 'Tidak ada kandidat.',
+    ].join('\n'))
+    .setFooter({ text: `Job ${record.id || record.job?.id || '-'}` })
+    .setTimestamp(new Date());
+}
+
+function organizationSummaryLine(organization = {}, index = 0) {
+  const source = organization || {};
+  const rank = Math.max(1, Math.floor(Number(source.rank) || (index + 1)));
+  return [
+    `${rank}. **${escapeDiscordMarkdown(organizationDisplayName(source))}**`,
+    organizationTypeLabel(source),
+    `Kas ${formatNumber(source.cashGeon)} Geon`,
+    `${formatNumber(source.memberCount)} anggota`,
+    source.leaderName ? `Leader ${cleanText(source.leaderName, 60)}` : '',
+  ].filter(Boolean).join(' | ');
+}
+
+function buildOrganizationListEmbed(record = {}, result = {}) {
+  const entries = Array.isArray(result.entries)
+    ? [...result.entries].sort((a, b) => (Number(b.cashGeon) || 0) - (Number(a.cashGeon) || 0))
+    : [];
+  const lines = entries.slice(0, 15).map(organizationSummaryLine);
+  const footer = [
+    `Total ${formatNumber(result.total || entries.length)}`,
+    `Ditampilkan ${formatNumber(lines.length)}`,
+    `Job ${record.id || record.job?.id || '-'}`,
+  ].join(' | ');
+
+  return new EmbedBuilder()
+    .setColor(EMBED_COLOR_INFO)
+    .setTitle('Daftar Organisasi & Perusahaan')
+    .setDescription(lines.join('\n') || 'Belum ada organisasi/perusahaan yang tercatat.')
+    .setFooter({ text: footer })
+    .setTimestamp(new Date());
+}
+
+function buildOrganizationCandidateEmbed(record = {}, result = {}) {
+  const candidates = Array.isArray(result.candidates) ? result.candidates.slice(0, 5) : [];
+  const query = cleanText(record.job?.query || result.query || '', 80) || '-';
+  const lines = candidates.map(organizationSummaryLine);
+
+  return new EmbedBuilder()
+    .setColor(EMBED_COLOR_INFO)
+    .setTitle('Pilih Organisasi')
+    .setDescription([
+      `Ada ${formatNumber(candidates.length)} organisasi/perusahaan yang mendekati ${inlineCode(query, 80)}.`,
+      'Pilih salah satu tombol di bawah untuk membuka detailnya.',
+      '',
+      lines.join('\n') || 'Tidak ada kandidat.',
+    ].join('\n'))
+    .setFooter({ text: `Job ${record.id || record.job?.id || '-'}` })
+    .setTimestamp(new Date());
+}
+
+function buildOrganizationDetailEmbed(organization = {}, record = {}) {
+  const members = organizationMembers(organization);
+  const legalMembers = members.filter(isLegalOrganizationMember);
+  const otherMembers = members.filter(member => !isLegalOrganizationMember(member));
+  const divisions = organizationDivisions(organization);
+  const title = `${organizationTypeLabel(organization)}: ${organizationDisplayName(organization)}`;
+  const description = [
+    `Kas: **${formatNumber(organization.cashGeon)} Geon** | ${formatNumber(organization.cashEther)} Ether`,
+    `Anggota legal: **${formatNumber(organization.legalMemberCount ?? legalMembers.length)}** / ${formatNumber(organization.memberCount || members.length)} total`,
+  ].join('\n');
+
+  const embed = new EmbedBuilder()
+    .setColor(organization.isCompany ? 0x27ae60 : EMBED_COLOR_INFO)
+    .setTitle(cleanText(title, 256))
+    .setDescription(description)
+    .addFields(
+      { name: 'Tipe', value: organizationTypeLabel(organization), inline: true },
+      { name: 'Kas', value: formatOrganizationCash(organization), inline: true },
+      {
+        name: 'Struktur',
+        value: [
+          `Founder: ${cleanText(organization.founderName || '-', 80) || '-'}`,
+          `Leader: ${cleanText(organization.leaderName || '-', 80) || '-'}`,
+          `Divisi: ${formatNumber(divisions.length)}`,
+        ].join('\n'),
+        inline: true,
+      },
+      {
+        name: 'Anggota Legal',
+        value: legalMembers.length ? formatMemberLines(legalMembers, 12) : 'Belum ada anggota legal terdaftar.',
+        inline: false,
+      }
+    )
+    .setFooter({ text: `Job ${record.id || record.job?.id || '-'} | !organisasi ${organization.name || organization.id || ''}`.trim() })
+    .setTimestamp(new Date());
+
+  if (otherMembers.length) {
+    embed.addFields({
+      name: 'Belum Legal / Belum Terhubung',
+      value: formatMemberLines(otherMembers, 8),
+      inline: false,
+    });
+  }
+  if (divisions.length) {
+    embed.addFields({
+      name: 'Divisi Perusahaan',
+      value: formatDivisionLines(divisions, 8),
+      inline: false,
+    });
+  }
+
+  return embed;
+}
+
+function buildPlayerInfoEmbed({ record = {}, result = {}, registered = null, user = null }) {
+  const target = result.target || {};
+  const legalProfile = result.legal || {};
+  const discordUserId = playerDiscordId(result, registered);
+  const accessLabel = statusLabelForPlayer(legalProfile, registered);
+  const username = discordDisplayName(user, registered?.entry?.username || '-');
+  const targetName = playerDisplayName(target);
+  const wallet = normalizeWalletProfile(result.wallet);
+  const land = normalizeLandProfile(result.land);
+  const ranks = normalizeRanksProfile(result.ranks, target.rank);
+  const organization = result.organization || null;
+  const profileLines = [
+    `Discord: ${discordUserId ? `<@${discordUserId}>` : '`-`'}`,
+    `Username: ${inlineCode(username, 80)}`,
+    `Gamertag: ${inlineCode(targetName, 80)}`,
+    `Access: **${accessLabel}**`,
+  ];
+
+  const fields = [
+    { name: 'Discord', value: discordUserId ? `<@${discordUserId}>` : 'Belum terhubung', inline: true },
+    { name: 'Gamertag', value: inlineCode(targetName, 80), inline: true },
+    { name: 'Access', value: accessLabel, inline: true },
+    {
+      name: 'Server',
+      value: [
+        target.online ? 'Online' : 'Offline',
+        `persistentId: ${inlineCode(target.persistentId || '-', 120)}`,
+      ].join('\n'),
+      inline: true,
+    },
+    { name: 'Saldo', value: formatWalletField(wallet), inline: true },
+    { name: 'Land', value: formatLandField(land), inline: true },
+    { name: 'Rank', value: formatRankField(ranks, target.rank), inline: false },
+    {
+      name: organization?.isCompany ? 'Perusahaan Legal' : 'Organisasi Legal',
+      value: formatOrganizationForPlayer(organization),
+      inline: false,
+    },
+  ];
+
+  const orgMembers = organizationMembers(organization);
+  const legalMembers = orgMembers.filter(isLegalOrganizationMember);
+  if (legalMembers.length) {
+    fields.push({
+      name: 'Anggota Legal',
+      value: formatMemberLines(legalMembers, 8),
+      inline: false,
+    });
+  }
+
+  if (registered?.entry?.approvedAt || legalProfile.approvedAt) {
+    fields.push({
+      name: 'Approved',
+      value: formatDateId(legalProfile.approvedAt || registered?.entry?.approvedAt),
+      inline: true,
+    });
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(statusColorForPlayer(legalProfile, registered))
+    .setTitle('Ethergeon ID Card')
+    .setDescription(profileLines.join('\n'))
+    .addFields(fields.slice(0, 25))
+    .setFooter({
+      text: isApprovedPlayer(legalProfile, registered)
+        ? `Legal access aktif | Job ${record.id || record.job?.id || '-'}`
+        : `Data player dari bridge | Job ${record.id || record.job?.id || '-'}`,
+    })
+    .setTimestamp(new Date());
+
+  return embed;
+}
+
+function buildResultErrorEmbed(title, result = {}, record = {}) {
+  return new EmbedBuilder()
+    .setColor(0xe74c3c)
+    .setTitle(title)
+    .setDescription(`Gagal: \`${cleanText(result.code || 'unknown', 80)}\`.`)
+    .setFooter({ text: `Job ${record.id || record.job?.id || '-'}` })
+    .setTimestamp(new Date());
+}
+
+function buildCandidateButtonId(prefix, sourceId, index) {
+  return `${prefix}:${sourceId}:${index}`;
+}
+
+function parseCandidateButtonId(customId, prefix, sourceId) {
+  const raw = String(customId || '');
+  const expected = `${prefix}:${sourceId}:`;
+  if (!raw.startsWith(expected)) return null;
+  const index = Number.parseInt(raw.slice(expected.length), 10);
+  if (!Number.isFinite(index) || index < 0 || index > 4) return null;
+  return { index };
+}
+
+function buildCandidateButtons(prefix, sourceId, candidates = [], labelResolver, disabled = false) {
+  const row = new ActionRowBuilder();
+  candidates.slice(0, 5).forEach((candidate, index) => {
+    const label = cleanText(labelResolver(candidate, index), 70) || `Pilihan ${index + 1}`;
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(buildCandidateButtonId(prefix, sourceId, index))
+        .setLabel(label)
+        .setStyle(index === 0 ? ButtonStyle.Primary : ButtonStyle.Secondary)
+        .setDisabled(disabled)
+    );
+  });
+  return row;
 }
 
 function createTopupBridgeService({ registerStore, client = null }) {
@@ -962,6 +1420,147 @@ function createTopupBridgeService({ registerStore, client = null }) {
     return true;
   }
 
+  function findRegisteredForPlayerInfo(result = {}) {
+    const target = result.target || {};
+    const persistentId = cleanText(target.persistentId, 160);
+    if (persistentId) {
+      const linked = registerStore.findUserByPersistentId?.(persistentId);
+      if (linked) return linked;
+    }
+
+    const names = [target.name, target.gamertag, target.key]
+      .map(value => cleanText(value, 80))
+      .filter(Boolean);
+    for (const name of names) {
+      const linked = registerStore.findUserByGamertag?.(name);
+      if (linked) return linked;
+    }
+
+    const discordUserId = cleanText(result.legal?.discordUserId || target.discordUserId || '', 40);
+    if (!discordUserId) return null;
+    const entry = registerStore.getUser?.(discordUserId);
+    if (entry) return { userId: discordUserId, entry };
+    return {
+      userId: discordUserId,
+      entry: {
+        userId: discordUserId,
+        gamertag: playerDisplayName(target),
+        status: result.legal?.legal ? 'approved' : 'pending',
+        approvedAt: result.legal?.approvedAt || null,
+      },
+    };
+  }
+
+  function candidateLabels(kind) {
+    if (kind === 'organization') {
+      return candidate => organizationDisplayName(candidate);
+    }
+    return candidate => playerDisplayName(candidate);
+  }
+
+  function candidatePrefix(kind) {
+    return kind === 'organization' ? ORGANIZATION_SELECT_PREFIX : PLAYER_SELECT_PREFIX;
+  }
+
+  function buildCandidateRow(record, candidates, kind, disabled = false) {
+    return buildCandidateButtons(
+      candidatePrefix(kind),
+      record.id || record.job?.id || '',
+      candidates,
+      candidateLabels(kind),
+      disabled
+    );
+  }
+
+  function candidateQuery(kind, candidate = {}) {
+    const source = candidate || {};
+    if (kind === 'organization') {
+      return cleanText(source.id || source.name || source.ticker || '', 120);
+    }
+    return cleanText(source.key || source.name || source.gamertag || '', 120);
+  }
+
+  function candidateJobType(kind) {
+    return kind === 'organization' ? 'organization_info' : 'player_info';
+  }
+
+  function attachCandidateCollector(reply, record, candidates, kind) {
+    const sourceId = record.id || record.job?.id || '';
+    if (!reply?.createMessageComponentCollector || !sourceId || !candidates.length) return;
+
+    const prefix = candidatePrefix(kind);
+    let picked = false;
+    const collector = reply.createMessageComponentCollector({
+      time: QUERY_SELECT_COLLECTOR_MS,
+      filter: interaction => Boolean(parseCandidateButtonId(interaction.customId, prefix, sourceId)),
+    });
+
+    collector.on('collect', async interaction => {
+      const parsed = parseCandidateButtonId(interaction.customId, prefix, sourceId);
+      if (!parsed) return;
+
+      const requesterId = String(record.context?.message?.author?.id || record.job?.requestedBy || '');
+      if (requesterId && String(interaction.user?.id || '') !== requesterId) {
+        await interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(0xe74c3c)
+              .setTitle('Pilihan Terkunci')
+              .setDescription('Tombol ini hanya untuk user yang menjalankan command.'),
+          ],
+          ephemeral: true,
+          allowedMentions: { parse: [], repliedUser: false },
+        }).catch(() => {});
+        return;
+      }
+
+      const candidate = candidates[parsed.index];
+      const query = candidateQuery(kind, candidate);
+      if (!candidate || !query) {
+        await interaction.reply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(0xe74c3c)
+              .setTitle('Pilihan Tidak Valid')
+              .setDescription('Kandidat ini tidak punya identitas yang bisa dicari.'),
+          ],
+          ephemeral: true,
+          allowedMentions: { parse: [], repliedUser: false },
+        }).catch(() => {});
+        return;
+      }
+
+      picked = true;
+      collector.stop('picked');
+      const job = enqueueBridgeQuery(candidateJobType(kind), {
+        query,
+        requestedBy: interaction.user?.id || record.job?.requestedBy || '',
+      }, { message: record.context?.message });
+
+      await interaction.update({
+        components: [buildCandidateRow(record, candidates, kind, true)],
+      }).catch(() => {});
+      await interaction.followUp({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(EMBED_COLOR_INFO)
+            .setTitle('Pilihan Diproses')
+            .setDescription(`Mengambil detail ${inlineCode(candidateLabels(kind)(candidate), 80)}.\nJob: \`${job.id}\``)
+            .setTimestamp(new Date()),
+        ],
+        ephemeral: true,
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => {});
+    });
+
+    collector.on('end', async () => {
+      if (picked) return;
+      await reply.edit({
+        components: [buildCandidateRow(record, candidates, kind, true)],
+      }).catch(() => {});
+    });
+  }
+
   async function sendWalletResult(record, result) {
     const message = record.context?.message;
     if (!message) return;
@@ -1011,26 +1610,71 @@ function createTopupBridgeService({ registerStore, client = null }) {
     if (!message) return;
 
     if (!result.ok) {
-      await message.reply(`Data player gagal: \`${result.code || 'unknown'}\`.`).catch(() => {});
+      const candidates = Array.isArray(result.candidates) ? result.candidates.slice(0, 5) : [];
+      if (candidates.length && result.code === 'target-ambiguous') {
+        const reply = await message.reply(noPingPayload({
+          embeds: [buildPlayerCandidateEmbed(record, result)],
+          components: [buildCandidateRow(record, candidates, 'player')],
+        })).catch(() => null);
+        attachCandidateCollector(reply, record, candidates, 'player');
+        return;
+      }
+
+      await message.reply(noPingPayload({
+        embeds: [buildResultErrorEmbed('Data Player', result, record)],
+      })).catch(() => {});
       return;
     }
 
-    const target = result.target || {};
-    const wallet = result.wallet || {};
-    const registered = target.persistentId
-      ? registerStore.findUserByPersistentId?.(target.persistentId)
-      : registerStore.findUserByGamertag?.(target.name || target.key);
-    const registerLine = registered
-      ? `Discord: <@${registered.userId}> | ${registered.entry?.verified ? 'verified' : 'terdaftar'}`
-      : 'Discord: belum register';
+    const registered = findRegisteredForPlayerInfo(result);
+    const user = await resolveDiscordUser(playerDiscordId(result, registered));
+    const embed = buildPlayerInfoEmbed({ record, result, registered, user });
+    const avatarUrl = discordAvatarUrl(user);
+    if (avatarUrl) embed.setThumbnail(avatarUrl);
 
-    await message.reply([
-      `Player: \`${target.name || target.key || '-'}\``,
-      `Status: ${target.online ? 'online' : 'offline'}`,
-      `Saldo: ${formatNumber(wallet.geon)} Geon | ${formatNumber(wallet.ether)} Ether`,
-      registerLine,
-      `persistentId: \`${target.persistentId || '-'}\``,
-    ].join('\n')).catch(() => {});
+    await message.reply(noPingPayload({ embeds: [embed] })).catch(() => {});
+  }
+
+  async function sendOrganizationSearchResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    if (!result.ok) {
+      await message.reply(noPingPayload({
+        embeds: [buildResultErrorEmbed('Daftar Organisasi', result, record)],
+      })).catch(() => {});
+      return;
+    }
+
+    await message.reply(noPingPayload({
+      embeds: [buildOrganizationListEmbed(record, result)],
+    })).catch(() => {});
+  }
+
+  async function sendOrganizationInfoResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    if (!result.ok) {
+      const candidates = Array.isArray(result.candidates) ? result.candidates.slice(0, 5) : [];
+      if (candidates.length && result.code === 'organization-ambiguous') {
+        const reply = await message.reply(noPingPayload({
+          embeds: [buildOrganizationCandidateEmbed(record, result)],
+          components: [buildCandidateRow(record, candidates, 'organization')],
+        })).catch(() => null);
+        attachCandidateCollector(reply, record, candidates, 'organization');
+        return;
+      }
+
+      await message.reply(noPingPayload({
+        embeds: [buildResultErrorEmbed('Detail Organisasi', result, record)],
+      })).catch(() => {});
+      return;
+    }
+
+    await message.reply(noPingPayload({
+      embeds: [buildOrganizationDetailEmbed(result.organization || {}, record)],
+    })).catch(() => {});
   }
 
   async function sendPingResult(record, result) {
@@ -1075,6 +1719,10 @@ function createTopupBridgeService({ registerStore, client = null }) {
       await sendSearchServerResult(record, result);
     } else if (record.job.type === 'player_info') {
       await sendPlayerInfoResult(record, result);
+    } else if (record.job.type === 'organization_search' || record.job.type === 'organization_directory') {
+      await sendOrganizationSearchResult(record, result);
+    } else if (record.job.type === 'organization_info') {
+      await sendOrganizationInfoResult(record, result);
     } else if (record.job.type === 'ping') {
       await sendPingResult(record, result);
     } else if (record.job.type === 'discord_broadcast') {
@@ -1137,6 +1785,8 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const wallet = normalizeWalletProfile(event.wallet || event.player?.wallet || player.wallet);
     const source = cleanText(event.source || event.chatSource || 'global', 40) || 'global';
     const linked = findLinkedUserForPlayer(event);
+    const user = await resolveDiscordUser(linked?.userId);
+    const authorIconUrl = discordAvatarUrl(user);
     const rank = cleanText(event.rank || 'Player', 180) || 'Player';
     const footerParts = [
       `source: ${source}`,
@@ -1153,6 +1803,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
         title: `Chat | ${name}`,
         description: boldDiscordText(message),
         footerParts,
+        authorIconUrl,
         compact: true,
       })],
       allowedMentions: { parse: [] },

@@ -34,6 +34,8 @@ function createRizebotHelpPayload({
           ['!daftar', 'alias dari `!reg`.'],
           ['!register', 'alias dari `!reg`.'],
           ['!status', 'lihat Ethergeon ID Card.'],
+          ['!player <nama>', 'cek Ethergeon ID Card player lain, dengan tombol pilihan kalau hasilnya mirip.'],
+          ['!organisasi [nama]', 'lihat daftar organisasi/perusahaan, atau detail anggota dan kas jika nama diisi.'],
         ]),
         inline: false,
       },

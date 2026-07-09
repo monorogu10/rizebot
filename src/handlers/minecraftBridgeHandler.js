@@ -27,13 +27,13 @@ function normalizeSpaces(value) {
 
 function parseCommand(content) {
   const raw = normalizeSpaces(content);
-  const match = raw.match(/^!(verify|verifyme|verifme|veryfyme|mc-help|mcstatus|mcping|online|srcsrv|srcpl|geon|player|p)(?:\s+(.+))?$/i);
+  const match = raw.match(/^!(verify|verifyme|verifme|veryfyme|mc-help|mcstatus|mcping|online|srcsrv|srcpl|geon|player|organisasi|organization|org|p)(?:\s+(.+))?$/i);
   if (!match) return null;
   const command = match[1].toLowerCase();
   return {
     command: ['verify', 'verifme', 'veryfyme'].includes(command)
       ? 'verifyme'
-      : (command === 'srcpl' ? 'srcsrv' : command),
+      : (command === 'srcpl' ? 'srcsrv' : (['organization', 'org'].includes(command) ? 'organisasi' : command)),
     args: normalizeSpaces(match[2] || ''),
   };
 }
@@ -55,6 +55,35 @@ async function replyNoPing(msg, payload) {
 function formatNumber(value) {
   const number = Math.max(0, Math.floor(Number(value) || 0));
   return String(number).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+
+function buildCommandEmbed({ color = 0x2f80ed, title, description, footer = '' }) {
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle(title)
+    .setDescription(description)
+    .setTimestamp(new Date());
+  if (footer) embed.setFooter({ text: footer });
+  return noPing({ embeds: [embed] });
+}
+
+function buildQueuedBridgePayload({ title, description, job }) {
+  return buildCommandEmbed({
+    title,
+    description: [
+      description,
+      `Job: \`${job?.id || '-'}\``,
+    ].join('\n'),
+    footer: 'Hasil akan dikirim sebagai embed setelah BP membalas.',
+  });
+}
+
+function buildFormatErrorPayload(format) {
+  return buildCommandEmbed({
+    color: 0xe74c3c,
+    title: 'Format Command',
+    description: `Format: \`${format}\``,
+  });
 }
 
 function cleanDiscordBroadcastMessage(value) {
@@ -292,8 +321,46 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
       return true;
     }
 
+    if (parsed.command === 'player') {
+      if (parsed.args.length < 2) {
+        await replyNoPing(msg, buildFormatErrorPayload('!player <nama_player>'));
+        return true;
+      }
+      const job = bridge.enqueueBridgeQuery('player_info', {
+        query: parsed.args,
+        requestedBy: msg.author.id,
+      }, { message: msg });
+      await replyNoPing(msg, buildQueuedBridgePayload({
+        title: 'Cek Data Player',
+        description: `Mencari player yang mendekati \`${parsed.args}\`.`,
+        job,
+      }));
+      return true;
+    }
+
+    if (parsed.command === 'organisasi') {
+      const jobType = parsed.args ? 'organization_info' : 'organization_search';
+      const job = bridge.enqueueBridgeQuery(jobType, {
+        query: parsed.args,
+        limit: parsed.args ? 5 : 15,
+        requestedBy: msg.author.id,
+      }, { message: msg });
+      await replyNoPing(msg, buildQueuedBridgePayload({
+        title: parsed.args ? 'Cek Detail Organisasi' : 'Daftar Organisasi & Perusahaan',
+        description: parsed.args
+          ? `Mencari organisasi/perusahaan yang mendekati \`${parsed.args}\`.`
+          : 'Mengambil daftar organisasi/perusahaan berdasarkan kas Geon terbesar.',
+        job,
+      }));
+      return true;
+    }
+
     if (!isBridgeAdmin(msg.author?.id)) {
-      await replyNoPing(msg, 'Command Minecraft admin hanya untuk admin.');
+      await replyNoPing(msg, buildCommandEmbed({
+        color: 0xe74c3c,
+        title: 'Command Admin',
+        description: 'Command Minecraft admin hanya untuk admin.',
+      }));
       return true;
     }
 
@@ -355,16 +422,6 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
       }
       const job = bridge.enqueueBridgeQuery('wallet', { query: parsed.args }, { message: msg });
       await replyNoPing(msg, `Cek saldo masuk antrean. Job: \`${job.id}\``);
-      return true;
-    }
-
-    if (parsed.command === 'player') {
-      if (parsed.args.length < 2) {
-        await replyNoPing(msg, 'Format: `!player <nama_player>`');
-        return true;
-      }
-      const job = bridge.enqueueBridgeQuery('player_info', { query: parsed.args }, { message: msg });
-      await replyNoPing(msg, `Cek data player masuk antrean. Job: \`${job.id}\``);
       return true;
     }
 
