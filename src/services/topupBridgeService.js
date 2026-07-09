@@ -69,6 +69,15 @@ function cleanText(value, maxLength = 1800) {
     .slice(0, maxLength);
 }
 
+function escapeDiscordMarkdown(value) {
+  return String(value || '').replace(/([\\`*_~|>])/g, '\\$1');
+}
+
+function boldDiscordText(value, maxLength = 900) {
+  const text = cleanText(value, maxLength);
+  return text ? `**${escapeDiscordMarkdown(text)}**` : '-';
+}
+
 function cleanEmbedText(value, maxLength = 3800) {
   const text = String(value || '')
     .replace(/\u00A7[0-9A-FK-OR]/gi, '')
@@ -99,22 +108,28 @@ function compactFooter(parts = []) {
   const clean = parts
     .map(part => cleanText(part, 180))
     .filter(Boolean);
-  return clean.join(' • ').slice(0, 2048) || formatJakartaTime();
+  return clean.join(' | ').slice(0, 2048) || formatJakartaTime();
 }
 
-function createLogEmbed({ color, title, description, footerParts = [], thumbnailUrl = '', fields = [] }) {
+function createLogEmbed({ color, title, description, footerParts = [], thumbnailUrl = '', fields = [], compact = false }) {
   const embed = new EmbedBuilder()
     .setColor(color)
-    .setTitle(cleanText(title, 256) || 'Minecraft Log')
-    .setDescription(cleanEmbedText(description))
-    .setFooter({ text: compactFooter([`🕒 ${formatJakartaTime()}`, ...footerParts]) });
+    .setDescription(cleanEmbedText(description, compact ? 1000 : 3800))
+    .setFooter({ text: compactFooter([formatJakartaTime(), ...footerParts]) });
+
+  const safeTitle = cleanText(title, 256) || 'Minecraft Log';
+  if (compact) {
+    embed.setAuthor({ name: safeTitle });
+  } else {
+    embed.setTitle(safeTitle);
+  }
 
   const thumbnail = String(thumbnailUrl || '').trim();
-  if (thumbnail) {
+  if (!compact && thumbnail) {
     embed.setThumbnail(thumbnail);
   }
 
-  const safeFields = fields
+  const safeFields = compact ? [] : fields
     .map(field => ({
       name: cleanText(field.name, 256),
       value: cleanEmbedText(field.value, 1024),
@@ -1122,28 +1137,23 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const wallet = normalizeWalletProfile(event.wallet || event.player?.wallet || player.wallet);
     const source = cleanText(event.source || event.chatSource || 'global', 40) || 'global';
     const linked = findLinkedUserForPlayer(event);
-    const user = await resolveDiscordUser(linked?.userId);
     const rank = cleanText(event.rank || 'Player', 180) || 'Player';
-    const fields = [
-      { name: 'Online', value: `${formatNumber(onlineCount)} player`, inline: true },
-      { name: 'Geon', value: wallet ? `${formatNumber(wallet.geon)} Geon` : '-', inline: true },
-      { name: 'Ether', value: wallet ? `${formatNumber(wallet.ether)} Ether` : '-', inline: true },
-      { name: 'Rank', value: rank, inline: false },
-      { name: 'Source', value: source, inline: true },
-    ];
     const footerParts = [
-      `💬 Rank: ${rank}`,
-      linked?.userId ? `Discord ID: ${linked.userId}` : 'Discord: belum register',
+      `source: ${source}`,
+      `online: ${formatNumber(onlineCount)}`,
+      wallet ? `geon: ${formatNumber(wallet.geon)}` : '',
+      wallet ? `ether: ${formatNumber(wallet.ether)}` : '',
+      `rank: ${rank}`,
+      linked?.userId ? `Discord ID: ${linked.userId}` : 'Discord: belum register'
     ];
 
     await channel.send({
       embeds: [createLogEmbed({
         color: EMBED_COLOR_CHAT,
-        title: name,
-        description: message,
+        title: `Chat | ${name}`,
+        description: boldDiscordText(message),
         footerParts,
-        fields,
-        thumbnailUrl: discordAvatarUrl(user),
+        compact: true,
       })],
       allowedMentions: { parse: [] },
     }).catch(err => {
@@ -1164,9 +1174,10 @@ function createTopupBridgeService({ registerStore, client = null }) {
     await channel.send({
       embeds: [createLogEmbed({
         color: EMBED_COLOR_TRANS,
-        title: `📣 Transparansi: ${label || category || 'unknown'}`,
         description: message,
+        title: `Transparansi | ${label || category || 'unknown'}`,
         footerParts: [`Kategori: ${category}`],
+        compact: true,
       })],
       allowedMentions: { parse: [] },
     }).catch(err => {
@@ -1184,7 +1195,6 @@ function createTopupBridgeService({ registerStore, client = null }) {
     if (!name) return { ok: false, code: 'empty-name' };
 
     const linked = findLinkedUserForPlayer(player);
-    const user = await resolveDiscordUser(linked?.userId);
     const isLeave = type === 'player_leave';
     const action = isLeave ? 'left the game' : 'joined the game';
     const detailText = cleanText(detail, 160);
@@ -1200,7 +1210,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
         title: `${isLeave ? '[-]' : '[+]'} ${name} ${action}`,
         description,
         footerParts: [isLeave ? 'Event: leave' : 'Event: join'],
-        thumbnailUrl: discordAvatarUrl(user),
+        compact: true,
       })],
       allowedMentions: { parse: [] },
     }).catch(err => {
