@@ -497,14 +497,47 @@ function formatDivisionLines(divisions = [], limit = 8) {
   return cleanEmbedText(lines.join('\n'), 1024);
 }
 
+function organizationHoldingParent(organization = {}) {
+  const source = organization || {};
+  return source.holdingParent || source.company?.holdingParent || null;
+}
+
+function organizationHoldingChildren(organization = {}) {
+  const source = organization || {};
+  const children = source.holdingChildren || source.company?.holdingChildren || [];
+  return Array.isArray(children) ? children : [];
+}
+
+function holdingRelationText(entry = {}) {
+  const relation = cleanText(entry.relationLabel || entry.relationType || 'Affiliate', 40) || 'Affiliate';
+  const ownership = Math.max(0, Math.min(100, Math.floor(Number(entry.ownershipPercent) || 0)));
+  return ownership > 0 ? `${relation} (${formatNumber(ownership)}%)` : relation;
+}
+
+function holdingCompanyLine(entry = {}, index = 0) {
+  const rank = Math.max(1, Math.floor(Number(index) + 1));
+  const name = organizationDisplayName({ name: entry.name, ticker: entry.ticker, isCompany: true });
+  return `${rank}. ${inlineCode(name, 80)} | ${holdingRelationText(entry)} | ${formatNumber(entry.memberCount)} anggota | ${formatNumber(entry.cashGeon)} Geon`;
+}
+
+function formatHoldingChildrenLines(children = [], limit = 8) {
+  const lines = children.slice(0, limit).map(holdingCompanyLine);
+  if (children.length > limit) lines.push(`+${formatNumber(children.length - limit)} perusahaan lain`);
+  return cleanEmbedText(lines.join('\n'), 1024);
+}
+
 function formatOrganizationForPlayer(organization = null) {
   if (!organization) return 'Tidak ada organisasi/perusahaan legal terdaftar.';
+  const holdingParent = organizationHoldingParent(organization);
+  const holdingChildren = organizationHoldingChildren(organization);
   return cleanEmbedText([
     `${organizationTypeLabel(organization)}: **${escapeDiscordMarkdown(organizationDisplayName(organization))}**`,
     `Kas: ${formatNumber(organization.cashGeon)} Geon | ${formatNumber(organization.cashEther)} Ether`,
     `Anggota: ${formatNumber(organization.legalMemberCount || 0)} legal / ${formatNumber(organization.memberCount || organizationMembers(organization).length)} total`,
     organization.founderName ? `Founder: ${organization.founderName}` : '',
     organization.leaderName ? `Leader: ${organization.leaderName}` : '',
+    holdingParent ? `Holding: ${organizationDisplayName(holdingParent)} (${holdingRelationText(holdingParent)})` : '',
+    holdingChildren.length ? `Anak/Afiliasi: ${formatNumber(holdingChildren.length)}` : '',
   ].filter(Boolean).join('\n'), 1024);
 }
 
@@ -534,12 +567,16 @@ function buildPlayerCandidateEmbed(record = {}, result = {}) {
 function organizationSummaryLine(organization = {}, index = 0) {
   const source = organization || {};
   const rank = Math.max(1, Math.floor(Number(source.rank) || (index + 1)));
+  const holdingParent = organizationHoldingParent(source);
+  const childrenCount = Math.max(0, Math.floor(Number(source.holdingChildrenCount || organizationHoldingChildren(source).length) || 0));
   return [
     `${rank}. **${escapeDiscordMarkdown(organizationDisplayName(source))}**`,
     organizationTypeLabel(source),
     `Kas ${formatNumber(source.cashGeon)} Geon`,
     `${formatNumber(source.memberCount)} anggota`,
     source.leaderName ? `Leader ${cleanText(source.leaderName, 60)}` : '',
+    holdingParent ? `Parent ${cleanText(holdingParent.ticker || holdingParent.name || '-', 40)}` : '',
+    childrenCount ? `${formatNumber(childrenCount)} anak/afiliasi` : '',
   ].filter(Boolean).join(' | ');
 }
 
@@ -585,11 +622,15 @@ function buildOrganizationDetailEmbed(organization = {}, record = {}) {
   const legalMembers = members.filter(isLegalOrganizationMember);
   const otherMembers = members.filter(member => !isLegalOrganizationMember(member));
   const divisions = organizationDivisions(organization);
+  const holdingParent = organizationHoldingParent(organization);
+  const holdingChildren = organizationHoldingChildren(organization);
   const title = `${organizationTypeLabel(organization)}: ${organizationDisplayName(organization)}`;
   const description = [
     `Kas: **${formatNumber(organization.cashGeon)} Geon** | ${formatNumber(organization.cashEther)} Ether`,
     `Anggota legal: **${formatNumber(organization.legalMemberCount ?? legalMembers.length)}** / ${formatNumber(organization.memberCount || members.length)} total`,
-  ].join('\n');
+    holdingParent ? `Holding: **${escapeDiscordMarkdown(organizationDisplayName(holdingParent))}** (${holdingRelationText(holdingParent)})` : '',
+    holdingChildren.length ? `Anak/Afiliasi: **${formatNumber(holdingChildren.length)}**` : '',
+  ].filter(Boolean).join('\n');
 
   const embed = new EmbedBuilder()
     .setColor(organization.isCompany ? 0x27ae60 : EMBED_COLOR_INFO)
@@ -627,6 +668,20 @@ function buildOrganizationDetailEmbed(organization = {}, record = {}) {
     embed.addFields({
       name: 'Divisi Perusahaan',
       value: formatDivisionLines(divisions, 8),
+      inline: false,
+    });
+  }
+  if (holdingParent) {
+    embed.addFields({
+      name: 'Holding Parent',
+      value: `${organizationDisplayName(holdingParent)}\n${holdingRelationText(holdingParent)}`,
+      inline: true,
+    });
+  }
+  if (holdingChildren.length) {
+    embed.addFields({
+      name: 'Anak / Afiliasi',
+      value: formatHoldingChildrenLines(holdingChildren, 8),
       inline: false,
     });
   }
