@@ -42,7 +42,7 @@ function createRizebotHelpPayload({
         name: 'User biasa',
         value: commandLines([
           ['!help', 'lihat daftar command. Alias: `!mc-help`.'],
-          ['!reg <gamertag>', 'daftar Minecraft. Kalau sudah legal, command ini update gamertag tanpa interview ulang.'],
+          ['!reg <gamertag>', 'daftar Minecraft. Kalau sudah legal, command ini hanya refresh data gamertag yang sama.'],
           ['!daftar', 'alias dari `!reg`.'],
           ['!register', 'alias dari `!reg`.'],
           ['!status', 'lihat Ethergeon ID Card.'],
@@ -80,6 +80,7 @@ function createRizebotHelpPayload({
   if (showInterviewAdmin) {
     registerAdminLines.push(
       ['!list [semua|lolos|pending|gagal] [halaman]', 'lihat registry Minecraft dengan tombol filter/page. Alias: `!registrasi`.'],
+      ['!setreg @user <gamertag>', 'ubah gamertag legal setelah review manual admin/interviewer. Alias: `!ganti-reg`.'],
       ['!compile [jumlah|all]', 'compile closed interview lama ke JSON save channel, lalu hapus channel ticket.'],
       ['!archive-interviews [jumlah]', 'pindahkan backlog closed interview ke archive.']
     );
@@ -109,6 +110,7 @@ function createRizebotHelpPayload({
           ['!p <pesan>', 'kirim pesan Discord ke chat Minecraft dari channel chat log.'],
           ['!srcpl <nama>', 'cari player langsung dari data server Minecraft.'],
           ['!geon <nama>', 'cek wallet Geon/Ether player dari bridge Minecraft.'],
+          ['!migrasi <lama> -> <baru>', 'preview dan confirm migrasi data player lama ke gamertag baru.'],
           ['!bonus <nama> <geon>', 'beri bonus Geon ke player dengan transparansi finance.'],
         ]),
         inline: false,

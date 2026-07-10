@@ -36,6 +36,7 @@ const EMBED_COLOR_TRANSFER = 0x27ae60;
 const EMBED_COLOR_BONUS = 0xf2c94c;
 const PLAYER_SELECT_PREFIX = 'mcplayer';
 const ORGANIZATION_SELECT_PREFIX = 'mcorg';
+const MIGRATION_BUTTON_PREFIX = 'mcmig';
 const QUERY_SELECT_COLLECTOR_MS = 2 * 60 * 1000;
 const VERIFY_BYPASS_GAMERTAGS = new Set(['xylofly', 'monoguraa']);
 
@@ -799,6 +800,207 @@ function buildCandidateButtons(prefix, sourceId, candidates = [], labelResolver,
     );
   });
   return row;
+}
+
+function buildMigrationButtonId(action, sourceId, index = '') {
+  return `${MIGRATION_BUTTON_PREFIX}:${action}:${sourceId}${index === '' ? '' : `:${index}`}`;
+}
+
+function parseMigrationButtonId(customId, sourceId) {
+  const raw = String(customId || '');
+  const prefix = `${MIGRATION_BUTTON_PREFIX}:`;
+  if (!raw.startsWith(prefix)) return null;
+  const parts = raw.slice(prefix.length).split(':');
+  const [action, id, indexRaw] = parts;
+  if (id !== sourceId) return null;
+  if (!['pick', 'confirm', 'cancel'].includes(action)) return null;
+  const index = indexRaw === undefined ? null : Number.parseInt(indexRaw, 10);
+  if (index !== null && (!Number.isFinite(index) || index < 0 || index > 4)) return null;
+  return { action, index };
+}
+
+function migrationCandidateName(candidate = {}) {
+  return cleanText(candidate.name || candidate.key || '-', 80) || '-';
+}
+
+function migrationCandidateKey(candidate = {}) {
+  return cleanText(candidate.key || candidate.name || '', 80);
+}
+
+function migrationSourcesText(candidate = {}, maxItems = 4) {
+  const sources = Array.isArray(candidate.sources) ? candidate.sources.map(item => cleanText(item, 60)).filter(Boolean) : [];
+  if (!sources.length) return '-';
+  return sources.length <= maxItems
+    ? sources.join(', ')
+    : `${sources.slice(0, maxItems).join(', ')}, +${sources.length - maxItems}`;
+}
+
+function migrationCandidateLine(candidate = {}, index = 0) {
+  const name = migrationCandidateName(candidate);
+  const key = migrationCandidateKey(candidate) || name;
+  const score = Math.max(0, Math.floor(Number(candidate.score) || 0));
+  const dataWeight = Math.max(0, Math.floor(Number(candidate.dataWeight) || 0));
+  return `${index + 1}. ${inlineCode(name, 56)} | key ${inlineCode(key, 56)} | score ${score} | bobot ${dataWeight} | ${migrationSourcesText(candidate)}`;
+}
+
+function migrationCandidateLines(candidates = []) {
+  const rows = Array.isArray(candidates) ? candidates.slice(0, 5) : [];
+  return rows.length ? rows.map(migrationCandidateLine).join('\n') : 'Tidak ada kandidat data lama.';
+}
+
+function migrationNewCandidateLines(candidates = []) {
+  const rows = Array.isArray(candidates) ? candidates.slice(0, 5) : [];
+  if (!rows.length) return '';
+  return rows
+    .map((candidate, index) => {
+      const name = cleanText(candidate.name || candidate.key || '-', 56) || '-';
+      const online = candidate.online ? 'online' : 'offline';
+      return `${index + 1}. ${inlineCode(name, 56)} | ${online}`;
+    })
+    .join('\n');
+}
+
+function migrationSectionLines(sections = []) {
+  const visible = Array.isArray(sections)
+    ? sections.filter(section => Number(section?.count || 0) > 0 || section?.ok === false).slice(0, 14)
+    : [];
+  if (!visible.length) return 'Tidak ada section yang berubah.';
+  return visible
+    .map(section => {
+      const label = cleanText(section.label || section.id || '-', 60) || '-';
+      const status = section.ok === false ? 'GAGAL' : formatNumber(section.count || 0);
+      const message = section.message ? ` (${cleanText(section.message, 120)})` : '';
+      return `- ${label}: ${status}${message}`;
+    })
+    .join('\n');
+}
+
+function buildMigrationPickComponents(sourceId, candidates = [], disabled = false) {
+  const pickRow = new ActionRowBuilder();
+  candidates.slice(0, 5).forEach((candidate, index) => {
+    pickRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(buildMigrationButtonId('pick', sourceId, index))
+        .setLabel(String(index + 1))
+        .setStyle(index === 0 ? ButtonStyle.Primary : ButtonStyle.Secondary)
+        .setDisabled(disabled)
+    );
+  });
+  const cancelRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(buildMigrationButtonId('cancel', sourceId))
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled)
+  );
+  return pickRow.components.length ? [pickRow, cancelRow] : [];
+}
+
+function buildMigrationConfirmComponents(sourceId, index = 0, disabled = false) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(buildMigrationButtonId('confirm', sourceId, index))
+        .setLabel('Confirm Migrasi')
+        .setStyle(ButtonStyle.Danger)
+        .setDisabled(disabled),
+      new ButtonBuilder()
+        .setCustomId(buildMigrationButtonId('cancel', sourceId))
+        .setLabel('Cancel')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(disabled)
+    ),
+  ];
+}
+
+function buildMigrationPreviewEmbed(record = {}, result = {}, selectedCandidate = null) {
+  const ok = result.ok !== false;
+  const candidates = Array.isArray(result.candidates) ? result.candidates.slice(0, 5) : [];
+  const newCandidatesText = migrationNewCandidateLines(result.newCandidates);
+  const embed = new EmbedBuilder()
+    .setColor(ok ? (selectedCandidate ? 0xf2c94c : EMBED_COLOR_INFO) : 0xe74c3c)
+    .setTitle(selectedCandidate ? 'Konfirmasi Migrasi Player' : 'Preview Migrasi Player')
+    .setDescription(
+      selectedCandidate
+        ? 'Cek ulang kandidat lama dan nama baru. Setelah confirm, data finance/home/land/rank/topup akan dipindahkan di BP.'
+        : (ok ? 'Pilih kandidat data lama yang benar sebelum confirm.' : `Preview gagal: \`${cleanText(result.code || 'unknown', 80)}\`.`)
+    )
+    .addFields(
+      { name: 'Query Lama', value: inlineCode(result.oldQuery || record.job?.oldQuery || '-', 80), inline: true },
+      { name: 'Nama Baru', value: inlineCode(result.newName || record.job?.newName || '-', 80), inline: true },
+      { name: 'Total Data Dikenal', value: formatNumber(result.totalKnown || 0), inline: true }
+    )
+    .setFooter({ text: `Ref ${record.id || record.job?.id || '-'}` })
+    .setTimestamp(new Date());
+
+  if (selectedCandidate) {
+    embed.addFields({
+      name: 'Kandidat Dipilih',
+      value: migrationCandidateLine(selectedCandidate, 0),
+      inline: false,
+    });
+  } else {
+    embed.addFields({
+      name: 'Kandidat Data Lama',
+      value: migrationCandidateLines(candidates).slice(0, 1024),
+      inline: false,
+    });
+  }
+
+  if (Array.isArray(result.readyFailures) && result.readyFailures.length) {
+    embed.addFields({
+      name: 'Sistem Belum Ready',
+      value: result.readyFailures.map(item => inlineCode(item, 40)).join(', ').slice(0, 1024),
+      inline: false,
+    });
+  }
+
+  if (newCandidatesText) {
+    embed.addFields({
+      name: 'Petunjuk Nama Baru',
+      value: newCandidatesText.slice(0, 1024),
+      inline: false,
+    });
+  }
+
+  return embed;
+}
+
+function buildMigrationQueuedEmbed(record = {}, candidate = {}, newName = '', job = {}) {
+  return new EmbedBuilder()
+    .setColor(EMBED_COLOR_INFO)
+    .setTitle('Migrasi Dikirim ke BP')
+    .setDescription(`${inlineCode(migrationCandidateKey(candidate) || migrationCandidateName(candidate), 80)} -> ${inlineCode(newName, 80)}`)
+    .setFooter({ text: `Apply Ref ${job?.id || '-'} | Preview Ref ${record.id || record.job?.id || '-'}` })
+    .setTimestamp(new Date());
+}
+
+function buildMigrationApplyEmbed(record = {}, result = {}) {
+  const ok = result.ok !== false;
+  const changed = Boolean(result.changed);
+  const color = ok ? (changed ? 0x27ae60 : 0xf2c94c) : 0xe74c3c;
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle(ok ? 'Migrasi Player Selesai' : 'Migrasi Player Gagal')
+    .setDescription(cleanText(result.message || result.code || 'Selesai.', 500))
+    .addFields(
+      { name: 'Dari', value: inlineCode(result.oldKey || record.job?.oldKey || '-', 80), inline: true },
+      { name: 'Ke', value: inlineCode(result.newName || result.newKey || record.job?.newName || '-', 80), inline: true },
+      { name: 'Legal Cache', value: result.legalCacheMoved ? 'Dipindahkan' : 'Tidak berubah', inline: true },
+      { name: 'Detail', value: migrationSectionLines(result.sections).slice(0, 1024), inline: false }
+    )
+    .setFooter({ text: `Ref ${record.id || record.job?.id || '-'}` })
+    .setTimestamp(new Date());
+
+  if (Array.isArray(result.warnings) && result.warnings.length) {
+    embed.addFields({
+      name: 'Warning',
+      value: result.warnings.map(item => inlineCode(item, 60)).join(', ').slice(0, 1024),
+      inline: false,
+    });
+  }
+
+  return embed;
 }
 
 function createTopupBridgeService({ registerStore, client = null }) {
@@ -1786,6 +1988,158 @@ function createTopupBridgeService({ registerStore, client = null }) {
     }).catch(() => {});
   }
 
+  async function replyMigrationLocked(interaction) {
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xe74c3c)
+          .setTitle('Tombol Terkunci')
+          .setDescription('Tombol migrasi ini hanya untuk admin yang menjalankan command.'),
+      ],
+      ephemeral: true,
+      allowedMentions: { parse: [], repliedUser: false },
+    }).catch(() => {});
+  }
+
+  function attachMigrationCollector(reply, record, result) {
+    const sourceId = record.id || record.job?.id || '';
+    const candidates = Array.isArray(result.candidates) ? result.candidates.slice(0, 5) : [];
+    if (!reply?.createMessageComponentCollector || !sourceId || !candidates.length) return;
+
+    const requesterId = String(record.context?.message?.author?.id || record.job?.requestedBy || '');
+    let selectedIndex = null;
+    let completed = false;
+    const collector = reply.createMessageComponentCollector({
+      time: QUERY_SELECT_COLLECTOR_MS,
+      filter: interaction => Boolean(parseMigrationButtonId(interaction.customId, sourceId)),
+    });
+
+    collector.on('collect', async interaction => {
+      const parsed = parseMigrationButtonId(interaction.customId, sourceId);
+      if (!parsed) return;
+
+      if (requesterId && String(interaction.user?.id || '') !== requesterId) {
+        await replyMigrationLocked(interaction);
+        return;
+      }
+
+      if (parsed.action === 'cancel') {
+        completed = true;
+        collector.stop('cancelled');
+        await interaction.update({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(0x95a5a6)
+              .setTitle('Migrasi Dibatalkan')
+              .setDescription('Tidak ada data player yang dipindahkan.')
+              .setFooter({ text: `Ref ${sourceId}` })
+              .setTimestamp(new Date()),
+          ],
+          components: selectedIndex === null
+            ? buildMigrationPickComponents(sourceId, candidates, true)
+            : buildMigrationConfirmComponents(sourceId, selectedIndex, true),
+          allowedMentions: { parse: [], repliedUser: false },
+        }).catch(() => {});
+        return;
+      }
+
+      if (parsed.action === 'pick') {
+        const candidate = candidates[parsed.index];
+        if (!candidate) {
+          await interaction.reply({
+            content: 'Kandidat migrasi tidak valid.',
+            ephemeral: true,
+            allowedMentions: { parse: [], repliedUser: false },
+          }).catch(() => {});
+          return;
+        }
+
+        selectedIndex = parsed.index;
+        await interaction.update({
+          embeds: [buildMigrationPreviewEmbed(record, result, candidate)],
+          components: buildMigrationConfirmComponents(sourceId, selectedIndex),
+          allowedMentions: { parse: [], repliedUser: false },
+        }).catch(() => {});
+        return;
+      }
+
+      if (parsed.action === 'confirm') {
+        const candidate = candidates[parsed.index];
+        if (!candidate) {
+          await interaction.reply({
+            content: 'Kandidat migrasi tidak valid.',
+            ephemeral: true,
+            allowedMentions: { parse: [], repliedUser: false },
+          }).catch(() => {});
+          return;
+        }
+
+        completed = true;
+        collector.stop('confirmed');
+        const newName = cleanText(result.newName || record.job?.newName || '', 80);
+        const job = enqueueBridgeQuery('player_migration_apply', {
+          oldKey: migrationCandidateKey(candidate),
+          oldName: migrationCandidateName(candidate),
+          newName,
+          requestedBy: interaction.user?.id || record.job?.requestedBy || '',
+          requestedByTag: interaction.user?.tag || interaction.user?.username || record.job?.requestedByTag || '',
+          previewRef: sourceId,
+        }, {
+          message: record.context?.message,
+          migration: {
+            oldKey: migrationCandidateKey(candidate),
+            oldName: migrationCandidateName(candidate),
+            newName,
+          },
+        });
+
+        await interaction.update({
+          embeds: [buildMigrationQueuedEmbed(record, candidate, newName, job)],
+          components: buildMigrationConfirmComponents(sourceId, parsed.index, true),
+          allowedMentions: { parse: [], repliedUser: false },
+        }).catch(() => {});
+        await interaction.followUp({
+          content: `Migrasi dikirim ke BP. Ref: \`${job.id}\``,
+          ephemeral: true,
+          allowedMentions: { parse: [], repliedUser: false },
+        }).catch(() => {});
+      }
+    });
+
+    collector.on('end', async () => {
+      if (completed) return;
+      await reply.edit({
+        components: selectedIndex === null
+          ? buildMigrationPickComponents(sourceId, candidates, true)
+          : buildMigrationConfirmComponents(sourceId, selectedIndex, true),
+      }).catch(() => {});
+    });
+  }
+
+  async function sendMigrationPreviewResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    const candidates = Array.isArray(result.candidates) ? result.candidates.slice(0, 5) : [];
+    const components = result.ok && candidates.length
+      ? buildMigrationPickComponents(record.id || record.job?.id || '', candidates)
+      : [];
+    const reply = await message.reply(noPingPayload({
+      embeds: [buildMigrationPreviewEmbed(record, result)],
+      components,
+    })).catch(() => null);
+    if (result.ok && candidates.length) attachMigrationCollector(reply, record, result);
+  }
+
+  async function sendMigrationApplyResult(record, result) {
+    const message = record.context?.message;
+    if (!message) return;
+
+    await message.reply(noPingPayload({
+      embeds: [buildMigrationApplyEmbed(record, result)],
+    })).catch(() => {});
+  }
+
   function playerNameFromTransferSide(side = {}, fallback = '-') {
     return cleanText(side.name || side.gamertag || side.key || fallback, 80) || fallback;
   }
@@ -1915,6 +2269,10 @@ function createTopupBridgeService({ registerStore, client = null }) {
       await sendWalletTransferResult(record, result);
     } else if (record.job.type === 'wallet_bonus') {
       await sendWalletBonusResult(record, result);
+    } else if (record.job.type === 'player_migration_preview') {
+      await sendMigrationPreviewResult(record, result);
+    } else if (record.job.type === 'player_migration_apply') {
+      await sendMigrationApplyResult(record, result);
     }
   }
 

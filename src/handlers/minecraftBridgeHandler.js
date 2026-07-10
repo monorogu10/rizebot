@@ -49,15 +49,72 @@ function normalizeSpaces(value) {
 
 function parseCommand(content) {
   const raw = normalizeSpaces(content);
-  const match = raw.match(/^!(verify|verifyme|verifme|veryfyme|mc-help|mcstatus|mcping|online|srcsrv|srcpl|geon|player|organisasi|organization|org|p|tf|transfer|bonus)(?:\s+(.+))?$/i);
+  const match = raw.match(/^!(verify|verifyme|verifme|veryfyme|mc-help|mcstatus|mcping|online|srcsrv|srcpl|geon|player|organisasi|organization|org|p|tf|transfer|bonus|migrasi|migration|migrate)(?:\s+(.+))?$/i);
   if (!match) return null;
   const command = match[1].toLowerCase();
   return {
     command: ['verify', 'verifme', 'veryfyme'].includes(command)
       ? 'verifyme'
-      : (command === 'srcpl' ? 'srcsrv' : (['organization', 'org'].includes(command) ? 'organisasi' : (command === 'transfer' ? 'tf' : command))),
+      : (command === 'srcpl'
+        ? 'srcsrv'
+        : (['organization', 'org'].includes(command)
+          ? 'organisasi'
+          : (command === 'transfer' ? 'tf' : (['migration', 'migrate'].includes(command) ? 'migrasi' : command)))),
     args: normalizeSpaces(match[2] || ''),
   };
+}
+
+function stripWrappingQuotes(value) {
+  const text = normalizeSpaces(value);
+  if (text.length >= 2) {
+    const first = text[0];
+    const last = text[text.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'") || (first === '`' && last === '`')) {
+      return normalizeSpaces(text.slice(1, -1));
+    }
+  }
+  return text;
+}
+
+function parseQuotedMigrationArgs(args) {
+  const values = [];
+  const re = /"([^"]+)"|'([^']+)'|`([^`]+)`/g;
+  let match = re.exec(args);
+  while (match) {
+    values.push(normalizeSpaces(match[1] || match[2] || match[3] || ''));
+    match = re.exec(args);
+  }
+  if (values.length < 2) return null;
+  return { oldName: values[0], newName: values[1] };
+}
+
+function parseMigrationArgs(args) {
+  const raw = normalizeSpaces(args);
+  if (!raw) return null;
+
+  const separated = raw.match(/^(.+?)\s*(?:->|=>|\|)\s*(.+)$/);
+  if (separated) {
+    const oldName = stripWrappingQuotes(separated[1]);
+    const newName = stripWrappingQuotes(separated[2]);
+    return oldName && newName ? { oldName, newName } : null;
+  }
+
+  const quoted = parseQuotedMigrationArgs(raw);
+  if (quoted?.oldName && quoted?.newName) return quoted;
+
+  const parts = raw.split(/\s+/g).filter(Boolean);
+  if (parts.length < 2) return null;
+  return {
+    oldName: stripWrappingQuotes(parts[0]),
+    newName: stripWrappingQuotes(parts.slice(1).join(' ')),
+  };
+}
+
+function isMinecraftAdmin(msg) {
+  const userId = String(msg?.author?.id || '').trim();
+  return isAdmin(msg?.member) ||
+    isBridgeAdmin(userId) ||
+    userId === String(MINECRAFT_REGISTER_RESET_ADMIN_ID);
 }
 
 function noPing(payload) {
@@ -436,6 +493,42 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
       }, {
         title: 'Bonus Geon',
         description: `Memberikan bonus **${bridge.formatNumber(bonus.amount)} Geon** ke player yang mendekati \`${bonus.target}\`.`,
+      });
+      return true;
+    }
+
+    if (parsed.command === 'migrasi') {
+      if (!isMinecraftAdmin(msg)) {
+        await replyNoPing(msg, buildCommandEmbed({
+          color: 0xe74c3c,
+          title: 'Command Admin',
+          description: 'Command `!migrasi` khusus admin.',
+        }));
+        return true;
+      }
+
+      const migration = parseMigrationArgs(parsed.args);
+      if (!migration) {
+        await replyNoPing(msg, buildCommandEmbed({
+          color: 0xe74c3c,
+          title: 'Format Migrasi',
+          description: [
+            'Format: `!migrasi <nama_lama> -> <nama_baru>`',
+            'Alternatif: `!migrasi "Nama Lama" "Nama Baru"`',
+            'Untuk nama tanpa spasi: `!migrasi Lama Baru`.',
+          ].join('\n'),
+        }));
+        return true;
+      }
+
+      await enqueueBridgeJobWithLoading(msg, bridge, 'player_migration_preview', {
+        oldQuery: migration.oldName,
+        newName: migration.newName,
+        requestedBy: msg.author.id,
+        requestedByTag: msg.author?.tag || msg.author?.username || '',
+      }, {
+        title: 'Preview Migrasi Player',
+        description: `Mencari data lama yang mendekati \`${migration.oldName}\`, untuk dipindah ke \`${migration.newName}\`.`,
       });
       return true;
     }

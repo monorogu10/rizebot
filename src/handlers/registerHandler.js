@@ -76,6 +76,20 @@ function parseRegisterCommand(content) {
   return normalizeGamertag(match[1] || '');
 }
 
+function userIdFromMentionOrId(value) {
+  const match = String(value || '').trim().match(/^<@!?(\d{5,32})>$|^(\d{5,32})$/);
+  return match ? (match[1] || match[2]) : '';
+}
+
+function parseSetRegisterGamertagCommand(content) {
+  const match = String(content || '').trim().match(/^!(?:setreg|set-reg|ganti-reg|gantireg|ubah-reg|ubahreg)\s+(\S+)\s+(.+)$/i);
+  if (!match) return null;
+  return {
+    userId: userIdFromMentionOrId(match[1]),
+    gamertag: normalizeGamertag(match[2] || ''),
+  };
+}
+
 function parseListCommand(content) {
   const match = String(content || '').trim().match(/^!(?:list|listreg|list-reg|registry|registrasi|pendaftaran)(?:\s+(.+))?$/i);
   if (!match) return null;
@@ -999,19 +1013,16 @@ async function handleRegisterCommand(msg, options) {
 
   const existing = registerStore.getUser(msg.author.id);
   if (existing?.status === 'approved') {
-    const duplicate = registerStore.findUserByGamertag?.(gamertag, msg.author.id);
-    if (duplicate) {
-      await replyNoPing(msg, `Gamertag \`${gamertag}\` sudah dipakai oleh user lain.`);
-      return true;
-    }
-
-    const updated = await registerStore.updateApprovedGamertag?.(
-      msg.author.id,
-      gamertag,
-      msg.author?.tag || msg.author?.username || ''
-    );
-    if (!updated || updated.duplicate || updated.notApproved) {
-      await replyNoPing(msg, 'Gagal memperbarui gamertag legal. Coba lagi atau hubungi admin.');
+    const currentGamertag = normalizeGamertag(existing.gamertag);
+    if (gamertagKey(currentGamertag) !== gamertagKey(gamertag)) {
+      await replyNoPing(
+        msg,
+        [
+          `Akun kamu sudah legal sebagai \`${currentGamertag || '-'}\`.`,
+          'Demi keamanan akun dan wallet, ganti gamertag legal tidak bisa dilakukan dengan `!reg` lagi.',
+          'Minta admin/interviewer review manual, lalu admin bisa pakai `!setreg @user <gamertag>` jika memang sah.',
+        ].join('\n')
+      );
       return true;
     }
 
@@ -1020,22 +1031,15 @@ async function handleRegisterCommand(msg, options) {
       legacyRoleId: pendingRoleId,
       rejectedRoleId,
     }).catch(err => {
-      console.error('Failed to refresh legal role after gamertag update:', err);
+      console.error('Failed to refresh legal role:', err);
       return false;
     });
-    const nicknameNote = await syncGamertagNickname(member, gamertag, 'approved gamertag update');
-
-    const oldText = updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(gamertag)
-      ? ` dari \`${updated.oldGamertag}\``
-      : '';
+    const nicknameNote = await syncGamertagNickname(member, currentGamertag || gamertag, 'approved gamertag refresh');
+    queueLegalAccessJob(options.bridge, 'approve', existing, msg.author.id, msg.author);
     await replyNoPing(
       msg,
-      `Gamertag legal kamu diperbarui${oldText} menjadi \`${gamertag}\`. Nickname Discord disync ke gamertag. Tidak perlu interview ulang. Relog Minecraft atau tunggu cek ulang akses.${nicknameNote}`
+      `Kamu sudah legal sebagai \`${currentGamertag || gamertag}\`. Role dan nickname disync ulang.${nicknameNote}`
     );
-    if (updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(gamertag)) {
-      queueLegalAccessJob(options.bridge, 'revoke', { gamertag: updated.oldGamertag }, msg.author.id, msg.author);
-    }
-    queueLegalAccessJob(options.bridge, 'approve', updated.entry, msg.author.id, msg.author);
     return true;
   }
   if (existing?.status === 'pending' && existing.interviewChannelId) {
@@ -1097,6 +1101,82 @@ async function handleRegisterCommand(msg, options) {
   await replyNoPing(
     msg,
     `Register diterima. Nickname Discord disync ke \`${gamertag}\`. Channel interview kamu: ${channelMention(channel.id)}.${nicknameNote}`
+  );
+  return true;
+}
+
+async function handleSetRegisterGamertagCommand(msg, options) {
+  const parsed = parseSetRegisterGamertagCommand(msg.content);
+  if (!parsed) return false;
+
+  if (!await isInterviewAdmin(msg)) {
+    await replyNoPing(msg, 'Command `!setreg` khusus admin/interviewer.');
+    return true;
+  }
+  if (!parsed.userId) {
+    await replyNoPing(msg, 'Format: `!setreg @user <gamertag_minecraft>`.');
+    return true;
+  }
+  if (!parsed.gamertag || !isValidGamertag(parsed.gamertag)) {
+    await replyNoPing(msg, 'Format gamertag invalid. Gunakan 3-32 huruf/angka/underscore/spasi.');
+    return true;
+  }
+  if (!await ensureRegisterStore(options.registerStore, msg.client)) {
+    await replyNoPing(msg, 'Sistem register belum aktif. Hubungi admin.');
+    return true;
+  }
+
+  const entry = options.registerStore.getUser(parsed.userId);
+  if (!entry?.gamertag) {
+    await replyNoPing(msg, `Data register untuk <@${parsed.userId}> tidak ditemukan.`);
+    return true;
+  }
+  if (entry.status !== 'approved' && entry.legal !== true) {
+    await replyNoPing(msg, `<@${parsed.userId}> belum berstatus legal/approved. Selesaikan interview biasa dulu.`);
+    return true;
+  }
+
+  const duplicate = options.registerStore.findUserByGamertag?.(parsed.gamertag, parsed.userId);
+  if (duplicate) {
+    await replyNoPing(msg, `Gamertag \`${parsed.gamertag}\` sudah dipakai oleh <@${duplicate.userId}>.`);
+    return true;
+  }
+
+  const member = await msg.guild.members.fetch(parsed.userId).catch(() => null);
+  const user = member?.user || await msg.client.users.fetch(parsed.userId).catch(() => null);
+  const updated = await options.registerStore.updateApprovedGamertag?.(
+    parsed.userId,
+    parsed.gamertag,
+    user?.tag || user?.username || entry.username || ''
+  );
+  if (!updated || updated.duplicate || updated.notApproved) {
+    await replyNoPing(msg, 'Gagal mengubah gamertag legal. Coba lagi atau cek data register.');
+    return true;
+  }
+
+  if (member) {
+    await moveMemberToCitizenRole(member, {
+      citizenRoleId: options.verifiedRoleId,
+      legacyRoleId: options.pendingRoleId,
+      rejectedRoleId: options.rejectedRoleId,
+    }).catch(err => {
+      console.error('Failed to refresh legal role after admin gamertag update:', err);
+      return false;
+    });
+    await syncGamertagNickname(member, parsed.gamertag, 'admin gamertag update');
+  }
+
+  if (updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(parsed.gamertag)) {
+    queueLegalAccessJob(options.bridge, 'revoke', { gamertag: updated.oldGamertag }, parsed.userId, msg.author);
+  }
+  queueLegalAccessJob(options.bridge, 'approve', updated.entry, parsed.userId, msg.author);
+
+  const oldText = updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(parsed.gamertag)
+    ? ` dari \`${updated.oldGamertag}\``
+    : '';
+  await replyNoPing(
+    msg,
+    `Gamertag legal <@${parsed.userId}> diubah${oldText} menjadi \`${updated.entry.gamertag}\` oleh admin. Cache akses Minecraft ikut disync.`
   );
   return true;
 }
@@ -1877,6 +1957,7 @@ function createRegisterHandler({
       };
 
       if (await handleRegisterCommand(msg, options)) return true;
+      if (await handleSetRegisterGamertagCommand(msg, options)) return true;
       if (await handleHelpCommand(msg, options)) return true;
       if (await handleSyncCitizenCommand(msg, options)) return true;
       if (await handleCompileCommand(msg, options)) return true;
