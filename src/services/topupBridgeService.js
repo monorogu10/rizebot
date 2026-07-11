@@ -36,8 +36,11 @@ const EMBED_COLOR_TRANSFER = 0x27ae60;
 const EMBED_COLOR_BONUS = 0xf2c94c;
 const PLAYER_SELECT_PREFIX = 'mcplayer';
 const ORGANIZATION_SELECT_PREFIX = 'mcorg';
+const ORGANIZATION_LIST_PREFIX = 'mcorglist';
+const ORGANIZATION_DETAIL_PREFIX = 'mcorgdetail';
 const MIGRATION_BUTTON_PREFIX = 'mcmig';
 const QUERY_SELECT_COLLECTOR_MS = 2 * 60 * 1000;
+const ORGANIZATION_PAGE_SIZE = 6;
 const VERIFY_BYPASS_GAMERTAGS = new Set(['xylofly', 'monoguraa']);
 
 function n(value) {
@@ -455,6 +458,16 @@ function organizationDivisions(organization = {}) {
   return Array.isArray(divisions) ? divisions : [];
 }
 
+function organizationStock(organization = {}) {
+  const stock = organization?.stock;
+  return stock && typeof stock === 'object' ? stock : null;
+}
+
+function organizationShareholders(organization = {}) {
+  const holders = organizationStock(organization)?.holders;
+  return Array.isArray(holders) ? holders : [];
+}
+
 function isLegalOrganizationMember(member = {}) {
   return Boolean(member.legal);
 }
@@ -529,6 +542,16 @@ function formatHoldingChildrenLines(children = [], limit = 8) {
   return cleanEmbedText(lines.join('\n'), 1024);
 }
 
+function formatShareholderLines(holders = [], limit = 10) {
+  const lines = holders.slice(0, limit).map((holder, index) => {
+    const name = cleanText(holder.name || holder.key || '-', 60) || '-';
+    const percent = Math.max(0, Number(holder.percent) || 0);
+    return `${index + 1}. ${inlineCode(name, 60)} | **${formatNumber(holder.shares)} saham** | ${percent.toFixed(2).replace(/\.00$/, '')}%`;
+  });
+  if (holders.length > limit) lines.push(`+${formatNumber(holders.length - limit)} pemegang lain`);
+  return cleanEmbedText(lines.join('\n'), 1024);
+}
+
 function formatOrganizationForPlayer(organization = null) {
   if (!organization) return 'Tidak ada organisasi/perusahaan legal terdaftar.';
   const holdingParent = organizationHoldingParent(organization);
@@ -583,14 +606,29 @@ function organizationSummaryLine(organization = {}, index = 0) {
   ].filter(Boolean).join(' | ');
 }
 
-function buildOrganizationListEmbed(record = {}, result = {}) {
+function organizationListPagination(result = {}, page = 1) {
   const entries = Array.isArray(result.entries)
     ? [...result.entries].sort((a, b) => (Number(b.cashGeon) || 0) - (Number(a.cashGeon) || 0))
     : [];
-  const lines = entries.slice(0, 15).map(organizationSummaryLine);
+  const totalPages = Math.max(1, Math.ceil(entries.length / ORGANIZATION_PAGE_SIZE));
+  const safePage = Math.min(Math.max(1, Math.floor(Number(page) || 1)), totalPages);
+  const startIndex = (safePage - 1) * ORGANIZATION_PAGE_SIZE;
+  return {
+    entries,
+    page: safePage,
+    totalPages,
+    startIndex,
+    items: entries.slice(startIndex, startIndex + ORGANIZATION_PAGE_SIZE),
+  };
+}
+
+function buildOrganizationListEmbed(record = {}, result = {}, page = 1) {
+  const pagination = organizationListPagination(result, page);
+  const lines = pagination.items.map((entry, index) => organizationSummaryLine(entry, pagination.startIndex + index));
   const footer = [
-    `Total ${formatNumber(result.total || entries.length)}`,
-    `Ditampilkan ${formatNumber(lines.length)}`,
+    `Halaman ${pagination.page}/${pagination.totalPages}`,
+    `Total ${formatNumber(result.total || pagination.entries.length)}`,
+    `Data ${formatNumber(pagination.entries.length)}`,
     `Ref ${record.id || record.job?.id || '-'}`,
   ].join(' | ');
 
@@ -600,6 +638,42 @@ function buildOrganizationListEmbed(record = {}, result = {}) {
     .setDescription(lines.join('\n') || 'Belum ada organisasi/perusahaan yang tercatat.')
     .setFooter({ text: footer })
     .setTimestamp(new Date());
+}
+
+function buildOrganizationListButtonId(sourceId, page) {
+  return `${ORGANIZATION_LIST_PREFIX}:${sourceId}:${Math.max(1, Math.floor(Number(page) || 1))}`;
+}
+
+function parseOrganizationListButtonId(customId, sourceId) {
+  const match = String(customId || '').match(new RegExp(`^${ORGANIZATION_LIST_PREFIX}:([^:]+):(\\d+)$`));
+  if (!match || match[1] !== String(sourceId || '')) return null;
+  const page = Math.max(1, Math.floor(Number(match[2]) || 1));
+  return { page };
+}
+
+function buildOrganizationListButtons(sourceId, page, totalPages, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(buildOrganizationListButtonId(sourceId, 1))
+      .setLabel('Pertama')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled || page <= 1),
+    new ButtonBuilder()
+      .setCustomId(buildOrganizationListButtonId(sourceId, Math.max(1, page - 1)))
+      .setLabel('Sebelumnya')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled || page <= 1),
+    new ButtonBuilder()
+      .setCustomId(buildOrganizationListButtonId(sourceId, Math.min(totalPages, page + 1)))
+      .setLabel('Berikutnya')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(disabled || page >= totalPages),
+    new ButtonBuilder()
+      .setCustomId(buildOrganizationListButtonId(sourceId, totalPages))
+      .setLabel('Terakhir')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled || page >= totalPages)
+  );
 }
 
 function buildOrganizationCandidateEmbed(record = {}, result = {}) {
@@ -620,13 +694,15 @@ function buildOrganizationCandidateEmbed(record = {}, result = {}) {
     .setTimestamp(new Date());
 }
 
-function buildOrganizationDetailEmbed(organization = {}, record = {}) {
+function buildOrganizationDetailEmbed(organization = {}, record = {}, view = 'overview') {
   const members = organizationMembers(organization);
   const legalMembers = members.filter(isLegalOrganizationMember);
   const otherMembers = members.filter(member => !isLegalOrganizationMember(member));
   const divisions = organizationDivisions(organization);
   const holdingParent = organizationHoldingParent(organization);
   const holdingChildren = organizationHoldingChildren(organization);
+  const stock = organizationStock(organization);
+  const shareholders = organizationShareholders(organization);
   const title = `${organizationTypeLabel(organization)}: ${organizationDisplayName(organization)}`;
   const description = [
     `Kas: **${formatNumber(organization.cashGeon)} Geon** | ${formatNumber(organization.cashEther)} Ether`,
@@ -639,7 +715,11 @@ function buildOrganizationDetailEmbed(organization = {}, record = {}) {
     .setColor(organization.isCompany ? 0x27ae60 : EMBED_COLOR_INFO)
     .setTitle(cleanText(title, 256))
     .setDescription(description)
-    .addFields(
+    .setFooter({ text: `Ref ${record.id || record.job?.id || '-'} | !organisasi ${organization.name || organization.id || ''}`.trim() })
+    .setTimestamp(new Date());
+
+  if (view === 'overview') {
+    embed.addFields(
       { name: 'Tipe', value: organizationTypeLabel(organization), inline: true },
       { name: 'Kas', value: formatOrganizationCash(organization), inline: true },
       {
@@ -650,46 +730,109 @@ function buildOrganizationDetailEmbed(organization = {}, record = {}) {
           `Divisi: ${formatNumber(divisions.length)}`,
         ].join('\n'),
         inline: true,
-      },
-      {
-        name: 'Anggota Legal',
-        value: legalMembers.length ? formatMemberLines(legalMembers, 12) : 'Belum ada anggota legal terdaftar.',
-        inline: false,
       }
-    )
-    .setFooter({ text: `Ref ${record.id || record.job?.id || '-'} | !organisasi ${organization.name || organization.id || ''}`.trim() })
-    .setTimestamp(new Date());
-
-  if (otherMembers.length) {
+    );
+    if (organization.isCompany) {
+      embed.addFields({
+        name: 'Status Bursa',
+        value: stock?.listed
+          ? [
+              `Listed | penawaran #${formatNumber(stock.offeringRound || 1)}`,
+              `${formatNumber(stock.publicShares)} / ${formatNumber(stock.totalShares)} saham publik`,
+              `Last ${formatNumber(stock.lastPriceGeon)} Geon | market cap ${formatNumber(stock.marketCapGeon)} Geon`,
+            ].join('\n')
+          : 'Belum IPO/listed.',
+        inline: false,
+      });
+    }
+  } else if (view === 'members') {
     embed.addFields({
-      name: 'Belum Legal / Belum Terhubung',
-      value: formatMemberLines(otherMembers, 8),
+      name: `Anggota Legal (${formatNumber(legalMembers.length)})`,
+      value: legalMembers.length ? formatMemberLines(legalMembers, 15) : 'Belum ada anggota legal terdaftar.',
       inline: false,
     });
-  }
-  if (divisions.length) {
-    embed.addFields({
-      name: 'Divisi Perusahaan',
-      value: formatDivisionLines(divisions, 8),
-      inline: false,
-    });
-  }
-  if (holdingParent) {
+    if (otherMembers.length) {
+      embed.addFields({
+        name: `Belum Legal / Belum Terhubung (${formatNumber(otherMembers.length)})`,
+        value: formatMemberLines(otherMembers, 10),
+        inline: false,
+      });
+    }
+    if (divisions.length) {
+      embed.addFields({
+        name: 'Divisi Perusahaan',
+        value: formatDivisionLines(divisions, 10),
+        inline: false,
+      });
+    }
+  } else if (view === 'stock') {
+    if (!stock?.listed) {
+      embed.addFields({ name: 'Bursa Saham', value: 'Perusahaan ini belum IPO/listed.', inline: false });
+    } else {
+      embed.addFields(
+        {
+          name: 'Ringkasan Saham',
+          value: [
+              `Total: **${formatNumber(stock.totalShares)} saham**`,
+              `Publik: ${formatNumber(stock.publicShares)} | terjual ${formatNumber(stock.soldPublicShares)} | sisa penawaran ${formatNumber(stock.availablePublicShares)}`,
+              `Penawaran #${formatNumber(stock.offeringRound || 1)}: ${formatNumber(stock.offeringPriceGeon)} Geon/saham`,
+              `Sedang listing: ${formatNumber(stock.listedShares)}`,
+            `Harga terakhir: **${formatNumber(stock.lastPriceGeon)} Geon/saham**`,
+            `Market cap: **${formatNumber(stock.marketCapGeon)} Geon**`,
+          ].join('\n'),
+          inline: false,
+        },
+        {
+          name: `Pemegang Saham Terbesar (top ${formatNumber(shareholders.length)} dari ${formatNumber(stock.holderCount || shareholders.length)})`,
+          value: shareholders.length ? formatShareholderLines(shareholders, 10) : 'Belum ada saham publik yang dimiliki player.',
+          inline: false,
+        }
+      );
+    }
+  } else if (view === 'holding') {
     embed.addFields({
       name: 'Holding Parent',
-      value: `${organizationDisplayName(holdingParent)}\n${holdingRelationText(holdingParent)}`,
-      inline: true,
+      value: holdingParent
+        ? `${organizationDisplayName(holdingParent)}\n${holdingRelationText(holdingParent)}`
+        : 'Tidak memiliki holding parent.',
+      inline: false,
     });
-  }
-  if (holdingChildren.length) {
     embed.addFields({
-      name: 'Anak / Afiliasi',
-      value: formatHoldingChildrenLines(holdingChildren, 8),
+      name: `Anak / Afiliasi (${formatNumber(holdingChildren.length)})`,
+      value: holdingChildren.length ? formatHoldingChildrenLines(holdingChildren, 10) : 'Tidak memiliki anak/afiliasi.',
       inline: false,
     });
   }
 
   return embed;
+}
+
+function buildOrganizationDetailButtonId(sourceId, view) {
+  return `${ORGANIZATION_DETAIL_PREFIX}:${sourceId}:${view}`;
+}
+
+function parseOrganizationDetailButtonId(customId, sourceId) {
+  const match = String(customId || '').match(new RegExp(`^${ORGANIZATION_DETAIL_PREFIX}:([^:]+):(overview|members|stock|holding)$`));
+  if (!match || match[1] !== String(sourceId || '')) return null;
+  return { view: match[2] };
+}
+
+function buildOrganizationDetailButtons(sourceId, organization = {}, activeView = 'overview', disabled = false) {
+  const stock = organizationStock(organization);
+  const hasHolding = Boolean(organizationHoldingParent(organization) || organizationHoldingChildren(organization).length);
+  const definitions = [
+    ['overview', 'Ringkasan'],
+    ['members', 'Anggota'],
+    ['stock', 'Saham'],
+    ['holding', 'Holding'],
+  ];
+  return new ActionRowBuilder().addComponents(definitions.map(([view, label]) =>
+    new ButtonBuilder()
+      .setCustomId(buildOrganizationDetailButtonId(sourceId, view))
+      .setLabel(label)
+      .setStyle(activeView === view ? ButtonStyle.Primary : ButtonStyle.Secondary)
+      .setDisabled(disabled || (view === 'stock' && !organization.isCompany && !stock) || (view === 'holding' && !hasHolding))
+  ));
 }
 
 function buildPlayerInfoEmbed({ record = {}, result = {}, registered = null, user = null }) {
@@ -1837,6 +1980,86 @@ function createTopupBridgeService({ registerStore, client = null }) {
     });
   }
 
+  async function rejectLockedOrganizationButton(interaction) {
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xe74c3c)
+          .setTitle('Tombol Terkunci')
+          .setDescription('Tombol ini hanya untuk user yang menjalankan command.'),
+      ],
+      ephemeral: true,
+      allowedMentions: { parse: [], repliedUser: false },
+    }).catch(() => {});
+  }
+
+  function isOrganizationButtonRequester(interaction, record) {
+    const requesterId = String(record.context?.message?.author?.id || record.job?.requestedBy || '');
+    return !requesterId || String(interaction.user?.id || '') === requesterId;
+  }
+
+  function attachOrganizationListCollector(reply, record, result) {
+    const sourceId = record.id || record.job?.id || '';
+    const initial = organizationListPagination(result, 1);
+    if (!reply?.createMessageComponentCollector || !sourceId || initial.totalPages <= 1) return;
+
+    let currentPage = 1;
+    const collector = reply.createMessageComponentCollector({
+      time: QUERY_SELECT_COLLECTOR_MS,
+      filter: interaction => Boolean(parseOrganizationListButtonId(interaction.customId, sourceId)),
+    });
+    collector.on('collect', async interaction => {
+      const parsed = parseOrganizationListButtonId(interaction.customId, sourceId);
+      if (!parsed) return;
+      if (!isOrganizationButtonRequester(interaction, record)) {
+        await rejectLockedOrganizationButton(interaction);
+        return;
+      }
+      const pagination = organizationListPagination(result, parsed.page);
+      currentPage = pagination.page;
+      await interaction.update({
+        embeds: [buildOrganizationListEmbed(record, result, currentPage)],
+        components: [buildOrganizationListButtons(sourceId, currentPage, pagination.totalPages)],
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => {});
+    });
+    collector.on('end', async () => {
+      await reply.edit({
+        components: [buildOrganizationListButtons(sourceId, currentPage, initial.totalPages, true)],
+      }).catch(() => {});
+    });
+  }
+
+  function attachOrganizationDetailCollector(reply, record, organization) {
+    const sourceId = record.id || record.job?.id || '';
+    if (!reply?.createMessageComponentCollector || !sourceId) return;
+
+    let currentView = 'overview';
+    const collector = reply.createMessageComponentCollector({
+      time: QUERY_SELECT_COLLECTOR_MS,
+      filter: interaction => Boolean(parseOrganizationDetailButtonId(interaction.customId, sourceId)),
+    });
+    collector.on('collect', async interaction => {
+      const parsed = parseOrganizationDetailButtonId(interaction.customId, sourceId);
+      if (!parsed) return;
+      if (!isOrganizationButtonRequester(interaction, record)) {
+        await rejectLockedOrganizationButton(interaction);
+        return;
+      }
+      currentView = parsed.view;
+      await interaction.update({
+        embeds: [buildOrganizationDetailEmbed(organization, record, currentView)],
+        components: [buildOrganizationDetailButtons(sourceId, organization, currentView)],
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => {});
+    });
+    collector.on('end', async () => {
+      await reply.edit({
+        components: [buildOrganizationDetailButtons(sourceId, organization, currentView, true)],
+      }).catch(() => {});
+    });
+  }
+
   async function sendWalletResult(record, result) {
     const message = record.context?.message;
     if (!message) return;
@@ -1922,9 +2145,16 @@ function createTopupBridgeService({ registerStore, client = null }) {
       return;
     }
 
-    await message.reply(noPingPayload({
-      embeds: [buildOrganizationListEmbed(record, result)],
-    })).catch(() => {});
+    const sourceId = record.id || record.job?.id || '';
+    const pagination = organizationListPagination(result, 1);
+    const components = pagination.totalPages > 1
+      ? [buildOrganizationListButtons(sourceId, pagination.page, pagination.totalPages)]
+      : [];
+    const reply = await message.reply(noPingPayload({
+      embeds: [buildOrganizationListEmbed(record, result, pagination.page)],
+      components,
+    })).catch(() => null);
+    attachOrganizationListCollector(reply, record, result);
   }
 
   async function sendOrganizationInfoResult(record, result) {
@@ -1948,9 +2178,13 @@ function createTopupBridgeService({ registerStore, client = null }) {
       return;
     }
 
-    await message.reply(noPingPayload({
-      embeds: [buildOrganizationDetailEmbed(result.organization || {}, record)],
-    })).catch(() => {});
+    const organization = result.organization || {};
+    const sourceId = record.id || record.job?.id || '';
+    const reply = await message.reply(noPingPayload({
+      embeds: [buildOrganizationDetailEmbed(organization, record, 'overview')],
+      components: [buildOrganizationDetailButtons(sourceId, organization, 'overview')],
+    })).catch(() => null);
+    attachOrganizationDetailCollector(reply, record, organization);
   }
 
   async function sendPingResult(record, result) {

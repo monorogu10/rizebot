@@ -426,7 +426,7 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
       const jobType = parsed.args ? 'organization_info' : 'organization_search';
       await enqueueBridgeJobWithLoading(msg, bridge, jobType, {
         query: parsed.args,
-        limit: parsed.args ? 5 : 15,
+        limit: parsed.args ? 5 : 50,
         requestedBy: msg.author.id,
       }, {
         title: parsed.args ? 'Cek Detail Organisasi' : 'Daftar Organisasi & Perusahaan',
