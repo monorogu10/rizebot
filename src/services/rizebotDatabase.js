@@ -262,6 +262,42 @@ function createRizebotDatabase({
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
       VALUES (3, datetime('now'));
     `);
+
+    const versionColumns = new Set(connection.prepare('PRAGMA table_info(law_versions)').all().map(row => String(row.name)));
+    if (!versionColumns.has('revision_status')) {
+      connection.exec("ALTER TABLE law_versions ADD COLUMN revision_status TEXT NOT NULL DEFAULT 'PUBLISHED';");
+    }
+    if (!versionColumns.has('base_version')) {
+      connection.exec('ALTER TABLE law_versions ADD COLUMN base_version INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (!versionColumns.has('updated_at')) {
+      connection.exec("ALTER TABLE law_versions ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';");
+    }
+    if (!versionColumns.has('published_at')) {
+      connection.exec('ALTER TABLE law_versions ADD COLUMN published_at TEXT;');
+    }
+    const paragraphColumns = new Set(connection.prepare('PRAGMA table_info(law_paragraphs)').all().map(row => String(row.name)));
+    if (!paragraphColumns.has('paragraph_status')) {
+      connection.exec("ALTER TABLE law_paragraphs ADD COLUMN paragraph_status TEXT NOT NULL DEFAULT 'ACTIVE';");
+    }
+    if (!paragraphColumns.has('repeal_note')) {
+      connection.exec("ALTER TABLE law_paragraphs ADD COLUMN repeal_note TEXT NOT NULL DEFAULT '';");
+    }
+    connection.exec(`
+      UPDATE law_versions SET updated_at = created_at WHERE updated_at = '';
+      UPDATE law_versions SET published_at = created_at
+      WHERE revision_status = 'PUBLISHED' AND published_at IS NULL;
+      UPDATE law_versions SET revision_status = 'DRAFT'
+      WHERE law_id IN (SELECT id FROM laws WHERE status = 'DRAFT');
+      UPDATE law_versions SET revision_status = 'ARCHIVED'
+      WHERE law_id IN (SELECT id FROM laws WHERE status = 'ARCHIVED');
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_law_versions_one_draft
+      ON law_versions(law_id) WHERE revision_status = 'DRAFT';
+      CREATE INDEX IF NOT EXISTS idx_law_versions_state
+      ON law_versions(law_id, revision_status, version_number DESC);
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+      VALUES (4, datetime('now'));
+    `);
   }
 
   function integrityCheck() {
@@ -884,17 +920,25 @@ function createRizebotDatabase({
         id: Number(paragraph.id),
         number: Number(paragraph.paragraph_number),
         content: String(paragraph.content),
+        status: String(paragraph.paragraph_status || 'ACTIVE'),
+        repealNote: String(paragraph.repeal_note || ''),
       })),
     }));
     const versions = db.prepare(`
-      SELECT version_number, change_note, created_by, created_by_name, created_at
-      FROM law_versions WHERE law_id = ? ORDER BY version_number DESC
+      SELECT version_number, change_note, created_by, created_by_name, created_at,
+             revision_status, base_version, updated_at, published_at
+      FROM law_versions WHERE law_id = ? AND revision_status = 'PUBLISHED'
+      ORDER BY version_number DESC
     `).all(Number(law.id)).map(row => ({
       version: Number(row.version_number),
       changeNote: String(row.change_note || ''),
       createdBy: String(row.created_by),
       createdByName: String(row.created_by_name),
       createdAt: String(row.created_at),
+      status: String(row.revision_status || 'PUBLISHED'),
+      baseVersion: Number(row.base_version || 0),
+      updatedAt: String(row.updated_at || row.created_at),
+      publishedAt: row.published_at ? String(row.published_at) : null,
     }));
     return {
       id: Number(law.id),
@@ -905,6 +949,11 @@ function createRizebotDatabase({
       status: String(law.status),
       version: Number(version.version_number),
       currentVersion: Number(law.current_version),
+      revisionStatus: String(version.revision_status || 'PUBLISHED'),
+      baseVersion: Number(version.base_version || 0),
+      versionCreatedAt: String(version.created_at),
+      versionUpdatedAt: String(version.updated_at || version.created_at),
+      versionPublishedAt: version.published_at ? String(version.published_at) : null,
       changeNote: String(version.change_note || ''),
       createdBy: String(law.created_by),
       createdByName: String(law.created_by_name),
@@ -941,7 +990,9 @@ function createRizebotDatabase({
           SELECT 1 FROM law_versions lv
           JOIN law_articles la ON la.version_id = lv.id
           JOIN law_paragraphs lp ON lp.article_id = la.id
-          WHERE lv.law_id = laws.id AND lower(lp.content) LIKE ?
+          WHERE lv.law_id = laws.id
+            ${includeDraft ? '' : "AND lv.revision_status = 'PUBLISHED'"}
+            AND lower(lp.content) LIKE ?
         )
       )`);
       params.push(`%${cleanQuery}%`, `%${cleanQuery}%`, cleanQuery, cleanQuery, `%${cleanQuery}%`);
@@ -994,7 +1045,9 @@ function createRizebotDatabase({
     }
     if (!row) return null;
     if (!includeDraft && (row.status === 'DRAFT' || row.status === 'ARCHIVED')) return null;
-    return lawVersionDocument(row.id, version || row.current_version);
+    const document = lawVersionDocument(row.id, version || row.current_version);
+    if (!includeDraft && document?.revisionStatus !== 'PUBLISHED') return null;
+    return document;
   }
 
   function insertLawAudit(lawId, action, actor, detail = '') {
@@ -1003,6 +1056,104 @@ function createRizebotDatabase({
       INSERT INTO law_audit_logs(law_id, action, actor_id, actor_name, detail, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(Number(lawId) || null, String(action), who.id, who.name, cleanLawText(detail, 1000), new Date().toISOString());
+  }
+
+  function draftVersionRow(lawId) {
+    return ensureOpen().prepare(`
+      SELECT * FROM law_versions
+      WHERE law_id = ? AND revision_status = 'DRAFT'
+      ORDER BY version_number DESC LIMIT 1
+    `).get(Number(lawId));
+  }
+
+  function ensureEditableLawVersion(lawId) {
+    const law = ensureOpen().prepare('SELECT * FROM laws WHERE id = ?').get(Number(lawId));
+    if (!law || law.status === 'ARCHIVED' || law.status === 'REVOKED') {
+      throw new Error('Draft UU tidak ditemukan, diarsipkan, atau UU sudah dicabut');
+    }
+    const version = draftVersionRow(law.id);
+    if (!version) throw new Error('Draft yang dapat diedit tidak ditemukan');
+    return { law, version };
+  }
+
+  function getLawRevisionDraft(identifier, { byId = false } = {}) {
+    const published = getLaw(identifier, { byId });
+    if (!published || published.status === 'REVOKED') return null;
+    const version = draftVersionRow(published.id);
+    if (!version || Number(version.version_number) <= Number(published.currentVersion)) return null;
+    return lawVersionDocument(published.id, version.version_number);
+  }
+
+  function listLawRevisionDrafts({ creatorId = '', limit = 100 } = {}) {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(Number(limit) || 100)));
+    const params = [];
+    const creator = creatorId ? 'AND lv.created_by = ?' : '';
+    if (creatorId) params.push(String(creatorId));
+    return ensureOpen().prepare(`
+      SELECT lv.law_id, lv.version_number
+      FROM law_versions lv
+      JOIN laws l ON l.id = lv.law_id
+      WHERE lv.revision_status = 'DRAFT' AND l.status IN ('ACTIVE', 'AMENDED') ${creator}
+      ORDER BY lv.updated_at DESC, lv.id DESC LIMIT ${safeLimit}
+    `).all(...params).map(row => lawVersionDocument(row.law_id, row.version_number)).filter(Boolean);
+  }
+
+  function createLawRevisionDraft(identifier, note, actor = {}) {
+    const current = getLaw(identifier);
+    if (!current || current.status === 'REVOKED') throw new Error('UU aktif tidak ditemukan atau sudah dicabut');
+    const existing = draftVersionRow(current.id);
+    if (existing) {
+      if (Number(existing.version_number) > Number(current.currentVersion)) {
+        return lawVersionDocument(current.id, existing.version_number);
+      }
+      throw new Error('UU ini memiliki draft yang tidak valid; periksa database sebelum melanjutkan');
+    }
+    const body = cleanLawText(note, 1800);
+    if (!body) throw new Error('Alasan/catatan revisi tidak boleh kosong');
+    const who = lawActor(actor);
+    if (!who.id) throw new Error('Identitas pembuat revisi tidak valid');
+    const nextVersion = current.currentVersion + 1;
+    const now = new Date().toISOString();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const versionId = Number(db.prepare(`
+        INSERT INTO law_versions(
+          law_id, version_number, title, change_note, created_by, created_by_name, created_at,
+          revision_status, base_version, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)
+      `).run(current.id, nextVersion, current.title, body, who.id, who.name, now, current.currentVersion, now).lastInsertRowid);
+      for (const article of current.articles) {
+        const articleId = Number(db.prepare(`
+          INSERT INTO law_articles(version_id, article_number, heading, position) VALUES (?, ?, ?, ?)
+        `).run(versionId, article.number, article.heading, article.number).lastInsertRowid);
+        for (const paragraph of article.paragraphs) {
+          db.prepare(`
+            INSERT INTO law_paragraphs(
+              article_id, paragraph_number, content, position, paragraph_status, repeal_note
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            articleId,
+            paragraph.number,
+            paragraph.content,
+            paragraph.number,
+            paragraph.status || 'ACTIVE',
+            paragraph.repealNote || ''
+          );
+        }
+      }
+      insertLawAudit(current.id, 'START_REVISION_DRAFT', who, `Versi ${nextVersion} dari versi ${current.currentVersion}: ${body}`);
+      db.prepare('UPDATE laws SET updated_at = ? WHERE id = ?').run(now, current.id);
+      db.exec('COMMIT;');
+    } catch (error) {
+      db.exec('ROLLBACK;');
+      const racedDraft = draftVersionRow(current.id);
+      if (racedDraft && Number(racedDraft.version_number) > Number(current.currentVersion)) {
+        return lawVersionDocument(current.id, racedDraft.version_number);
+      }
+      throw error;
+    }
+    exportLawsJsonBackup();
+    return lawVersionDocument(current.id, nextVersion);
   }
 
   function createLawDraft({ note, title = '', actor = {} }) {
@@ -1021,9 +1172,11 @@ function createRizebotDatabase({
         VALUES (?, 'DRAFT', 1, ?, ?, ?, ?)
       `).run(safeTitle, who.id, who.name, now, now).lastInsertRowid);
       const versionId = Number(connection.prepare(`
-        INSERT INTO law_versions(law_id, version_number, title, change_note, created_by, created_by_name, created_at)
-        VALUES (?, 1, ?, 'Draft awal', ?, ?, ?)
-      `).run(lawId, safeTitle, who.id, who.name, now).lastInsertRowid);
+        INSERT INTO law_versions(
+          law_id, version_number, title, change_note, created_by, created_by_name, created_at,
+          revision_status, base_version, updated_at
+        ) VALUES (?, 1, ?, 'Draft awal', ?, ?, ?, 'DRAFT', 0, ?)
+      `).run(lawId, safeTitle, who.id, who.name, now, now).lastInsertRowid);
       const articleId = Number(connection.prepare(`
         INSERT INTO law_articles(version_id, article_number, heading, position)
         VALUES (?, 1, 'Ketentuan', 1)
@@ -1049,16 +1202,17 @@ function createRizebotDatabase({
   }
 
   function updateLawDraftTitle(lawId, title, actor = {}) {
-    const law = ensureDraftLaw(lawId);
+    const { law, version } = ensureEditableLawVersion(lawId);
     const safeTitle = cleanLawText(title, 160);
     if (!safeTitle) throw new Error('Judul UU tidak boleh kosong');
     const who = lawActor(actor);
     const now = new Date().toISOString();
     db.exec('BEGIN IMMEDIATE;');
     try {
-      db.prepare('UPDATE laws SET title = ?, updated_at = ? WHERE id = ?').run(safeTitle, now, law.id);
-      db.prepare('UPDATE law_versions SET title = ? WHERE law_id = ? AND version_number = ?')
-        .run(safeTitle, law.id, law.current_version);
+      if (law.status === 'DRAFT') db.prepare('UPDATE laws SET title = ?, updated_at = ? WHERE id = ?').run(safeTitle, now, law.id);
+      else db.prepare('UPDATE laws SET updated_at = ? WHERE id = ?').run(now, law.id);
+      db.prepare('UPDATE law_versions SET title = ?, updated_at = ? WHERE id = ?')
+        .run(safeTitle, now, version.id);
       insertLawAudit(law.id, 'UPDATE_TITLE', who, safeTitle);
       db.exec('COMMIT;');
     } catch (error) {
@@ -1066,15 +1220,13 @@ function createRizebotDatabase({
       throw error;
     }
     exportLawsJsonBackup();
-    return lawVersionDocument(law.id, law.current_version);
+    return lawVersionDocument(law.id, version.version_number);
   }
 
   function addLawParagraph(lawId, content, actor = {}, articleNumber = undefined) {
-    const law = ensureDraftLaw(lawId);
+    const { law, version } = ensureEditableLawVersion(lawId);
     const body = cleanLawText(content, 1800);
     if (!body) throw new Error('Isi Ayat tidak boleh kosong');
-    const version = db.prepare('SELECT id FROM law_versions WHERE law_id = ? AND version_number = ?')
-      .get(law.id, law.current_version);
     const article = articleNumber
       ? db.prepare('SELECT * FROM law_articles WHERE version_id = ? AND article_number = ?').get(version.id, Number(articleNumber))
       : db.prepare('SELECT * FROM law_articles WHERE version_id = ? ORDER BY article_number DESC LIMIT 1').get(version.id);
@@ -1085,7 +1237,9 @@ function createRizebotDatabase({
     try {
       db.prepare('INSERT INTO law_paragraphs(article_id, paragraph_number, content, position) VALUES (?, ?, ?, ?)')
         .run(article.id, next, body, next);
-      db.prepare('UPDATE laws SET updated_at = ? WHERE id = ?').run(new Date().toISOString(), law.id);
+      const now = new Date().toISOString();
+      db.prepare('UPDATE laws SET updated_at = ? WHERE id = ?').run(now, law.id);
+      db.prepare('UPDATE law_versions SET updated_at = ? WHERE id = ?').run(now, version.id);
       insertLawAudit(law.id, 'ADD_PARAGRAPH', actor, `Pasal ${article.article_number} Ayat (${next})`);
       db.exec('COMMIT;');
     } catch (error) {
@@ -1093,15 +1247,13 @@ function createRizebotDatabase({
       throw error;
     }
     exportLawsJsonBackup();
-    return lawVersionDocument(law.id, law.current_version);
+    return lawVersionDocument(law.id, version.version_number);
   }
 
   function addLawArticle(lawId, { heading = '', content = '' } = {}, actor = {}) {
-    const law = ensureDraftLaw(lawId);
+    const { law, version } = ensureEditableLawVersion(lawId);
     const body = cleanLawText(content, 1800);
     if (!body) throw new Error('Isi Pasal tidak boleh kosong');
-    const version = db.prepare('SELECT id FROM law_versions WHERE law_id = ? AND version_number = ?')
-      .get(law.id, law.current_version);
     const next = Number(db.prepare('SELECT COALESCE(MAX(article_number), 0) + 1 AS n FROM law_articles WHERE version_id = ?')
       .get(version.id).n);
     db.exec('BEGIN IMMEDIATE;');
@@ -1111,7 +1263,9 @@ function createRizebotDatabase({
       `).run(version.id, next, cleanLawText(heading, 120), next).lastInsertRowid);
       db.prepare('INSERT INTO law_paragraphs(article_id, paragraph_number, content, position) VALUES (?, 1, ?, 1)')
         .run(articleId, body);
-      db.prepare('UPDATE laws SET updated_at = ? WHERE id = ?').run(new Date().toISOString(), law.id);
+      const now = new Date().toISOString();
+      db.prepare('UPDATE laws SET updated_at = ? WHERE id = ?').run(now, law.id);
+      db.prepare('UPDATE law_versions SET updated_at = ? WHERE id = ?').run(now, version.id);
       insertLawAudit(law.id, 'ADD_ARTICLE', actor, `Pasal ${next}`);
       db.exec('COMMIT;');
     } catch (error) {
@@ -1119,7 +1273,90 @@ function createRizebotDatabase({
       throw error;
     }
     exportLawsJsonBackup();
-    return lawVersionDocument(law.id, law.current_version);
+    return lawVersionDocument(law.id, version.version_number);
+  }
+
+  function updateLawArticleHeading(lawId, articleNumber, heading = '', actor = {}) {
+    const { law, version } = ensureEditableLawVersion(lawId);
+    const article = db.prepare('SELECT * FROM law_articles WHERE version_id = ? AND article_number = ?')
+      .get(version.id, Number(articleNumber));
+    if (!article) throw new Error('Pasal tujuan tidak ditemukan');
+    const safeHeading = cleanLawText(heading, 120);
+    const now = new Date().toISOString();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.prepare('UPDATE law_articles SET heading = ? WHERE id = ?').run(safeHeading, article.id);
+      db.prepare('UPDATE law_versions SET updated_at = ? WHERE id = ?').run(now, version.id);
+      db.prepare('UPDATE laws SET updated_at = ? WHERE id = ?').run(now, law.id);
+      insertLawAudit(law.id, 'UPDATE_ARTICLE_HEADING', actor, `Pasal ${article.article_number}: ${safeHeading || '(tanpa judul)'}`);
+      db.exec('COMMIT;');
+    } catch (error) {
+      db.exec('ROLLBACK;');
+      throw error;
+    }
+    exportLawsJsonBackup();
+    return lawVersionDocument(law.id, version.version_number);
+  }
+
+  function updateLawParagraph(lawId, articleNumber, paragraphNumber, content, reason = '', actor = {}) {
+    const { law, version } = ensureEditableLawVersion(lawId);
+    const body = cleanLawText(content, 1800);
+    const safeReason = cleanLawText(reason, 500);
+    if (!body) throw new Error('Isi Ayat baru tidak boleh kosong');
+    if (!safeReason) throw new Error('Alasan perubahan Ayat wajib diisi');
+    const paragraph = db.prepare(`
+      SELECT lp.*, la.article_number FROM law_paragraphs lp
+      JOIN law_articles la ON la.id = lp.article_id
+      WHERE la.version_id = ? AND la.article_number = ? AND lp.paragraph_number = ?
+    `).get(version.id, Number(articleNumber), Number(paragraphNumber));
+    if (!paragraph) throw new Error('Ayat tujuan tidak ditemukan pada Pasal ini');
+    const now = new Date().toISOString();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.prepare("UPDATE law_paragraphs SET content = ?, paragraph_status = 'ACTIVE', repeal_note = '' WHERE id = ?")
+        .run(body, paragraph.id);
+      db.prepare('UPDATE law_versions SET updated_at = ? WHERE id = ?').run(now, version.id);
+      db.prepare('UPDATE laws SET updated_at = ? WHERE id = ?').run(now, law.id);
+      insertLawAudit(law.id, 'UPDATE_PARAGRAPH', actor, `Pasal ${articleNumber} Ayat (${paragraphNumber}): ${safeReason}`);
+      db.exec('COMMIT;');
+    } catch (error) {
+      db.exec('ROLLBACK;');
+      throw error;
+    }
+    exportLawsJsonBackup();
+    return lawVersionDocument(law.id, version.version_number);
+  }
+
+  function setLawParagraphRepealed(lawId, articleNumber, paragraphNumber, { repealed = true, reason = '' } = {}, actor = {}) {
+    const { law, version } = ensureEditableLawVersion(lawId);
+    const safeReason = cleanLawText(reason, 500);
+    if (!safeReason) throw new Error(`Alasan ${repealed ? 'pencabutan' : 'pemulihan'} Ayat wajib diisi`);
+    const paragraph = db.prepare(`
+      SELECT lp.*, la.article_number FROM law_paragraphs lp
+      JOIN law_articles la ON la.id = lp.article_id
+      WHERE la.version_id = ? AND la.article_number = ? AND lp.paragraph_number = ?
+    `).get(version.id, Number(articleNumber), Number(paragraphNumber));
+    if (!paragraph) throw new Error('Ayat tujuan tidak ditemukan pada Pasal ini');
+    const now = new Date().toISOString();
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.prepare('UPDATE law_paragraphs SET paragraph_status = ?, repeal_note = ? WHERE id = ?')
+        .run(repealed ? 'REPEALED' : 'ACTIVE', repealed ? safeReason : '', paragraph.id);
+      db.prepare('UPDATE law_versions SET updated_at = ? WHERE id = ?').run(now, version.id);
+      db.prepare('UPDATE laws SET updated_at = ? WHERE id = ?').run(now, law.id);
+      insertLawAudit(
+        law.id,
+        repealed ? 'REPEAL_PARAGRAPH' : 'RESTORE_PARAGRAPH',
+        actor,
+        `Pasal ${articleNumber} Ayat (${paragraphNumber}): ${safeReason}`
+      );
+      db.exec('COMMIT;');
+    } catch (error) {
+      db.exec('ROLLBACK;');
+      throw error;
+    }
+    exportLawsJsonBackup();
+    return lawVersionDocument(law.id, version.version_number);
   }
 
   function publishLaw(lawId, actor = {}) {
@@ -1137,6 +1374,10 @@ function createRizebotDatabase({
           published_by = ?, published_by_name = ?, published_at = ?, effective_at = ?, updated_at = ?
         WHERE id = ?
       `).run(code, nextNumber, year, who.id, who.name, now, now, now, law.id);
+      db.prepare(`
+        UPDATE law_versions SET revision_status = 'PUBLISHED', published_at = ?, updated_at = ?
+        WHERE law_id = ? AND version_number = ?
+      `).run(now, now, law.id, law.current_version);
       insertLawAudit(law.id, 'PUBLISH', who, code);
       db.exec('COMMIT;');
     } catch (error) {
@@ -1153,6 +1394,8 @@ function createRizebotDatabase({
     db.exec('BEGIN IMMEDIATE;');
     try {
       db.prepare("UPDATE laws SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now, law.id);
+      db.prepare("UPDATE law_versions SET revision_status = 'ARCHIVED', updated_at = ? WHERE law_id = ? AND revision_status = 'DRAFT'")
+        .run(now, law.id);
       insertLawAudit(law.id, 'ARCHIVE_DRAFT', actor, 'Draft dibatalkan');
       db.exec('COMMIT;');
     } catch (error) {
@@ -1164,46 +1407,109 @@ function createRizebotDatabase({
   }
 
   function reviseLaw(identifier, note, actor = {}) {
-    const current = getLaw(identifier);
-    if (!current || current.status === 'REVOKED') throw new Error('UU aktif tidak ditemukan atau sudah dicabut');
-    const body = cleanLawText(note, 1800);
-    if (!body) throw new Error('Catatan revisi tidak boleh kosong');
+    return createLawRevisionDraft(identifier, note, actor);
+  }
+
+  function lawRevisionDiff(lawId, draftVersion = undefined) {
+    const draftRow = draftVersion
+      ? db.prepare("SELECT * FROM law_versions WHERE law_id = ? AND version_number = ? AND revision_status = 'DRAFT'")
+        .get(Number(lawId), Number(draftVersion))
+      : draftVersionRow(lawId);
+    if (!draftRow) throw new Error('Draft revisi tidak ditemukan');
+    const draft = lawVersionDocument(lawId, draftRow.version_number);
+    const baseNumber = Number(draftRow.base_version || 0);
+    const base = baseNumber ? lawVersionDocument(lawId, baseNumber) : null;
+    const changes = [];
+    const baseArticles = new Map((base?.articles || []).map(article => [article.number, article]));
+    const draftArticles = new Map(draft.articles.map(article => [article.number, article]));
+    for (const article of draft.articles) {
+      const beforeArticle = baseArticles.get(article.number);
+      if (!beforeArticle) {
+        changes.push({ type: 'ADD_ARTICLE', article: article.number, heading: article.heading, content: article.paragraphs });
+        continue;
+      }
+      if (beforeArticle.heading !== article.heading) {
+        changes.push({ type: 'UPDATE_ARTICLE_HEADING', article: article.number, before: beforeArticle.heading, after: article.heading });
+      }
+      const beforeParagraphs = new Map(beforeArticle.paragraphs.map(paragraph => [paragraph.number, paragraph]));
+      for (const paragraph of article.paragraphs) {
+        const before = beforeParagraphs.get(paragraph.number);
+        if (!before) {
+          changes.push({ type: 'ADD_PARAGRAPH', article: article.number, paragraph: paragraph.number, after: paragraph.content });
+        } else if (
+          before.content !== paragraph.content || before.status !== paragraph.status ||
+          before.repealNote !== paragraph.repealNote
+        ) {
+          changes.push({
+            type: paragraph.status === 'REPEALED' && before.status !== 'REPEALED' ? 'REPEAL_PARAGRAPH' : 'UPDATE_PARAGRAPH',
+            article: article.number,
+            paragraph: paragraph.number,
+            before: before.content,
+            after: paragraph.content,
+            beforeStatus: before.status,
+            afterStatus: paragraph.status,
+            note: paragraph.repealNote,
+          });
+        }
+      }
+    }
+    for (const article of base?.articles || []) {
+      if (!draftArticles.has(article.number)) changes.push({ type: 'REMOVE_ARTICLE', article: article.number });
+    }
+    if (base && base.title !== draft.title) changes.unshift({ type: 'UPDATE_TITLE', before: base.title, after: draft.title });
+    return { lawId: Number(lawId), baseVersion: baseNumber, draftVersion: Number(draftRow.version_number), changes };
+  }
+
+  function publishLawRevisionDraft(lawId, actor = {}) {
+    const { law, version } = ensureEditableLawVersion(lawId);
+    if (!['ACTIVE', 'AMENDED'].includes(String(law.status))) throw new Error('UU ini bukan UU aktif yang dapat direvisi');
+    if (Number(version.version_number) <= Number(law.current_version)) throw new Error('Versi ini bukan draft revisi');
+    const diff = lawRevisionDiff(law.id, version.version_number);
+    if (!diff.changes.length) throw new Error('Draft revisi belum memiliki perubahan isi');
     const who = lawActor(actor);
-    const nextVersion = current.currentVersion + 1;
     const now = new Date().toISOString();
     db.exec('BEGIN IMMEDIATE;');
     try {
-      const versionId = Number(db.prepare(`
-        INSERT INTO law_versions(law_id, version_number, title, change_note, created_by, created_by_name, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(current.id, nextVersion, current.title, body, who.id, who.name, now).lastInsertRowid);
-      for (const article of current.articles) {
-        const articleId = Number(db.prepare(`
-          INSERT INTO law_articles(version_id, article_number, heading, position) VALUES (?, ?, ?, ?)
-        `).run(versionId, article.number, article.heading, article.number).lastInsertRowid);
-        for (const paragraph of article.paragraphs) {
-          db.prepare(`
-            INSERT INTO law_paragraphs(article_id, paragraph_number, content, position) VALUES (?, ?, ?, ?)
-          `).run(articleId, paragraph.number, paragraph.content, paragraph.number);
-        }
-      }
-      const nextArticle = current.articles.reduce((max, article) => Math.max(max, article.number), 0) + 1;
-      const revisionArticleId = Number(db.prepare(`
-        INSERT INTO law_articles(version_id, article_number, heading, position) VALUES (?, ?, 'Perubahan', ?)
-      `).run(versionId, nextArticle, nextArticle).lastInsertRowid);
       db.prepare(`
-        INSERT INTO law_paragraphs(article_id, paragraph_number, content, position) VALUES (?, 1, ?, 1)
-      `).run(revisionArticleId, body);
-      db.prepare("UPDATE laws SET status = 'AMENDED', current_version = ?, updated_at = ? WHERE id = ?")
-        .run(nextVersion, now, current.id);
-      insertLawAudit(current.id, 'REVISE', who, `Versi ${nextVersion}: ${body}`);
+        UPDATE law_versions SET revision_status = 'PUBLISHED', published_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(now, now, version.id);
+      db.prepare(`
+        UPDATE laws SET title = ?, status = 'AMENDED', current_version = ?, updated_at = ? WHERE id = ?
+      `).run(version.title, version.version_number, now, law.id);
+      insertLawAudit(
+        law.id,
+        'PUBLISH_REVISION',
+        who,
+        `Versi ${version.version_number} dari versi ${version.base_version}; ${diff.changes.length} perubahan`
+      );
       db.exec('COMMIT;');
     } catch (error) {
       db.exec('ROLLBACK;');
       throw error;
     }
     exportLawsJsonBackup();
-    return lawVersionDocument(current.id, nextVersion);
+    return lawVersionDocument(law.id, version.version_number);
+  }
+
+  function discardLawRevisionDraft(lawId, actor = {}) {
+    const { law, version } = ensureEditableLawVersion(lawId);
+    if (!['ACTIVE', 'AMENDED'].includes(String(law.status)) || Number(version.version_number) <= Number(law.current_version)) {
+      throw new Error('Draft ini bukan draft revisi UU aktif');
+    }
+    const detail = `Draft versi ${version.version_number} dari versi ${version.base_version}`;
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.prepare('DELETE FROM law_versions WHERE id = ?').run(version.id);
+      db.prepare('UPDATE laws SET updated_at = ? WHERE id = ?').run(new Date().toISOString(), law.id);
+      insertLawAudit(law.id, 'DISCARD_REVISION_DRAFT', actor, detail);
+      db.exec('COMMIT;');
+    } catch (error) {
+      db.exec('ROLLBACK;');
+      throw error;
+    }
+    exportLawsJsonBackup();
+    return getLaw(String(law.id), { byId: true });
   }
 
   function revokeLaw(identifier, reason, actor = {}) {
@@ -1219,6 +1525,10 @@ function createRizebotDatabase({
         UPDATE laws SET status = 'REVOKED', revoked_by = ?, revoked_by_name = ?,
           revoked_at = ?, revoke_reason = ?, updated_at = ? WHERE id = ?
       `).run(who.id, who.name, now, safeReason, now, current.id);
+      db.prepare(`
+        UPDATE law_versions SET revision_status = 'ARCHIVED', updated_at = ?
+        WHERE law_id = ? AND revision_status = 'DRAFT' AND base_version > 0
+      `).run(now, current.id);
       insertLawAudit(current.id, 'REVOKE', who, safeReason);
       db.exec('COMMIT;');
     } catch (error) {
@@ -1232,9 +1542,14 @@ function createRizebotDatabase({
   function exportLawsJsonBackup() {
     const summaries = listLaws({ includeDraft: true, limit: 500 });
     const laws = summaries.map(summary => lawVersionDocument(summary.id, summary.version)).filter(Boolean);
-    const payload = { version: 1, updatedAt: new Date().toISOString(), laws };
+    const revisionDrafts = ensureOpen().prepare(`
+      SELECT law_id, version_number FROM law_versions
+      WHERE revision_status = 'DRAFT' AND base_version > 0
+      ORDER BY updated_at DESC
+    `).all().map(row => lawVersionDocument(row.law_id, row.version_number)).filter(Boolean);
+    const payload = { version: 2, updatedAt: new Date().toISOString(), laws, revisionDrafts };
     writeJsonAtomic(resolvedLawsJsonFile, payload);
-    return { ok: true, file: resolvedLawsJsonFile, count: laws.length };
+    return { ok: true, file: resolvedLawsJsonFile, count: laws.length, revisionDraftCount: revisionDrafts.length };
   }
 
   function pruneBackups() {
@@ -1312,6 +1627,7 @@ function createRizebotDatabase({
       FROM laws
     `).get();
     const rules = db.prepare("SELECT fetched_at, source FROM rules_cache WHERE cache_key = 'active_rules'").get();
+    const revisionDrafts = Number(db.prepare("SELECT COUNT(*) AS count FROM law_versions WHERE revision_status = 'DRAFT' AND base_version > 0").get()?.count || 0);
     const interviews = db.prepare(`
       SELECT COUNT(*) AS total,
         SUM(CASE WHEN lifecycle_status IN ('RESERVED', 'OPEN') THEN 1 ELSE 0 END) AS active,
@@ -1332,6 +1648,7 @@ function createRizebotDatabase({
       lawCount: Number(laws?.total || 0),
       activeLawCount: Number(laws?.active || 0),
       draftLawCount: Number(laws?.drafts || 0),
+      revisionDraftLawCount: revisionDrafts,
       rulesCacheAt: String(rules?.fetched_at || ''),
       rulesCacheSource: String(rules?.source || ''),
       interviewSessionCount: Number(interviews?.total || 0),
@@ -1380,12 +1697,21 @@ function createRizebotDatabase({
     exportRulesCacheJsonBackup,
     listLaws,
     getLaw,
+    getLawRevisionDraft,
+    listLawRevisionDrafts,
     createLawDraft,
+    createLawRevisionDraft,
     updateLawDraftTitle,
     addLawParagraph,
     addLawArticle,
+    updateLawArticleHeading,
+    updateLawParagraph,
+    setLawParagraphRepealed,
     publishLaw,
+    publishLawRevisionDraft,
     archiveLawDraft,
+    discardLawRevisionDraft,
+    lawRevisionDiff,
     reviseLaw,
     revokeLaw,
     exportLawsJsonBackup,

@@ -520,7 +520,7 @@ function getMessageContent(msg) {
 function diagnosticCommandName(content) {
   const raw = String(content || '').trim();
   if (/^!rules(?:\s|$)/i.test(raw)) return '!rules';
-  if (/^!uu(?:\s|$)/i.test(raw)) return '!uu';
+  if (/^!(?:uu(?:\s|$)|uu-help$|help-uu$|tutorial-uu$)/i.test(raw)) return '!uu';
   if (/^!create-uu(?:\s|$)/i.test(raw)) return '!create-uu';
   if (/^!(?:draft-uu|edit-uu)(?:\s|$)/i.test(raw)) return '!draft-uu';
   if (/^!revise-uu(?:\s|$)/i.test(raw)) return '!revise-uu';

@@ -71,6 +71,7 @@ function createRizebotHelpPayload({
         value: commandLines([
           ['!rules', 'lihat item/entity terlarang langsung dari sistem keamanan Minecraft, dengan cache saat server offline.'],
           ['!uu [nomor/kode/kata]', 'baca dan cari Undang-Undang Ethergeon beserta status serta versinya.'],
+          ['!uu-help', 'tutorial lengkap membaca, membuat, merevisi, menerbitkan, dan mencabut UU.'],
         ]),
         inline: false,
       },
@@ -184,8 +185,8 @@ function createRizebotHelpPayload({
       name: 'Admin Undang-Undang',
       value: commandLines([
         ['!create-uu <catatan>', 'buat draft Pasal 1 Ayat (1), lalu edit judul/Pasal/Ayat dan terbitkan lewat panel.'],
-        ['!draft-uu [ID]', 'lanjutkan draft terakhir atau buka draft berdasarkan ID. Alias: `!edit-uu`.'],
-        ['!revise-uu <nomor/kode> | <catatan>', 'buat versi revisi baru setelah konfirmasi.'],
+        ['!draft-uu [ID/kode]', 'lanjutkan draft autosave. Alias: `!edit-uu`; kode dipakai untuk draft revisi.'],
+        ['!revise-uu [nomor/kode] [| alasan]', 'pilih UU dan Pasal, lalu buka editor revisi tanpa mengubah versi publik.'],
         ['!cabut-uu <nomor/kode> | <alasan>', 'cabut UU tanpa menghapus arsip dan riwayatnya.'],
       ]),
       inline: false,
