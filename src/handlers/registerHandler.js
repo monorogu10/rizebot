@@ -588,49 +588,64 @@ function listFilterCommand(filterRaw) {
   return '';
 }
 
-function buildListButtonId(page, filter = 'all') {
-  return `${LIST_BUTTON_PREFIX}:${normalizeListFilter(filter)}:${Math.max(1, Number(page) || 1)}`;
+function buildListButtonId(page, filter = 'all', action = 'page') {
+  const safeAction = String(action || 'page').replace(/[^a-z0-9_-]/gi, '').slice(0, 20) || 'page';
+  return `${LIST_BUTTON_PREFIX}:${normalizeListFilter(filter)}:${safeAction}:${Math.max(1, Number(page) || 1)}`;
 }
 
 function parseListButtonId(customId) {
   const raw = String(customId || '');
-  const next = raw.match(new RegExp(`^${LIST_BUTTON_PREFIX}:(all|approved|pending|rejected):(\\d+)$`));
-  if (next) {
-    const page = parseInt(next[2], 10);
+  const parts = raw.split(':');
+  const validFilters = new Set(['all', 'approved', 'pending', 'rejected']);
+  if (parts[0] !== LIST_BUTTON_PREFIX) return null;
+
+  if (parts.length === 4 && validFilters.has(parts[1])) {
+    const page = parseInt(parts[3], 10);
     return {
-      filter: normalizeListFilter(next[1]),
+      filter: normalizeListFilter(parts[1]),
+      action: String(parts[2] || 'page').toLowerCase(),
       page: Number.isFinite(page) && page > 0 ? page : 1,
     };
   }
 
-  const legacy = raw.match(new RegExp(`^${LIST_BUTTON_PREFIX}:(\\d+)$`));
-  if (!legacy) return null;
-  const page = parseInt(legacy[1], 10);
+  if (parts.length === 3 && validFilters.has(parts[1])) {
+    const page = parseInt(parts[2], 10);
+    return {
+      filter: normalizeListFilter(parts[1]),
+      action: 'legacy',
+      page: Number.isFinite(page) && page > 0 ? page : 1,
+    };
+  }
+
+  if (parts.length !== 2) return null;
+  const page = parseInt(parts[1], 10);
+  if (!Number.isFinite(page) || page <= 0) return null;
   return {
     filter: 'all',
-    page: Number.isFinite(page) && page > 0 ? page : 1,
+    action: 'legacy',
+    page,
   };
 }
 
 function buildListButtons(page, totalPages, filter = 'all') {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(1, filter))
+      .setCustomId(buildListButtonId(1, filter, 'first'))
       .setLabel('First')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 1),
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(Math.max(1, page - 1), filter))
+      .setCustomId(buildListButtonId(Math.max(1, page - 1), filter, 'prev'))
       .setLabel('Prev')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page <= 1),
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(Math.min(totalPages, page + 1), filter))
+      .setCustomId(buildListButtonId(Math.min(totalPages, page + 1), filter, 'next'))
       .setLabel('Next')
       .setStyle(ButtonStyle.Primary)
       .setDisabled(page >= totalPages),
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(totalPages, filter))
+      .setCustomId(buildListButtonId(totalPages, filter, 'last'))
       .setLabel('Last')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(page >= totalPages)
@@ -641,19 +656,19 @@ function buildListFilterButtons(activeFilter = 'all') {
   const filter = normalizeListFilter(activeFilter);
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(1, 'all'))
+      .setCustomId(buildListButtonId(1, 'all', 'filter'))
       .setLabel('Semua')
       .setStyle(filter === 'all' ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(1, 'approved'))
+      .setCustomId(buildListButtonId(1, 'approved', 'filter'))
       .setLabel('Lolos')
       .setStyle(filter === 'approved' ? ButtonStyle.Success : ButtonStyle.Secondary),
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(1, 'pending'))
+      .setCustomId(buildListButtonId(1, 'pending', 'filter'))
       .setLabel('Pending')
       .setStyle(filter === 'pending' ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder()
-      .setCustomId(buildListButtonId(1, 'rejected'))
+      .setCustomId(buildListButtonId(1, 'rejected', 'filter'))
       .setLabel('Gagal')
       .setStyle(filter === 'rejected' ? ButtonStyle.Danger : ButtonStyle.Secondary)
   );

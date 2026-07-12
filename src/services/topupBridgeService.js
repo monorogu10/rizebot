@@ -660,36 +660,44 @@ function buildOrganizationListEmbed(record = {}, result = {}, page = 1) {
     .setTimestamp(new Date());
 }
 
-function buildOrganizationListButtonId(sourceId, page) {
-  return `${ORGANIZATION_LIST_PREFIX}:${sourceId}:${Math.max(1, Math.floor(Number(page) || 1))}`;
+function buildOrganizationListButtonId(sourceId, page, action = 'page') {
+  const safeAction = String(action || 'page').replace(/[^a-z0-9_-]/gi, '').slice(0, 20) || 'page';
+  return `${ORGANIZATION_LIST_PREFIX}:${sourceId}:${safeAction}:${Math.max(1, Math.floor(Number(page) || 1))}`;
 }
 
 function parseOrganizationListButtonId(customId, sourceId) {
-  const match = String(customId || '').match(new RegExp(`^${ORGANIZATION_LIST_PREFIX}:([^:]+):(\\d+)$`));
-  if (!match || match[1] !== String(sourceId || '')) return null;
-  const page = Math.max(1, Math.floor(Number(match[2]) || 1));
-  return { page };
+  const parts = String(customId || '').split(':');
+  if (parts[0] !== ORGANIZATION_LIST_PREFIX || parts[1] !== String(sourceId || '')) return null;
+
+  if (parts.length === 4) {
+    const page = Math.max(1, Math.floor(Number(parts[3]) || 1));
+    return { action: String(parts[2] || 'page').toLowerCase(), page };
+  }
+
+  if (parts.length !== 3) return null;
+  const page = Math.max(1, Math.floor(Number(parts[2]) || 1));
+  return { action: 'legacy', page };
 }
 
 function buildOrganizationListButtons(sourceId, page, totalPages, disabled = false) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(buildOrganizationListButtonId(sourceId, 1))
+      .setCustomId(buildOrganizationListButtonId(sourceId, 1, 'first'))
       .setLabel('Pertama')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(disabled || page <= 1),
     new ButtonBuilder()
-      .setCustomId(buildOrganizationListButtonId(sourceId, Math.max(1, page - 1)))
+      .setCustomId(buildOrganizationListButtonId(sourceId, Math.max(1, page - 1), 'prev'))
       .setLabel('Sebelumnya')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(disabled || page <= 1),
     new ButtonBuilder()
-      .setCustomId(buildOrganizationListButtonId(sourceId, Math.min(totalPages, page + 1)))
+      .setCustomId(buildOrganizationListButtonId(sourceId, Math.min(totalPages, page + 1), 'next'))
       .setLabel('Berikutnya')
       .setStyle(ButtonStyle.Primary)
       .setDisabled(disabled || page >= totalPages),
     new ButtonBuilder()
-      .setCustomId(buildOrganizationListButtonId(sourceId, totalPages))
+      .setCustomId(buildOrganizationListButtonId(sourceId, totalPages, 'last'))
       .setLabel('Terakhir')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(disabled || page >= totalPages)

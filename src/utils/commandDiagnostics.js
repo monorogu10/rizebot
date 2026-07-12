@@ -11,6 +11,21 @@ function diagnosticReference(message) {
   return `cmd-${Date.now().toString(36)}-${suffix}`;
 }
 
+function flattenDiscordValidationErrors(node, path = [], output = []) {
+  if (!node || typeof node !== 'object' || output.length >= 3) return output;
+  if (Array.isArray(node._errors)) {
+    const messages = node._errors
+      .map(item => cleanDiagnosticText(item?.message || item?.code, 140))
+      .filter(Boolean);
+    if (messages.length) output.push(`${path.join('.') || 'payload'}: ${messages.join('; ')}`);
+  }
+  for (const [key, value] of Object.entries(node)) {
+    if (key === '_errors' || output.length >= 3) continue;
+    flattenDiscordValidationErrors(value, [...path, key], output);
+  }
+  return output;
+}
+
 function discordErrorSummary(error) {
   if (!error) return 'Kesalahan internal tanpa detail.';
   const code = cleanDiagnosticText(error.code || error.rawError?.code || '', 40);
@@ -22,7 +37,12 @@ function discordErrorSummary(error) {
   const labels = [];
   if (code) labels.push(`code ${code}`);
   if (status) labels.push(`HTTP ${status}`);
-  return `${labels.length ? `${labels.join(', ')}: ` : ''}${message}`;
+  const validation = flattenDiscordValidationErrors(error.rawError?.errors || error.errors)
+    .join(' | ');
+  return [
+    `${labels.length ? `${labels.join(', ')}: ` : ''}${message}`,
+    validation,
+  ].filter(Boolean).join(' | ');
 }
 
 function commandLogContext(message, extra = {}) {
