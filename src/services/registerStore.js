@@ -200,6 +200,7 @@ function createRegisterStore() {
       registeredAt: state.users[userId]?.registeredAt || '',
       updatedAt: state.users[userId]?.updatedAt || '',
       answered: Boolean(state.users[userId]?.answered),
+      answeredAt: state.users[userId]?.answeredAt || null,
       verified: Boolean(state.users[userId]?.verified),
       persistentId: state.users[userId]?.persistentId || '',
       verifiedAt: state.users[userId]?.verifiedAt || null,
@@ -349,6 +350,8 @@ function createRegisterStore() {
       existing.gamertag = gamertag;
       existing.username = username || existing.username || '';
       existing.updatedAt = nowIso;
+      existing.answered = false;
+      existing.answeredAt = null;
       existing.status = 'pending';
       existing.legal = false;
       existing.interviewId = metadata.interviewId || existing.interviewId || '';
@@ -635,8 +638,12 @@ function createRegisterStore() {
   async function markAnswered(userId) {
     await ensureReady();
     if (!state.users[userId]) return false;
+    if (state.users[userId].status !== 'pending') return false;
+    if (state.users[userId].answered) return true;
+    const nowIso = new Date().toISOString();
     state.users[userId].answered = true;
-    state.users[userId].answeredAt = new Date().toISOString();
+    state.users[userId].answeredAt = nowIso;
+    state.users[userId].updatedAt = nowIso;
     await persist();
     return true;
   }

@@ -14,6 +14,12 @@ const {
   MINECRAFT_REGISTER_ROLE_ID,
   PRIVATE_CHAT_CHANNEL_ID,
 } = require('../config');
+const {
+  deliverReplyWithDiagnostics,
+  discordErrorSummary,
+  logCommandError,
+  logCommandInfo,
+} = require('../utils/commandDiagnostics');
 
 const JOB_LEASE_MS = 2 * 60 * 1000;
 const JOB_TTL_MS = 10 * 60 * 1000;
@@ -73,6 +79,20 @@ function createJobId() {
 
 function createVerifyCode() {
   return String(100000 + crypto.randomInt(900000));
+}
+
+function normalizeMessageReference(reference = {}) {
+  const channelId = String(reference.channelId || reference.channel?.id || '').trim();
+  const messageId = String(reference.messageId || reference.id || '').trim();
+  return channelId && messageId ? { channelId, messageId } : null;
+}
+
+function persistedJobContext(context = {}) {
+  if (!context || typeof context !== 'object') return null;
+  const messageRef = normalizeMessageReference(context.messageRef || context.message);
+  const loadingMessage = normalizeMessageReference(context.loadingMessage);
+  if (!messageRef && !loadingMessage) return null;
+  return { messageRef, loadingMessage };
 }
 
 function cleanText(value, maxLength = 1800) {
@@ -1314,6 +1334,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
       .map(record => ({
         id: record.id,
         job: record.job,
+        context: persistedJobContext(record.context),
         status: record.status,
         attempts: record.attempts,
         leaseUntil: record.leaseUntil,
@@ -1471,21 +1492,68 @@ function createTopupBridgeService({ registerStore, client = null }) {
     return false;
   }
 
-  async function deleteLoadingMessage(record = {}) {
-    const ref = record.context?.loadingMessage || record.job?.loadingMessage || null;
+  async function resolveMessageReference(reference = {}) {
+    const ref = normalizeMessageReference(reference);
     const channelId = cleanText(ref?.channelId, 40);
     const messageId = cleanText(ref?.messageId, 40);
     if (!client || !channelId || !messageId) return false;
 
     const channel = client.channels.cache.get(channelId) ||
-      await client.channels.fetch(channelId).catch(() => null);
-    if (!channel?.messages?.fetch) return false;
+      await client.channels.fetch(channelId).catch(err => {
+        console.error(`Failed to fetch bridge response channel ${channelId}:`, err);
+        return null;
+      });
+    if (!channel?.messages?.fetch) return null;
 
     const message = channel.messages.cache.get(messageId) ||
-      await channel.messages.fetch(messageId).catch(() => null);
+      await channel.messages.fetch(messageId).catch(err => {
+        console.error(`Failed to fetch bridge response message ${messageId}:`, err);
+        return null;
+      });
+    return message || null;
+  }
+
+  async function resolveCommandSourceMessage(record = {}) {
+    if (record.context?.message?.reply) return record.context.message;
+    const message = await resolveMessageReference(record.context?.messageRef || record.job?.messageRef);
+    if (message) {
+      record.context = { ...(record.context || {}), message };
+    }
+    return message;
+  }
+
+  async function resolveLoadingMessage(record = {}) {
+    return resolveMessageReference(record.context?.loadingMessage || record.job?.loadingMessage);
+  }
+
+  async function editLoadingMessageError(record = {}, detail = 'Hasil command gagal dikirim ke Discord.') {
+    const loading = await resolveLoadingMessage(record);
+    if (!loading?.edit) return false;
+    const jobId = record.job?.id || record.id || '-';
+    const edited = await loading.edit({
+      content: [
+        'Command `!organisasi` mengalami kesalahan.',
+        `Tahap: **mengirim hasil bridge ke Discord**`,
+        `Penyebab: \`${cleanText(detail, 240)}\``,
+        `Ref: \`${jobId}\``,
+      ].join('\n'),
+      embeds: [],
+      components: [],
+      allowedMentions: { parse: [], repliedUser: false },
+    }).catch(err => {
+      console.error(`[command-error][organization-result] failed to edit loading message ref=${jobId}:`, err);
+      return null;
+    });
+    return Boolean(edited);
+  }
+
+  async function deleteLoadingMessage(record = {}) {
+    const message = await resolveLoadingMessage(record);
     if (!message?.delete) return false;
-    await message.delete().catch(() => null);
-    return true;
+    return message.delete().then(() => true).catch(err => {
+      console.error(`Failed to delete bridge loading message for ${record.job?.id || record.id || '-'}:`, err);
+      return false;
+    });
   }
 
   function rememberOnlinePlayer(player = {}) {
@@ -2134,57 +2202,93 @@ function createTopupBridgeService({ registerStore, client = null }) {
     await message.reply(noPingPayload({ embeds: [embed] })).catch(() => {});
   }
 
-  async function sendOrganizationSearchResult(record, result) {
-    const message = record.context?.message;
-    if (!message) return;
-
-    if (!result.ok) {
-      await message.reply(noPingPayload({
-        embeds: [buildResultErrorEmbed('Daftar Organisasi', result, record)],
-      })).catch(() => {});
-      return;
+  async function deliverOrganizationResult(record, payload, stage) {
+    const jobId = record.job?.id || record.id || '-';
+    const message = await resolveCommandSourceMessage(record);
+    if (!message?.reply) {
+      const error = new Error('Source Discord message is unavailable; the bot may have restarted before the bridge result arrived.');
+      const messageRef = record.context?.messageRef || {};
+      logCommandError('organization-result', {
+        id: messageRef.messageId,
+        channelId: messageRef.channelId,
+        author: { id: record.job?.requestedBy || '' },
+        content: '!organisasi',
+      }, error, {
+        command: '!organisasi',
+        stage,
+        reference: jobId,
+        details: { jobId },
+      });
+      const loadingEdited = await editLoadingMessageError(record, error.message);
+      return { ok: false, shown: loadingEdited, message: null };
     }
 
-    const sourceId = record.id || record.job?.id || '';
+    const delivery = await deliverReplyWithDiagnostics(message, payload, {
+      scope: 'organization-result',
+      command: '!organisasi',
+      stage: `${stage} | bridge ref ${jobId}`,
+    });
+    const shown = delivery.ok || Boolean(delivery.fallbackMessage);
+    let loadingEdited = false;
+    if (!shown) {
+      loadingEdited = await editLoadingMessageError(record, discordErrorSummary(delivery.error));
+    }
+    return {
+      ok: delivery.ok,
+      shown: shown || loadingEdited,
+      message: delivery.message,
+    };
+  }
+
+  async function sendOrganizationSearchResult(record, result) {
+    const jobId = record.job?.id || record.id || '-';
+
+    if (!result.ok) {
+      const delivery = await deliverOrganizationResult(record, noPingPayload({
+        embeds: [buildResultErrorEmbed('Daftar Organisasi', result, record)],
+      }), `menampilkan error daftar organisasi (${result.code || 'unknown'})`);
+      return delivery.shown;
+    }
+
+    const sourceId = jobId;
     const pagination = organizationListPagination(result, 1);
     const components = pagination.totalPages > 1
       ? [buildOrganizationListButtons(sourceId, pagination.page, pagination.totalPages)]
       : [];
-    const reply = await message.reply(noPingPayload({
+    const delivery = await deliverOrganizationResult(record, noPingPayload({
       embeds: [buildOrganizationListEmbed(record, result, pagination.page)],
       components,
-    })).catch(() => null);
-    attachOrganizationListCollector(reply, record, result);
+    }), 'menampilkan daftar organisasi');
+    if (delivery.ok) attachOrganizationListCollector(delivery.message, record, result);
+    return delivery.shown;
   }
 
   async function sendOrganizationInfoResult(record, result) {
-    const message = record.context?.message;
-    if (!message) return;
-
     if (!result.ok) {
       const candidates = Array.isArray(result.candidates) ? result.candidates.slice(0, 5) : [];
       if (candidates.length && result.code === 'organization-ambiguous') {
-        const reply = await message.reply(noPingPayload({
+        const delivery = await deliverOrganizationResult(record, noPingPayload({
           embeds: [buildOrganizationCandidateEmbed(record, result)],
           components: [buildCandidateRow(record, candidates, 'organization')],
-        })).catch(() => null);
-        attachCandidateCollector(reply, record, candidates, 'organization');
-        return;
+        }), 'menampilkan pilihan organisasi ambigu');
+        if (delivery.ok) attachCandidateCollector(delivery.message, record, candidates, 'organization');
+        return delivery.shown;
       }
 
-      await message.reply(noPingPayload({
+      const delivery = await deliverOrganizationResult(record, noPingPayload({
         embeds: [buildResultErrorEmbed('Detail Organisasi', result, record)],
-      })).catch(() => {});
-      return;
+      }), `menampilkan error detail organisasi (${result.code || 'unknown'})`);
+      return delivery.shown;
     }
 
     const organization = result.organization || {};
     const sourceId = record.id || record.job?.id || '';
-    const reply = await message.reply(noPingPayload({
+    const delivery = await deliverOrganizationResult(record, noPingPayload({
       embeds: [buildOrganizationDetailEmbed(organization, record, 'overview')],
       components: [buildOrganizationDetailButtons(sourceId, organization, 'overview')],
-    })).catch(() => null);
-    attachOrganizationDetailCollector(reply, record, organization);
+    }), 'menampilkan detail organisasi');
+    if (delivery.ok) attachOrganizationDetailCollector(delivery.message, record, organization);
+    return delivery.shown;
   }
 
   async function sendPingResult(record, result) {
@@ -2486,28 +2590,29 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
   async function sendQueryResult(record, result) {
     if (record.job.type === 'wallet') {
-      await sendWalletResult(record, result);
+      return sendWalletResult(record, result);
     } else if (record.job.type === 'search_server') {
-      await sendSearchServerResult(record, result);
+      return sendSearchServerResult(record, result);
     } else if (record.job.type === 'player_info') {
-      await sendPlayerInfoResult(record, result);
+      return sendPlayerInfoResult(record, result);
     } else if (record.job.type === 'organization_search' || record.job.type === 'organization_directory') {
-      await sendOrganizationSearchResult(record, result);
+      return sendOrganizationSearchResult(record, result);
     } else if (record.job.type === 'organization_info') {
-      await sendOrganizationInfoResult(record, result);
+      return sendOrganizationInfoResult(record, result);
     } else if (record.job.type === 'ping') {
-      await sendPingResult(record, result);
+      return sendPingResult(record, result);
     } else if (record.job.type === 'discord_broadcast') {
-      await sendDiscordBroadcastResult(record, result);
+      return sendDiscordBroadcastResult(record, result);
     } else if (record.job.type === 'wallet_transfer') {
-      await sendWalletTransferResult(record, result);
+      return sendWalletTransferResult(record, result);
     } else if (record.job.type === 'wallet_bonus') {
-      await sendWalletBonusResult(record, result);
+      return sendWalletBonusResult(record, result);
     } else if (record.job.type === 'player_migration_preview') {
-      await sendMigrationPreviewResult(record, result);
+      return sendMigrationPreviewResult(record, result);
     } else if (record.job.type === 'player_migration_apply') {
-      await sendMigrationApplyResult(record, result);
+      return sendMigrationApplyResult(record, result);
     }
+    return false;
   }
 
   async function completeJob(resultRaw = {}) {
@@ -2521,17 +2626,58 @@ function createTopupBridgeService({ registerStore, client = null }) {
     bridgeStats.lastResultAt = new Date().toISOString();
     saveJobsToDisk(record.updatedAt);
 
+    if (record.job.type === 'organization_search' ||
+      record.job.type === 'organization_directory' ||
+      record.job.type === 'organization_info') {
+      const messageRef = record.context?.messageRef || {};
+      logCommandInfo('organization-result', record.context?.message || {
+        id: messageRef.messageId,
+        channelId: messageRef.channelId,
+        author: { id: record.job?.requestedBy || '' },
+        content: '!organisasi',
+      }, {
+        command: '!organisasi',
+        stage: 'hasil bridge diterima',
+        reference: jobId,
+        details: {
+          jobId,
+          jobType: record.job.type,
+          resultOk: Boolean(resultRaw.ok),
+          resultCode: resultRaw.code || '-',
+        },
+      });
+    }
+
+    let deliveryResult;
     try {
-      await deleteLoadingMessage(record).catch(() => false);
       if (record.job.type === 'coupon') {
-        await sendCouponResult(record, resultRaw);
+        deliveryResult = await sendCouponResult(record, resultRaw);
       } else if (record.job.type === 'topup') {
-        await sendTopupResult(record, resultRaw);
+        deliveryResult = await sendTopupResult(record, resultRaw);
       } else {
-        await sendQueryResult(record, resultRaw);
+        deliveryResult = await sendQueryResult(record, resultRaw);
+      }
+
+      if (deliveryResult !== false) {
+        await deleteLoadingMessage(record).catch(() => false);
+      } else if (record.job.type === 'organization_search' ||
+        record.job.type === 'organization_directory' ||
+        record.job.type === 'organization_info') {
+        await editLoadingMessageError(record, 'Hasil organisasi tidak berhasil dikirim. Lihat log bot untuk detail.');
       }
     } catch (err) {
       console.error('Failed to send topup bridge result:', err);
+      if (record.job.type === 'organization_search' ||
+        record.job.type === 'organization_directory' ||
+        record.job.type === 'organization_info') {
+        const message = await resolveCommandSourceMessage(record);
+        logCommandError('organization-result', message, err, {
+          command: '!organisasi',
+          stage: 'memproses hasil bridge organisasi',
+          reference: record.job?.id || record.id || '-',
+        });
+        await editLoadingMessageError(record, discordErrorSummary(err));
+      }
     }
 
     pruneJobs();

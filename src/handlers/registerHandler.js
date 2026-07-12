@@ -20,6 +20,11 @@ const {
   TOPUP_ADMIN_DISCORD_ID,
 } = require('../config');
 const { isAdmin } = require('../utils/permissions');
+const {
+  logCommandError,
+  replyWithDiagnostics,
+  sendCommandError,
+} = require('../utils/commandDiagnostics');
 const { createRizebotHelpPayload } = require('./helpPayload');
 const {
   moveMemberToCitizenRole,
@@ -32,6 +37,8 @@ const LIST_ENTRY_MAX_LENGTH = 360;
 const LIST_DESCRIPTION_MAX_LENGTH = 3900;
 const LIST_BUTTON_PREFIX = 'citizenlist';
 const INTERVIEW_BUTTON_PREFIX = 'interview';
+const INTERVIEW_REPLY_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const INTERVIEW_REPLY_SCAN_MAX_MESSAGES = 1000;
 const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
 const DISCORD_SERVER_CATEGORY_LIMIT = 50;
 const DISCORD_SERVER_CHANNEL_LIMIT = 500;
@@ -55,7 +62,12 @@ function noPing(payload) {
 }
 
 async function replyNoPing(msg, payload) {
-  return msg.reply(noPing(payload)).catch(() => null);
+  const listCommand = parseListCommand(msg?.content);
+  return replyWithDiagnostics(msg, noPing(payload), {
+    scope: 'register-handler',
+    command: listCommand ? '!list' : String(msg?.content || '').trim().split(/\s+/g)[0],
+    stage: listCommand ? 'mengirim halaman registry Minecraft' : 'mengirim balasan register',
+  });
 }
 
 function normalizeGamertag(value) {
@@ -452,6 +464,7 @@ function buildInterviewEmbed(entry, user) {
       {
         name: 'Pertanyaan Interview',
         value: [
+          '**Batas waktu menjawab: 24 jam sejak interview dibuat.** Tanpa balasan, interview otomatis gagal dan ditutup.',
           'Jawab pertanyaan berikut secara jujur dengan nomor **1-5**:',
           '1. Silakan perkenalkan diri kamu secara singkat.',
           '2. Apa tujuan kamu masuk ke server Ethergeon?',
@@ -1612,6 +1625,205 @@ async function compileAndDeleteInterviewChannel(channel, options = {}) {
   return { ...compiled, deleted };
 }
 
+function interviewStartTimeMs(entry = {}) {
+  const value = new Date(entry.interviewCreatedAt || entry.registeredAt || '').getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+async function findApplicantInterviewReply(channel, applicantUserId, sinceMs, {
+  untilMs = Number.POSITIVE_INFINITY,
+  maxMessages = INTERVIEW_REPLY_SCAN_MAX_MESSAGES,
+} = {}) {
+  if (!channel?.messages?.fetch) return { ok: false, code: 'message-fetch-unavailable' };
+
+  let before = null;
+  let scanned = 0;
+  let reachedStart = false;
+  while (scanned < maxMessages) {
+    const limit = Math.min(100, maxMessages - scanned);
+    const batch = await channel.messages.fetch(before ? { limit, before } : { limit }).catch(err => {
+      console.error(`Failed to inspect interview replies in ${channel.id || channel.name || 'unknown'}:`, err);
+      return null;
+    });
+    if (!batch) return { ok: false, code: 'message-fetch-failed', scanned };
+    if (!batch.size) return { ok: true, replied: false, scanned };
+
+    scanned += batch.size;
+    for (const message of batch.values()) {
+      const createdAt = Number(message.createdTimestamp || message.createdAt?.getTime?.() || 0);
+      if (createdAt && createdAt < sinceMs) {
+        reachedStart = true;
+        continue;
+      }
+      if (createdAt && createdAt >= untilMs) continue;
+      if (!message.author?.bot && String(message.author?.id || '') === String(applicantUserId || '')) {
+        return { ok: true, replied: true, scanned, messageId: message.id || '' };
+      }
+    }
+
+    const oldest = batch.last?.();
+    const oldestAt = Number(oldest?.createdTimestamp || oldest?.createdAt?.getTime?.() || 0);
+    if (reachedStart || batch.size < limit || (oldestAt && oldestAt < sinceMs)) {
+      return { ok: true, replied: false, scanned };
+    }
+    before = oldest?.id || null;
+    if (!before) return { ok: true, replied: false, scanned };
+  }
+
+  return { ok: false, code: 'message-scan-limit', scanned };
+}
+
+async function expireUnansweredInterviews(client, {
+  registerStore,
+  transcriptStore = null,
+  bridge = null,
+  roleId = MINECRAFT_REGISTER_ROLE_ID,
+  legacyRoleId = MINECRAFT_REGISTER_PENDING_ROLE_ID,
+  rejectedRoleId = MINECRAFT_REGISTER_REJECTED_ROLE_ID,
+  timeoutMs = INTERVIEW_REPLY_TIMEOUT_MS,
+  limit = 50,
+} = {}) {
+  const summary = {
+    checked: 0,
+    answered: 0,
+    expired: 0,
+    closed: 0,
+    unavailable: 0,
+    failed: 0,
+  };
+  if (!client?.channels?.fetch || !registerStore?.getEntries) return summary;
+
+  const now = Date.now();
+  const safeTimeoutMs = Math.max(60_000, Number(timeoutMs) || INTERVIEW_REPLY_TIMEOUT_MS);
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(Number(limit) || 50)));
+  const candidates = registerStore.getEntries()
+    .filter(entry => {
+      if (entry.status !== 'pending' || entry.answered || entry.interviewClosedAt || !entry.interviewChannelId) return false;
+      const startedAt = interviewStartTimeMs(entry);
+      return startedAt > 0 && now - startedAt >= safeTimeoutMs;
+    })
+    .slice(0, safeLimit);
+
+  for (const candidate of candidates) {
+    summary.checked += 1;
+    try {
+      const channel = await client.channels.fetch(candidate.interviewChannelId).catch(() => null);
+      if (!channel?.guild || !channel.messages?.fetch) {
+        summary.unavailable += 1;
+        continue;
+      }
+
+      const replyCheck = await findApplicantInterviewReply(
+        channel,
+        candidate.userId,
+        interviewStartTimeMs(candidate),
+        { untilMs: interviewStartTimeMs(candidate) + safeTimeoutMs }
+      );
+      if (!replyCheck.ok) {
+        summary.failed += 1;
+        continue;
+      }
+      if (replyCheck.replied) {
+        await registerStore.markAnswered?.(candidate.userId);
+        summary.answered += 1;
+        continue;
+      }
+
+      const current = registerStore.getUser?.(candidate.userId);
+      if (!current || current.status !== 'pending' || current.answered || current.interviewClosedAt) continue;
+
+      const actor = {
+        id: client.user?.id || '',
+        tag: client.user?.tag || client.user?.username || 'Rizebot',
+      };
+      const reason = 'Tidak menjawab pertanyaan interview dalam 24 jam.';
+      const rejected = await registerStore.rejectUser(candidate.userId, actor, reason);
+      if (!rejected) {
+        summary.failed += 1;
+        continue;
+      }
+      const closed = await registerStore.closeInterview(candidate.userId, actor) || rejected;
+      summary.expired += 1;
+
+      const member = await channel.guild.members.fetch(candidate.userId).catch(() => null);
+      if (member) {
+        await moveMemberToRejectedRole(member, {
+          rejectedRoleId,
+          pendingRoleId: legacyRoleId,
+          verifiedRoleId: roleId,
+        }).catch(err => {
+          console.error('Failed to set rejected role after interview timeout:', err);
+          return false;
+        });
+      }
+
+      await channel.send({
+        content: `<@${candidate.userId}> interview otomatis **gagal** karena tidak ada balasan dalam 24 jam. Interview ini sekarang ditutup.`,
+        embeds: [buildInterviewEmbed({ ...closed, userId: candidate.userId }, { id: candidate.userId })],
+        components: [buildInterviewButtons(candidate.userId, true)],
+        allowedMentions: { users: [candidate.userId], roles: [] },
+      }).catch(err => {
+        console.error('Failed to send interview timeout notice:', err);
+      });
+      queueLegalAccessJob(bridge, 'revoke', closed, candidate.userId, actor);
+
+      await channel.permissionOverwrites?.edit(candidate.userId, {
+        ViewChannel: false,
+        SendMessages: false,
+      }).catch(() => null);
+      const closedName = `closed-${closed.interviewId || 'interview'}`.slice(0, 100);
+      await channel.setName?.(closedName, 'Interview auto-closed after 24 hours without reply').catch(() => null);
+
+      let compileResult = null;
+      if (transcriptStore?.appendTranscript) {
+        compileResult = await compileInterviewChannel(channel, {
+          registerStore,
+          transcriptStore,
+          actor: client.user,
+          entryUserId: candidate.userId,
+          entry: closed,
+          source: 'auto-no-reply-timeout',
+        }).catch(err => {
+          console.error('Failed to compile timed-out interview:', err);
+          return null;
+        });
+      }
+
+      if (compileResult?.ok) {
+        const deleted = await deleteCompiledInterviewChannel(
+          channel,
+          transcriptStore,
+          'Interview timed out and transcript saved to JSON'
+        );
+        if (deleted) {
+          summary.closed += 1;
+          await sendCompileLog(client, [
+            `Interview timeout: \`${closedName}\``,
+            `Applicant: <@${candidate.userId}> | Gamertag: \`${closed.gamertag || '-'}\``,
+            `Alasan: ${reason}`,
+            `JSON: \`${compileResult.fileName}\` | Messages: ${compileResult.messageCount}`,
+            'Channel deleted: yes',
+          ]);
+          continue;
+        }
+      }
+
+      const archiveResult = await moveChannelToArchive(
+        channel.guild,
+        channel,
+        'Interview timed out without applicant reply'
+      );
+      if (archiveResult.ok) summary.closed += 1;
+      else summary.failed += 1;
+    } catch (err) {
+      summary.failed += 1;
+      console.error(`Failed to expire interview for ${candidate.userId}:`, err);
+    }
+  }
+
+  return summary;
+}
+
 async function sendCompileLog(client, lines) {
   const channel = await client.channels.fetch(REGISTRATION_INBOX_CHANNEL_ID).catch(() => null);
   if (!channel?.send) return false;
@@ -1994,7 +2206,20 @@ function createRegisterHandler({
       if (await handleStatusCommand(msg, options)) return true;
       return false;
     } catch (err) {
-      console.error('Register handler error:', err);
+      const listCommand = parseListCommand(msg?.content);
+      logCommandError('register-handler', msg, err, {
+        command: listCommand ? '!list' : String(msg?.content || '').trim().split(/\s+/g)[0],
+        stage: listCommand ? 'membangun atau memproses registry Minecraft' : 'memproses command register',
+      });
+      if (listCommand) {
+        await sendCommandError(msg, {
+          scope: 'register-handler',
+          command: '!list',
+          stage: 'membangun atau memproses registry Minecraft',
+          error: err,
+        });
+        return true;
+      }
       return false;
     }
   };
@@ -2011,9 +2236,11 @@ async function scanSubmissionApprovals() {
 }
 
 module.exports = {
+  INTERVIEW_REPLY_TIMEOUT_MS,
   archiveClosedInterviewBacklog,
   createRegisterHandler,
   createRegisterInteractionHandler,
   createSubmissionReactionHandler,
+  expireUnansweredInterviews,
   scanSubmissionApprovals,
 };

@@ -10,9 +10,11 @@ const { createMessageHandler } = require('./src/handlers/messageHandler');
 const { registerMemberEvents } = require('./src/handlers/memberEvents');
 const { registerPrivateRoleEvents } = require('./src/handlers/privateRoleHandler');
 const {
+  INTERVIEW_REPLY_TIMEOUT_MS,
   archiveClosedInterviewBacklog,
   createRegisterHandler,
   createRegisterInteractionHandler,
+  expireUnansweredInterviews,
 } = require('./src/handlers/registerHandler');
 const { createMinecraftBridgeHandler } = require('./src/handlers/minecraftBridgeHandler');
 const { createTopupHandler } = require('./src/handlers/topupHandler');
@@ -42,6 +44,12 @@ const {
   SOCIABUZZ_WEBHOOK_TOKEN,
 } = require('./src/config');
 const { isAllowedBotOutputChannel } = require('./src/utils/channelPolicy');
+const {
+  logCommandError,
+  logCommandInfo,
+  logCommandWarning,
+  sendCommandError,
+} = require('./src/utils/commandDiagnostics');
 
 const LOCK_FILE = process.env.RIZEBOT_LOCK_FILE || path.join(os.tmpdir(), 'rizebot.lock');
 
@@ -205,6 +213,14 @@ const ARCHIVE_SWEEP_LIMIT = Math.max(
   1,
   Math.min(100, Number(process.env.INTERVIEW_ARCHIVE_SWEEP_LIMIT) || 50)
 );
+const INTERVIEW_NO_REPLY_SWEEP_INTERVAL_MS = Math.max(
+  60_000,
+  Number(process.env.INTERVIEW_NO_REPLY_SWEEP_INTERVAL_MS) || 5 * 60_000
+);
+const INTERVIEW_NO_REPLY_SWEEP_LIMIT = Math.max(
+  1,
+  Math.min(100, Number(process.env.INTERVIEW_NO_REPLY_SWEEP_LIMIT) || 50)
+);
 const BRIDGE_MONITOR_INTERVAL_MS = Math.max(
   5_000,
   Number(process.env.MINECRAFT_BRIDGE_MONITOR_INTERVAL_MS) || 10_000
@@ -222,6 +238,7 @@ let bridgeAlertChannelPromise = null;
 let bridgeMonitorStartedAt = Date.now();
 let bridgeMonitorState = 'unknown';
 let archiveSweepRunning = false;
+let unansweredInterviewSweepRunning = false;
 
 function bridgePollTimeMs(status) {
   const raw = status?.lastJobPollAt || status?.lastEventAt || status?.lastSnapshotAt;
@@ -333,6 +350,31 @@ async function runArchiveSweep(reason = 'auto') {
   }
 }
 
+async function runUnansweredInterviewSweep(reason = 'auto') {
+  if (unansweredInterviewSweepRunning) return;
+  unansweredInterviewSweepRunning = true;
+  try {
+    const summary = await expireUnansweredInterviews(client, {
+      registerStore: legacyRegisterStore,
+      transcriptStore: interviewTranscriptStore,
+      bridge: bridgeService,
+      roleId: MINECRAFT_REGISTER_ROLE_ID,
+      legacyRoleId: MINECRAFT_REGISTER_PENDING_ROLE_ID,
+      rejectedRoleId: MINECRAFT_REGISTER_REJECTED_ROLE_ID,
+      limit: INTERVIEW_NO_REPLY_SWEEP_LIMIT,
+    });
+    if (summary.checked || summary.failed || summary.unavailable) {
+      console.log(
+        `Interview no-reply sweep (${reason}) checked=${summary.checked}, answered=${summary.answered}, expired=${summary.expired}, closed=${summary.closed}, unavailable=${summary.unavailable}, failed=${summary.failed}`
+      );
+    }
+  } catch (err) {
+    console.error('Interview no-reply sweep failed:', err);
+  } finally {
+    unansweredInterviewSweepRunning = false;
+  }
+}
+
 client.once('clientReady', async () => {
   await submissionStore.init(client).catch(err => {
     console.error('Failed to init submission store:', err);
@@ -375,6 +417,12 @@ client.once('clientReady', async () => {
   }, ARCHIVE_SWEEP_INTERVAL_MS);
   archiveInterval.unref?.();
 
+  await runUnansweredInterviewSweep('startup');
+  const unansweredInterviewInterval = setInterval(() => {
+    void runUnansweredInterviewSweep('interval');
+  }, INTERVIEW_NO_REPLY_SWEEP_INTERVAL_MS);
+  unansweredInterviewInterval.unref?.();
+
   void checkBridgeHealth();
   const bridgeMonitorInterval = setInterval(() => {
     void checkBridgeHealth();
@@ -409,6 +457,13 @@ function pruneProcessedMessages(now = Date.now()) {
 
 function getMessageContent(msg) {
   return String(msg?.content || '');
+}
+
+function diagnosticCommandName(content) {
+  const raw = String(content || '').trim();
+  if (/^!(?:organisasi|organization|org)(?:\s|$)/i.test(raw)) return '!organisasi';
+  if (/^!(?:list|listreg|list-reg|registry|registrasi|pendaftaran)(?:\s|$)/i.test(raw)) return '!list';
+  return '';
 }
 
 function wasContentProcessed(msg) {
@@ -510,9 +565,32 @@ async function reloadInterviewTranscriptDataFromMessage(msg) {
   return reloadedTranscriptData;
 }
 
+async function markInterviewApplicantReply(msg) {
+  if (!msg || msg.author?.bot || !msg.author?.id || !msg.channelId) return false;
+  const registration = legacyRegisterStore.findUserByInterviewChannel?.(msg.channelId);
+  if (!registration || String(registration.userId) !== String(msg.author.id)) return false;
+  if (registration.entry?.status !== 'pending' || registration.entry?.answered || registration.entry?.interviewClosedAt) {
+    return false;
+  }
+
+  const interviewStartedAt = new Date(
+    registration.entry.interviewCreatedAt || registration.entry.registeredAt || ''
+  ).getTime();
+  const messageCreatedAt = Number(msg.createdTimestamp || msg.createdAt?.getTime?.() || Date.now());
+  if (Number.isFinite(interviewStartedAt) && messageCreatedAt < interviewStartedAt) return false;
+  if (Number.isFinite(interviewStartedAt) && messageCreatedAt >= interviewStartedAt + INTERVIEW_REPLY_TIMEOUT_MS) {
+    return false;
+  }
+
+  return Boolean(await legacyRegisterStore.markAnswered(registration.userId));
+}
+
 async function handleMessageCreate(msg) {
   if (await reloadLegacyRegisterDataFromMessage(msg)) return;
   if (await reloadInterviewTranscriptDataFromMessage(msg)) return;
+  await markInterviewApplicantReply(msg).catch(err => {
+    console.error('Failed to mark interview applicant reply:', err);
+  });
   if (wasContentProcessed(msg)) return;
   if (!claimMessageAcrossProcesses(msg)) return;
   rememberProcessedContent(msg);
@@ -523,8 +601,50 @@ async function handleMessageCreate(msg) {
   });
   if (handledSociabuzz) return;
 
-  if (!isAllowedBotOutputChannel(msg)) return;
-  await baseHandleMessage(msg);
+  const diagnosticCommand = diagnosticCommandName(msg.content);
+  if (diagnosticCommand) {
+    logCommandInfo('message-received', msg, {
+      command: diagnosticCommand,
+      stage: 'command diterima dari Discord',
+    });
+  }
+
+  if (!isAllowedBotOutputChannel(msg)) {
+    const command = diagnosticCommand;
+    if (command) {
+      const reason = `Channel ID ${msg.channelId || '-'} tidak terdaftar sebagai channel command dan akun tidak terdeteksi sebagai admin/interviewer.`;
+      logCommandWarning('channel-policy', msg, {
+        command,
+        stage: 'validasi channel command',
+        details: { reason },
+      });
+      await sendCommandError(msg, {
+        scope: 'channel-policy',
+        command,
+        stage: 'validasi channel command',
+        reason,
+      });
+    }
+    return;
+  }
+
+  try {
+    await baseHandleMessage(msg);
+  } catch (err) {
+    const command = diagnosticCommandName(msg.content) || String(msg.content || '').trim().split(/\s+/g)[0];
+    logCommandError('message-handler', msg, err, {
+      command,
+      stage: 'menjalankan command handler',
+    });
+    if (diagnosticCommandName(msg.content)) {
+      await sendCommandError(msg, {
+        scope: 'message-handler',
+        command,
+        stage: 'menjalankan command handler',
+        error: err,
+      });
+    }
+  }
 }
 
 async function handleMessageUpdate(oldMsg, newMsg) {

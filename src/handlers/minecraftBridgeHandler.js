@@ -11,6 +11,12 @@ const {
   TOPUP_ADMIN_DISCORD_ID,
 } = require('../config');
 const { isAdmin } = require('../utils/permissions');
+const {
+  logCommandError,
+  logCommandInfo,
+  replyWithDiagnostics,
+  sendCommandError,
+} = require('../utils/commandDiagnostics');
 const { createRizebotHelpPayload } = require('./helpPayload');
 
 const ONLINE_PAGE_SIZE = 10;
@@ -127,8 +133,13 @@ function noPing(payload) {
   };
 }
 
-async function replyNoPing(msg, payload) {
-  return msg.reply(noPing(payload)).catch(() => null);
+async function replyNoPing(msg, payload, diagnostics = {}) {
+  const parsed = parseCommand(msg?.content);
+  return replyWithDiagnostics(msg, noPing(payload), {
+    scope: 'minecraft-bridge-command',
+    command: diagnostics.command || (parsed ? `!${parsed.command}` : String(msg?.content || '').split(/\s+/g)[0]),
+    stage: diagnostics.stage || 'mengirim balasan command bridge',
+  });
 }
 
 function formatNumber(value) {
@@ -652,13 +663,16 @@ function buildLoadingPayload({ title, description, footer = 'Sedang diproses ole
 }
 
 async function sendBridgeLoading(msg, options) {
-  return replyNoPing(msg, buildLoadingPayload(options));
+  return replyNoPing(msg, buildLoadingPayload(options), {
+    stage: 'mengirim pesan loading command bridge',
+  });
 }
 
 function bridgeJobContext(msg, loadingMessage, extra = {}) {
   return {
     ...extra,
     message: msg,
+    messageRef: loadingMessageRef(msg),
     loadingMessage: loadingMessageRef(loadingMessage),
   };
 }
@@ -673,10 +687,38 @@ async function enqueueBridgeJobWithLoading(msg, bridge, type, payload, {
     description,
     footer: 'Menunggu Minecraft BP...',
   });
-  const job = bridge.enqueueBridgeQuery(type, payload, bridgeJobContext(msg, loading, context));
-  if (loading?.edit) {
-    await loading.edit(buildQueuedBridgePayload({ title, description, job })).catch(() => {});
+  if (!loading) return null;
+
+  let job = null;
+  try {
+    job = bridge.enqueueBridgeQuery(type, payload, bridgeJobContext(msg, loading, context));
+  } catch (err) {
+    logCommandError('minecraft-bridge-command', msg, err, {
+      command: `!${parseCommand(msg?.content)?.command || type}`,
+      stage: `membuat job bridge ${type}`,
+    });
+    await sendCommandError(msg, {
+      scope: 'minecraft-bridge-command',
+      command: `!${parseCommand(msg?.content)?.command || type}`,
+      stage: `membuat job bridge ${type}`,
+      error: err,
+    });
+    return null;
   }
+  if (loading?.edit) {
+    await loading.edit(buildQueuedBridgePayload({ title, description, job })).catch(err => {
+      logCommandError('minecraft-bridge-command', msg, err, {
+        command: `!${parseCommand(msg?.content)?.command || type}`,
+        stage: `memperbarui status job bridge ${type}`,
+        details: { jobId: job?.id || '-' },
+      });
+    });
+  }
+  logCommandInfo('minecraft-bridge-command', msg, {
+    command: `!${parseCommand(msg?.content)?.command || type}`,
+    stage: `job bridge ${type} masuk antrean`,
+    details: { jobId: job?.id || '-' },
+  });
   return job;
 }
 
