@@ -455,7 +455,7 @@ function buildInterviewEmbed(entry, user) {
           'Jawab pertanyaan berikut secara jujur dengan nomor **1-5**:',
           '1. Silakan perkenalkan diri kamu secara singkat.',
           '2. Apa tujuan kamu masuk ke server Ethergeon?',
-          '3. Apakah kamu player baru atau sudah lama bermain Minecraft?',
+          '3. Apakah kamu player baru atau sudah lama bermain Server Ethergeon?',
           '4. Apakah kamu pernah merusuh di server lain, atau memiliki niat untuk merusuh di Ethergeon? Jelaskan dengan jujur.',
           '5. Jika lolos, apakah kamu bersedia membaca dan mematuhi seluruh aturan di lobby sebelum bermain?',
         ].join('\n'),
