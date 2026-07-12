@@ -40,7 +40,7 @@ const ORGANIZATION_LIST_PREFIX = 'mcorglist';
 const ORGANIZATION_DETAIL_PREFIX = 'mcorgdetail';
 const MIGRATION_BUTTON_PREFIX = 'mcmig';
 const QUERY_SELECT_COLLECTOR_MS = 2 * 60 * 1000;
-const ORGANIZATION_PAGE_SIZE = 6;
+const ORGANIZATION_PAGE_SIZE = 5;
 const VERIFY_BYPASS_GAMERTAGS = new Set(['xylofly', 'monoguraa']);
 
 function n(value) {

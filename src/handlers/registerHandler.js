@@ -27,7 +27,7 @@ const {
 } = require('./ethergeonCitizenRoleHandler');
 
 const GAMERTAG_REGEX = /^[A-Za-z0-9_ ]{3,32}$/;
-const LIST_PAGE_SIZE = 10;
+const LIST_PAGE_SIZE = 5;
 const LIST_ENTRY_MAX_LENGTH = 360;
 const LIST_DESCRIPTION_MAX_LENGTH = 3900;
 const LIST_BUTTON_PREFIX = 'citizenlist';
@@ -437,17 +437,45 @@ function buildInterviewButtons(userId, disabled = false) {
 
 function buildInterviewEmbed(entry, user) {
   const status = statusLabel(entry?.status);
+  const gamertag = entry?.gamertag || '-';
   return new EmbedBuilder()
     .setColor(statusColor(entry?.status))
     .setTitle(`${entry?.interviewId || 'interview'} | Minecraft Access Interview`)
     .setDescription([
       `Applicant: ${user ? `<@${user.id}>` : '-'}`,
       `Discord ID: \`${user?.id || '-'}\``,
-      `Gamertag: \`${entry?.gamertag || '-'}\``,
+      `Gamertag: \`${gamertag}\``,
       `Status: **${status}**`,
       `Registered: ${formatDateId(entry?.registeredAt)}`,
     ].join('\n'))
-    .setFooter({ text: 'Admin: approve jika interview lolos. Close untuk mengunci channel.' })
+    .addFields(
+      {
+        name: 'Pertanyaan Interview',
+        value: [
+          'Jawab pertanyaan berikut secara jujur dengan nomor **1-5**:',
+          '1. Silakan perkenalkan diri kamu secara singkat.',
+          '2. Apa tujuan kamu masuk ke server Ethergeon?',
+          '3. Apakah kamu player baru atau sudah lama bermain Minecraft?',
+          '4. Apakah kamu pernah merusuh di server lain, atau memiliki niat untuk merusuh di Ethergeon? Jelaskan dengan jujur.',
+          '5. Jika lolos, apakah kamu bersedia membaca dan mematuhi seluruh aturan di lobby sebelum bermain?',
+        ].join('\n'),
+        inline: false,
+      },
+      {
+        name: 'Perjanjian Wajib',
+        value: [
+          'Setelah menjawab, salin dan kirim pernyataan berikut:',
+          `**Saya, ${gamertag}, berjanji tidak akan merusuh, merusak, mengganggu player lain, atau melanggar aturan di server Ethergeon. Jika saya lolos, saya wajib membaca dan mematuhi aturan di lobby. Saya bersedia menerima sanksi jika melanggar perjanjian ini.**`,
+        ].join('\n'),
+        inline: false,
+      },
+      {
+        name: 'Untuk Admin / Interviewer',
+        value: 'Periksa seluruh jawaban dan perjanjian applicant di channel ini, lalu pilih **Approve** atau **Reject**.',
+        inline: false,
+      }
+    )
+    .setFooter({ text: 'Applicant: jawab 1-5 dan kirim perjanjian. Admin: review sebelum approve/reject.' })
     .setTimestamp(new Date());
 }
 
@@ -1090,7 +1118,7 @@ async function handleRegisterCommand(msg, options) {
 
   const entry = { ...saved.entry, userId: msg.author.id };
   await channel.send({
-    content: `<@${msg.author.id}> interview akses Minecraft kamu dimulai di sini. Admin akan meninjau sebelum akses legal diberikan.`,
+    content: `<@${msg.author.id}>, interview akses Minecraft kamu dimulai. Silakan jawab semua pertanyaan dan kirim perjanjian wajib di bawah ini.`,
     embeds: [buildInterviewEmbed(entry, msg.author)],
     components: [buildInterviewButtons(msg.author.id)],
     allowedMentions: { users: [msg.author.id], roles: [] },
