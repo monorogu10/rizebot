@@ -104,6 +104,7 @@ function normalizeOrder(order, users) {
 function removeDuplicateGamertags(users, order) {
   const keepByGamertag = new Map();
   const removedUserIds = [];
+  const conflicts = [];
 
   for (const userId of order) {
     const entry = users[userId];
@@ -123,10 +124,22 @@ function removeDuplicateGamertags(users, order) {
     const currentTime = getRegisteredAtMs(currentEntry);
 
     if (entryTime < currentTime) {
+      conflicts.push({
+        type: 'duplicate-gamertag',
+        userId: current,
+        canonicalUserId: userId,
+        entry: { ...currentEntry },
+      });
       removedUserIds.push(current);
       delete users[current];
       keepByGamertag.set(key, userId);
     } else {
+      conflicts.push({
+        type: 'duplicate-gamertag',
+        userId,
+        canonicalUserId: current,
+        entry: { ...entry },
+      });
       removedUserIds.push(userId);
       delete users[userId];
     }
@@ -135,7 +148,8 @@ function removeDuplicateGamertags(users, order) {
   return {
     users,
     order: order.filter(userId => users[userId]),
-    removedUserIds
+    removedUserIds,
+    conflicts,
   };
 }
 
@@ -300,6 +314,9 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
 
     state.users = deduped.users;
     state.order = deduped.order;
+    if (database && deduped.conflicts.length) {
+      database.saveRegistrationConflicts(deduped.conflicts);
+    }
     const loadedSequence = Math.max(0, Math.floor(Number(loaded.interviewSequence) || 0));
     const maxInterviewNumber = Object.values(state.users).reduce((max, entry) => {
       const match = String(entry?.interviewId || '').match(/(\d+)$/);
@@ -368,9 +385,30 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
 
   async function nextInterviewId() {
     await ensureReady();
-    interviewSequence += 1;
-    await persist();
-    return `interview-${String(interviewSequence).padStart(4, '0')}`;
+    if (database?.allocateInterviewCode) {
+      const allocated = database.allocateInterviewCode({ minimum: interviewSequence });
+      interviewSequence = Math.max(interviewSequence, allocated.sessionNumber);
+      return allocated.interviewId;
+    }
+    const allocatedSequence = interviewSequence + 1;
+    interviewSequence = allocatedSequence;
+    await persist('allocate-interview-id');
+    return `interview-${String(allocatedSequence).padStart(4, '0')}`;
+  }
+
+  async function relinkInterview(userId, metadata = {}) {
+    await ensureReady();
+    const entry = state.users[String(userId)];
+    if (!entry) return null;
+    if (metadata.interviewId) entry.interviewId = String(metadata.interviewId);
+    if (metadata.interviewChannelId) entry.interviewChannelId = String(metadata.interviewChannelId);
+    if (metadata.interviewCreatedAt) entry.interviewCreatedAt = String(metadata.interviewCreatedAt);
+    if (metadata.interviewClosedAt !== undefined) entry.interviewClosedAt = metadata.interviewClosedAt || null;
+    entry.updatedAt = new Date().toISOString();
+    const match = String(entry.interviewId || '').match(/(\d+)$/);
+    if (match) interviewSequence = Math.max(interviewSequence, Number(match[1]) || 0);
+    await persist('relink-interview');
+    return entry;
   }
 
   async function upsertPendingUser(userId, gamertag, username = '', metadata = {}) {
@@ -719,6 +757,7 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
     clearLastCleanup,
     registerUser,
     nextInterviewId,
+    relinkInterview,
     upsertPendingUser,
     updateUser,
     updateApprovedGamertag,
@@ -734,7 +773,8 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
     removeUser,
     resetAll,
     reloadFromMessage,
-    isStorageMessage
+    isStorageMessage,
+    getDatabase: () => database,
   };
 }
 

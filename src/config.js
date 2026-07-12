@@ -58,6 +58,12 @@ const INTERVIEW_ADMIN_ROLE_IDS = new Set(
     .map(item => String(item).trim())
     .filter(Boolean)
 );
+const LAW_ADMIN_ROLE_IDS = new Set(
+  String(process.env.LAW_ADMIN_ROLE_IDS || '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+);
 const WELCOME_CHANNEL_ID = '1195884175912358031';
 const LEAVE_CHANNEL_ID = '1412648951638917271';
 const BOT_OUTPUT_CHANNEL_IDS = new Set([
@@ -153,6 +159,7 @@ module.exports = {
   INTERVIEW_ARCHIVE_CATEGORY_ID,
   INTERVIEW_ARCHIVE_CATEGORY_NAME,
   INTERVIEW_ADMIN_ROLE_IDS,
+  LAW_ADMIN_ROLE_IDS,
   WELCOME_CHANNEL_ID,
   LEAVE_CHANNEL_ID,
   BOT_OUTPUT_CHANNEL_IDS,

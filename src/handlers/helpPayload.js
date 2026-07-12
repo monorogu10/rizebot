@@ -18,6 +18,7 @@ function createRizebotHelpPayload({
   showBridgeAdmin = showAdmin,
   showTopupAdmin = showAdmin,
   showModerationAdmin = showAdmin,
+  showLawAdmin = showAdmin,
   privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID,
 } = {}) {
   const privateChannel = channelText(privateChatChannelId, 'channel private');
@@ -26,7 +27,8 @@ function createRizebotHelpPayload({
     showInterviewAdmin ||
     showBridgeAdmin ||
     showTopupAdmin ||
-    showModerationAdmin
+    showModerationAdmin ||
+    showLawAdmin
   );
 
   const embed = new EmbedBuilder()
@@ -65,6 +67,14 @@ function createRizebotHelpPayload({
         inline: false,
       },
       {
+        name: 'Rules & Undang-Undang',
+        value: commandLines([
+          ['!rules', 'lihat item/entity terlarang langsung dari sistem keamanan Minecraft, dengan cache saat server offline.'],
+          ['!uu [nomor/kode/kata]', 'baca dan cari Undang-Undang Ethergeon beserta status serta versinya.'],
+        ]),
+        inline: false,
+      },
+      {
         name: 'Member private',
         value: [
           commandLines([
@@ -82,6 +92,7 @@ function createRizebotHelpPayload({
     });
 
   const registerAdminLines = [];
+  const interviewRecoveryLines = [];
   if (showRegisterAdmin) {
     registerAdminLines.push(
       ['!sync-citizen', 'paksa migrasi role lama ke Ethergeon Citizen.']
@@ -93,6 +104,14 @@ function createRizebotHelpPayload({
       ['!setreg @user <gamertag>', 'ubah gamertag legal setelah review manual admin/interviewer. Alias: `!ganti-reg`.'],
       ['!compile [jumlah|all]', 'compile closed interview lama ke JSON save channel, lalu hapus channel ticket.'],
       ['!archive-interviews [jumlah]', 'pindahkan backlog closed interview ke archive.']
+    );
+    interviewRecoveryLines.push(
+      ['!accept [--force] [@user] [gamertag]', 'loloskan interview; mode force memulihkan record/mapping yang rusak.'],
+      ['!reject [--force] [@user] [alasan]', 'gagalkan interview dan sinkronkan role serta akses Minecraft.'],
+      ['!close [--force] [@user]', 'tutup dan arsipkan interview; pending membutuhkan force.'],
+      ['!relink-interview @user [gamertag]', 'hubungkan channel interview saat ini ke record/session yang benar.'],
+      ['!interview-status [@user]', 'lihat registry dan histori session interview.'],
+      ['!repair-interviews --dry-run/--apply', 'audit atau perbaiki nomor ganda, orphan channel, dan mapping setelah backup.']
     );
   }
   if (showModerationAdmin) {
@@ -108,6 +127,14 @@ function createRizebotHelpPayload({
         inline: false,
       }
     );
+  }
+
+  if (interviewRecoveryLines.length) {
+    embed.addFields({
+      name: 'Admin Interview Recovery',
+      value: commandLines(interviewRecoveryLines),
+      inline: false,
+    });
   }
 
   if (showBridgeAdmin) {
@@ -150,6 +177,19 @@ function createRizebotHelpPayload({
         inline: false,
       }
     );
+  }
+
+  if (showLawAdmin) {
+    embed.addFields({
+      name: 'Admin Undang-Undang',
+      value: commandLines([
+        ['!create-uu <catatan>', 'buat draft Pasal 1 Ayat (1), lalu edit judul/Pasal/Ayat dan terbitkan lewat panel.'],
+        ['!draft-uu [ID]', 'lanjutkan draft terakhir atau buka draft berdasarkan ID. Alias: `!edit-uu`.'],
+        ['!revise-uu <nomor/kode> | <catatan>', 'buat versi revisi baru setelah konfirmasi.'],
+        ['!cabut-uu <nomor/kode> | <alasan>', 'cabut UU tanpa menghapus arsip dan riwayatnya.'],
+      ]),
+      inline: false,
+    });
   }
 
   return {

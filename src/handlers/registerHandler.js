@@ -1,5 +1,6 @@
 const {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
@@ -8,6 +9,7 @@ const {
 } = require('discord.js');
 const {
   INTERVIEW_ADMIN_ROLE_IDS,
+  LAW_ADMIN_ROLE_IDS,
   INTERVIEW_ARCHIVE_CATEGORY_ID,
   INTERVIEW_ARCHIVE_CATEGORY_NAME,
   INTERVIEW_CATEGORY_ID,
@@ -39,6 +41,11 @@ const LIST_BUTTON_PREFIX = 'citizenlist';
 const INTERVIEW_BUTTON_PREFIX = 'interview';
 const INTERVIEW_REPLY_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const INTERVIEW_REPLY_SCAN_MAX_MESSAGES = 1000;
+const registerProvisioningUsers = new Set();
+const interviewActionLocks = new Set();
+let interviewRepairInProgress = false;
+const interviewDoctorDryRuns = new Map();
+const INTERVIEW_DRY_RUN_VALID_MS = 30 * 60 * 1000;
 const DISCORD_CATEGORY_CHANNEL_LIMIT = 50;
 const DISCORD_SERVER_CATEGORY_LIMIT = 50;
 const DISCORD_SERVER_CHANNEL_LIMIT = 500;
@@ -417,30 +424,37 @@ function statusColor(statusRaw) {
   return 0xf2c94c;
 }
 
-function buildInterviewButtonId(action, userId) {
-  return `${INTERVIEW_BUTTON_PREFIX}:${action}:${userId}`;
+function buildInterviewButtonId(action, userId, sessionNumber = 0) {
+  const suffix = Math.max(0, Math.floor(Number(sessionNumber) || 0));
+  return `${INTERVIEW_BUTTON_PREFIX}:${action}:${userId}${suffix ? `:${suffix}` : ''}`;
 }
 
 function parseInterviewButtonId(customId) {
-  const match = String(customId || '').match(/^interview:(approve|reject|close):(\d{5,32})$/);
+  const match = String(customId || '').match(/^interview:(approve|reject|close):(\d{5,32})(?::(\d+))?$/);
   if (!match) return null;
-  return { action: match[1], userId: match[2] };
+  return { action: match[1], userId: match[2], sessionNumber: Number(match[3] || 0) };
 }
 
-function buildInterviewButtons(userId, disabled = false) {
+function sessionNumberFromInterviewId(value) {
+  const match = String(value || '').match(/(\d+)$/);
+  return match ? Math.max(0, Number(match[1]) || 0) : 0;
+}
+
+function buildInterviewButtons(userId, disabled = false, sessionNumber = 0, decision = 'PENDING') {
+  const decided = ['APPROVED', 'REJECTED'].includes(String(decision).toUpperCase());
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(buildInterviewButtonId('approve', userId))
+      .setCustomId(buildInterviewButtonId('approve', userId, sessionNumber))
       .setLabel('Approve')
       .setStyle(ButtonStyle.Success)
-      .setDisabled(disabled),
+      .setDisabled(disabled || decided),
     new ButtonBuilder()
-      .setCustomId(buildInterviewButtonId('reject', userId))
+      .setCustomId(buildInterviewButtonId('reject', userId, sessionNumber))
       .setLabel('Reject')
       .setStyle(ButtonStyle.Danger)
-      .setDisabled(disabled),
+      .setDisabled(disabled || decided),
     new ButtonBuilder()
-      .setCustomId(buildInterviewButtonId('close', userId))
+      .setCustomId(buildInterviewButtonId('close', userId, sessionNumber))
       .setLabel('Close Interview')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(disabled)
@@ -1047,7 +1061,18 @@ async function createInterviewChannel(msg, interviewId, applicant) {
   return guild.channels.create(options);
 }
 
-async function handleRegisterCommand(msg, options) {
+function maxInterviewNumberFromGuild(guild) {
+  let max = 0;
+  const channels = guild?.channels?.cache?.values?.() || [];
+  for (const channel of channels) {
+    const match = String(channel?.name || '').match(/(?:^|-)interview-(\d{3,})(?:$|-)/i);
+    const value = match ? Number(match[1]) : 0;
+    if (Number.isFinite(value) && value > max) max = value;
+  }
+  return max;
+}
+
+async function handleRegisterCommandUnlocked(msg, options) {
   const gamertag = parseRegisterCommand(msg.content);
   if (gamertag === null) return false;
   if (!gamertag || !isValidGamertag(gamertag)) {
@@ -1106,33 +1131,105 @@ async function handleRegisterCommand(msg, options) {
     return true;
   }
 
+  const activeSession = options.database?.getInterviewSession?.(msg.author.id, { by: 'user', activeOnly: true });
+  if (activeSession) {
+    await replyNoPing(
+      msg,
+      activeSession.channelId
+        ? `Kamu sudah punya interview aktif: ${channelMention(activeSession.channelId)} (\`${activeSession.interviewId}\`).`
+        : `Interview \`${activeSession.interviewId}\` sedang dibuat. Tunggu sebentar dan jangan kirim \`!reg\` lagi.`
+    );
+    return true;
+  }
+
   const duplicate = registerStore.findUserByGamertag?.(gamertag, msg.author.id);
   if (duplicate) {
     await replyNoPing(msg, `Gamertag \`${gamertag}\` sudah dipakai oleh user lain.`);
     return true;
   }
 
-  const interviewId = await registerStore.nextInterviewId();
+  let reservedSession = null;
+  let interviewId;
+  if (options.database?.reserveInterviewSession) {
+    const reservation = options.database.reserveInterviewSession({
+      userId: msg.author.id,
+      username: msg.author?.tag || msg.author?.username || '',
+      gamertag,
+      minimumSequence: maxInterviewNumberFromGuild(msg.guild),
+      actor: msg.author,
+    });
+    if (!reservation.ok) {
+      const session = reservation.session;
+      await replyNoPing(
+        msg,
+        reservation.code === 'active-gamertag-session'
+          ? `Gamertag \`${gamertag}\` sedang dipakai interview aktif milik <@${session?.userId || '0'}>.`
+          : session?.channelId
+            ? `Kamu sudah punya interview aktif: ${channelMention(session.channelId)}.`
+            : `Interview \`${session?.interviewId || '-'}\` masih dalam proses pembuatan.`
+      );
+      return true;
+    }
+    reservedSession = reservation.session;
+    interviewId = reservedSession.interviewId;
+  } else {
+    interviewId = await registerStore.nextInterviewId();
+  }
   const channel = await createInterviewChannel(msg, interviewId, msg.author).catch(err => {
     console.error('Failed to create interview channel:', err);
     return null;
   });
   if (!channel) {
+    if (reservedSession) {
+      options.database.failInterviewSession(reservedSession.sessionNumber, 'Discord channel creation failed', msg.author);
+    }
     await replyNoPing(msg, 'Gagal membuat channel interview. Cek permission bot Manage Channels.');
     return true;
   }
 
-  const saved = await registerStore.upsertPendingUser(
-    msg.author.id,
-    gamertag,
-    msg.author?.tag || msg.author?.username || '',
-    {
-      interviewId,
-      interviewChannelId: channel.id,
-      interviewCreatedAt: new Date().toISOString(),
+  if (reservedSession) {
+    try {
+      reservedSession = options.database.attachInterviewChannel(reservedSession.sessionNumber, channel.id, msg.author);
+    } catch (error) {
+      options.database.failInterviewSession(reservedSession.sessionNumber, error.message, msg.author);
+      await channel.delete('Interview reservation attach failed').catch(() => null);
+      await replyNoPing(msg, `Gagal menghubungkan session interview ke database: ${error.message}`);
+      return true;
     }
-  );
+  }
+
+  let saved;
+  try {
+    saved = await registerStore.upsertPendingUser(
+      msg.author.id,
+      gamertag,
+      msg.author?.tag || msg.author?.username || '',
+      {
+        interviewId,
+        interviewChannelId: channel.id,
+        interviewCreatedAt: new Date().toISOString(),
+      }
+    );
+  } catch (error) {
+    if (reservedSession) {
+      options.database.closeInterviewSession(reservedSession, {
+        actor: msg.author,
+        force: true,
+        reason: `Registry persist failed: ${error.message}`,
+      });
+    }
+    await channel.delete('Registry persist failed after session reservation').catch(() => null);
+    await replyNoPing(msg, `Register dibatalkan karena data gagal disimpan: ${error.message}`);
+    return true;
+  }
   if (saved?.duplicate) {
+    if (reservedSession) {
+      options.database.closeInterviewSession(reservedSession, {
+        actor: msg.author,
+        force: true,
+        reason: `Gamertag conflict with ${saved.duplicateUserId}`,
+      });
+    }
     await channel.delete('Duplicate Minecraft gamertag registration').catch(() => null);
     await replyNoPing(msg, `Gamertag \`${gamertag}\` sudah dipakai oleh user lain.`);
     return true;
@@ -1148,7 +1245,7 @@ async function handleRegisterCommand(msg, options) {
   await channel.send({
     content: `<@${msg.author.id}>, interview akses Minecraft kamu dimulai. Silakan jawab semua pertanyaan dan kirim perjanjian wajib di bawah ini.`,
     embeds: [buildInterviewEmbed(entry, msg.author)],
-    components: [buildInterviewButtons(msg.author.id)],
+    components: [buildInterviewButtons(msg.author.id, false, reservedSession?.sessionNumber || sessionNumberFromInterviewId(interviewId))],
     allowedMentions: { users: [msg.author.id], roles: [] },
   }).catch(err => {
     console.error('Failed to send interview intro:', err);
@@ -1159,6 +1256,26 @@ async function handleRegisterCommand(msg, options) {
     `Register diterima. Nickname Discord disync ke \`${gamertag}\`. Channel interview kamu: ${channelMention(channel.id)}.${nicknameNote}`
   );
   return true;
+}
+
+async function handleRegisterCommand(msg, options) {
+  if (parseRegisterCommand(msg?.content) === null) return false;
+  if (interviewRepairInProgress) {
+    await replyNoPing(msg, 'Registrasi sedang maintenance karena Interview Doctor menjalankan repair. Coba lagi setelah proses selesai.');
+    return true;
+  }
+  const userId = String(msg?.author?.id || '').trim();
+  if (!userId) return handleRegisterCommandUnlocked(msg, options);
+  if (registerProvisioningUsers.has(userId)) {
+    await replyNoPing(msg, 'Register kamu sedang diproses. Tunggu channel interview selesai dibuat; jangan kirim `!reg` berulang kali.');
+    return true;
+  }
+  registerProvisioningUsers.add(userId);
+  try {
+    return await handleRegisterCommandUnlocked(msg, options);
+  } finally {
+    registerProvisioningUsers.delete(userId);
+  }
 }
 
 async function handleSetRegisterGamertagCommand(msg, options) {
@@ -1234,6 +1351,840 @@ async function handleSetRegisterGamertagCommand(msg, options) {
     msg,
     `Gamertag legal <@${parsed.userId}> diubah${oldText} menjadi \`${updated.entry.gamertag}\` oleh admin. Cache akses Minecraft ikut disync.`
   );
+  return true;
+}
+
+function parseInterviewAdminCommand(content) {
+  const match = String(content || '').trim().match(/^!(accept|approve|reject|close)(?:\s+([\s\S]+))?$/i);
+  if (!match) return null;
+  let tail = String(match[2] || '').trim();
+  const force = /(?:^|\s)--force(?:\s|$)/i.test(tail);
+  tail = tail.replace(/(?:^|\s)--force(?=\s|$)/ig, ' ').replace(/\s+/g, ' ').trim();
+  const userMatch = tail.match(/<@!?(\d{5,32})>|(?:^|\s)(\d{5,32})(?=\s|$)/);
+  const userId = userMatch ? (userMatch[1] || userMatch[2]) : '';
+  if (userMatch) tail = tail.replace(userMatch[0], ' ').replace(/\s+/g, ' ').trim();
+  return {
+    action: match[1].toLowerCase() === 'approve' ? 'accept' : match[1].toLowerCase(),
+    force,
+    userId,
+    detail: tail,
+  };
+}
+
+function actorPayload(user) {
+  return { id: String(user?.id || ''), name: String(user?.tag || user?.username || 'Discord Admin') };
+}
+
+function channelInterviewIdentity(channel) {
+  const match = String(channel?.name || '').match(/(?:^|-)interview-(\d{3,})(?:$|-)/i);
+  const sessionNumber = match ? Number(match[1]) : 0;
+  return {
+    sessionNumber: Number.isFinite(sessionNumber) ? sessionNumber : 0,
+    interviewId: sessionNumber ? `interview-${String(sessionNumber).padStart(4, '0')}` : '',
+  };
+}
+
+async function resolveInterviewCommandTarget(msg, parsed, options) {
+  const database = options.database;
+  const channelSession = database?.getInterviewSession?.(msg.channelId, { by: 'channel' }) || null;
+  const channelLinked = options.registerStore.findUserByInterviewChannel?.(msg.channelId) || null;
+  let session = channelSession;
+  let linked = channelLinked;
+  const userId = String(parsed.userId || session?.userId || linked?.userId || '').trim();
+  if (parsed.userId && session?.userId !== userId) {
+    session = database?.getInterviewSession?.(userId, { by: 'user', activeOnly: true }) ||
+      database?.getInterviewSession?.(userId, { by: 'user' }) || null;
+  }
+  if (parsed.userId && linked?.userId !== userId) linked = null;
+  const entry = userId ? options.registerStore.getUser(userId) : null;
+  if (!session && userId) {
+    session = database?.getInterviewSession?.(userId, { by: 'user', activeOnly: true }) ||
+      database?.getInterviewSession?.(userId, { by: 'user' }) || null;
+  }
+  return { userId, entry, session, linked, channelSession, channelLinked };
+}
+
+async function ensureForceRegistryEntry(msg, parsed, target, options) {
+  if (target.entry) return target.entry;
+  if (!parsed.force || !target.userId) return null;
+  const gamertag = normalizeGamertag(parsed.action === 'accept' ? parsed.detail : target.session?.gamertag || '');
+  if (!isValidGamertag(gamertag)) return null;
+  const duplicate = options.registerStore.findUserByGamertag?.(gamertag, target.userId);
+  if (duplicate) {
+    await replyNoPing(msg, `Force dibatalkan: gamertag \`${gamertag}\` dimiliki <@${duplicate.userId}>. Gunakan review/takeover terpisah; data tidak ditimpa otomatis.`);
+    return null;
+  }
+  const member = await msg.guild.members.fetch(target.userId).catch(() => null);
+  const currentChannelOwnedByTarget = isInterviewTicketChannel(msg.channel) &&
+    (!target.channelSession || target.channelSession.userId === target.userId) &&
+    (!target.channelLinked || target.channelLinked.userId === target.userId);
+  const channelId = target.session?.channelId || (currentChannelOwnedByTarget ? msg.channelId : '');
+  const targetChannel = channelId ? msg.guild.channels.cache.get(channelId) : null;
+  const identity = channelInterviewIdentity(targetChannel || (currentChannelOwnedByTarget ? msg.channel : null));
+  const result = await options.registerStore.upsertPendingUser(
+    target.userId,
+    gamertag,
+    member?.user?.tag || member?.user?.username || '',
+    {
+      interviewId: target.session?.interviewId || identity.interviewId,
+      interviewChannelId: channelId,
+      interviewCreatedAt: targetChannel?.createdAt?.toISOString?.() ||
+        (currentChannelOwnedByTarget ? msg.channel?.createdAt?.toISOString?.() : '') || new Date().toISOString(),
+    }
+  );
+  return result?.duplicate ? null : result?.entry || null;
+}
+
+function ensureCommandSession(msg, target, entry, options, force) {
+  const database = options.database;
+  if (!database || !target.userId) return target.session || null;
+  let session = target.session;
+  const actor = actorPayload(msg.author);
+  const currentChannelOwnedByTarget = isInterviewTicketChannel(msg.channel) &&
+    (!target.channelSession || target.channelSession.userId === target.userId) &&
+    (!target.channelLinked || target.channelLinked.userId === target.userId);
+  if (session && force && String(session.channelId || '') !== String(msg.channelId || '') && currentChannelOwnedByTarget) {
+    session = database.relinkInterviewSession(session, {
+      channelId: msg.channelId,
+      userId: target.userId,
+      username: entry?.username || '',
+      gamertag: entry?.gamertag || session.gamertag,
+      lifecycleStatus: 'OPEN',
+      legacyInterviewId: session.interviewId,
+    }, actor);
+  }
+  if (session) return session;
+  const targetChannel = msg.guild?.channels?.cache?.get(entry?.interviewChannelId || '') ||
+    (currentChannelOwnedByTarget ? msg.channel : null);
+  if (!targetChannel) {
+    if (!force || !entry?.gamertag) return null;
+    const allocation = database.allocateInterviewCode({ minimum: maxInterviewNumberFromGuild(msg.guild) });
+    return database.upsertInterviewSessionFromRepair({
+      sessionNumber: allocation.sessionNumber,
+      interviewId: allocation.interviewId,
+      userId: target.userId,
+      username: entry.username || '',
+      gamertag: entry.gamertag,
+      channelId: '',
+      lifecycleStatus: 'ORPHANED',
+      decision: String(entry.status || '').toUpperCase(),
+    }, actor);
+  }
+  const channelIdentity = channelInterviewIdentity(targetChannel);
+  let allocation = channelIdentity;
+  const numberConflict = allocation.sessionNumber
+    ? database.getInterviewSession(String(allocation.sessionNumber), { by: 'number' })
+    : null;
+  if (!allocation.sessionNumber || (numberConflict && numberConflict.userId !== target.userId)) {
+    allocation = database.allocateInterviewCode({ minimum: maxInterviewNumberFromGuild(msg.guild) });
+  } else {
+    database.setInterviewSequenceAtLeast(allocation.sessionNumber);
+  }
+  return database.upsertInterviewSessionFromRepair({
+    sessionNumber: allocation.sessionNumber,
+    interviewId: allocation.interviewId,
+    legacyInterviewId: channelIdentity.interviewId,
+    userId: target.userId,
+    username: entry?.username || '',
+    gamertag: entry?.gamertag || target.session?.gamertag || 'unknown',
+    channelId: targetChannel.id,
+    lifecycleStatus: 'OPEN',
+    decision: String(entry?.status || '').toUpperCase(),
+    openedAt: targetChannel.createdAt?.toISOString?.(),
+  }, actor);
+}
+
+async function confirmForceInterviewAction(msg, parsed, target, entry) {
+  if (!parsed.force) return true;
+  const affectedChannelId = target.session?.channelId || entry?.interviewChannelId ||
+    (isInterviewTicketChannel(msg.channel) && (!target.channelSession || target.channelSession.userId === target.userId)
+      ? msg.channelId
+      : '');
+  const token = `${Date.now().toString(36)}_${String(msg.id || msg.author.id).slice(-8)}`;
+  const confirmId = `iforce_yes_${token}`;
+  const cancelId = `iforce_no_${token}`;
+  const panel = await msg.reply({
+    embeds: [new EmbedBuilder()
+      .setColor(parsed.action === 'accept' ? 0x2ecc71 : parsed.action === 'reject' ? 0xe74c3c : 0xf2c94c)
+      .setTitle(`Konfirmasi FORCE ${parsed.action.toUpperCase()}`)
+      .setDescription([
+        `Applicant: <@${target.userId}>`,
+        `Gamertag: \`${entry?.gamertag || target.session?.gamertag || parsed.detail || '-'}\``,
+        `Session: \`${target.session?.interviewId || channelInterviewIdentity(msg.channel).interviewId || 'akan direkonstruksi'}\``,
+        `Channel session: ${affectedChannelId ? `<#${affectedChannelId}>` : '`tidak ada / akan direkonstruksi tanpa channel`'}`,
+        '',
+        'Force dapat membangun ulang mapping dan mengubah role serta akses Minecraft. Pastikan target benar.',
+      ].join('\n'))],
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(confirmId).setLabel('Konfirmasi Force').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(cancelId).setLabel('Batalkan').setStyle(ButtonStyle.Secondary)
+    )],
+    allowedMentions: { parse: [], repliedUser: false },
+  });
+  if (!panel?.awaitMessageComponent) return true;
+  const interaction = await panel.awaitMessageComponent({
+    filter: item => item.user.id === msg.author.id && [confirmId, cancelId].includes(item.customId),
+    time: 60_000,
+  }).catch(() => null);
+  if (!interaction) {
+    await panel.edit({ content: 'Konfirmasi force kedaluwarsa; tidak ada perubahan.', embeds: [], components: [] }).catch(() => null);
+    return false;
+  }
+  await interaction.deferUpdate().catch(() => null);
+  if (interaction.customId === cancelId) {
+    await panel.edit({ content: 'Force dibatalkan.', embeds: [], components: [] }).catch(() => null);
+    return false;
+  }
+  await panel.edit({ content: 'Force dikonfirmasi. Memproses...', embeds: [], components: [] }).catch(() => null);
+  return true;
+}
+
+async function handleInterviewAdminCommand(msg, options) {
+  const parsed = parseInterviewAdminCommand(msg.content);
+  if (!parsed) return false;
+  if (interviewRepairInProgress) {
+    await replyNoPing(msg, 'Keputusan interview dikunci sementara karena repair sedang berjalan.');
+    return true;
+  }
+  if (!await isInterviewAdmin(msg)) {
+    await replyNoPing(msg, 'Command accept/reject/close khusus admin atau interviewer.');
+    return true;
+  }
+  if (!await ensureRegisterStore(options.registerStore, msg.client)) {
+    await replyNoPing(msg, 'Register store belum siap.');
+    return true;
+  }
+  let target = await resolveInterviewCommandTarget(msg, parsed, options);
+  if (!target.userId) {
+    await replyNoPing(msg, `Applicant tidak dapat dikenali. Gunakan \`!${parsed.action}${parsed.force ? ' --force' : ''} @user\`.`);
+    return true;
+  }
+  let entry = target.entry;
+  if (!entry && !parsed.force && parsed.action !== 'close') {
+    await replyNoPing(
+      msg,
+      `Data interview <@${target.userId}> tidak ditemukan. Gunakan mode \`--force\` setelah memastikan user dan gamertag.`
+    );
+    return true;
+  }
+  if (parsed.action === 'accept' && parsed.force) {
+    const forcedGamertag = normalizeGamertag(parsed.detail || entry?.gamertag || '');
+    if (!isValidGamertag(forcedGamertag)) {
+      await replyNoPing(msg, 'Data gamertag belum ada. Gunakan `!accept --force @user gamertag`; gamertag harus 3-32 huruf/angka/underscore/spasi.');
+      return true;
+    }
+    const duplicate = options.registerStore.findUserByGamertag?.(forcedGamertag, target.userId);
+    if (duplicate) {
+      await replyNoPing(msg, `Force dibatalkan: gamertag \`${forcedGamertag}\` dimiliki <@${duplicate.userId}>.`);
+      return true;
+    }
+  }
+  if (parsed.force && parsed.action === 'reject' && !entry && !isValidGamertag(target.session?.gamertag || '')) {
+    await replyNoPing(msg, 'Force reject membutuhkan record atau session dengan gamertag yang valid. Gunakan `!relink-interview @user gamertag` terlebih dahulu.');
+    return true;
+  }
+  const canCloseCurrentTicket = isInterviewTicketChannel(msg.channel) &&
+    (!target.channelSession || target.channelSession.userId === target.userId) &&
+    (!target.channelLinked || target.channelLinked.userId === target.userId);
+  if (parsed.action === 'close' && !entry && !target.session && !canCloseCurrentTicket) {
+    await replyNoPing(msg, `Tidak ada record, session, atau channel interview milik <@${target.userId}> yang dapat ditutup.`);
+    return true;
+  }
+  const actionKey = `${target.userId}:${target.session?.sessionNumber || msg.channelId}`;
+  if (interviewActionLocks.has(actionKey)) {
+    await replyNoPing(msg, 'Interview ini sedang diproses oleh aksi lain.');
+    return true;
+  }
+  interviewActionLocks.add(actionKey);
+  try {
+    if (!await confirmForceInterviewAction(msg, parsed, target, entry)) return true;
+
+    if (!entry && parsed.force && parsed.action !== 'close') {
+      entry = await ensureForceRegistryEntry(msg, parsed, target, options);
+      if (!entry) {
+        await replyNoPing(
+          msg,
+          `Data <@${target.userId}> tidak dapat direkonstruksi. Untuk recovery accept gunakan \`!accept --force @user gamertag\`.`
+        );
+        return true;
+      }
+    }
+    if (parsed.action === 'accept' && parsed.force) {
+      const forcedGamertag = normalizeGamertag(parsed.detail || entry.gamertag);
+      if (gamertagKey(entry.gamertag) !== gamertagKey(forcedGamertag)) {
+        entry = await options.registerStore.updateUser(target.userId, forcedGamertag, entry.username || '');
+        if (!entry || entry.duplicate) {
+          await replyNoPing(msg, 'Gagal memperbarui gamertag untuk force accept.');
+          return true;
+        }
+      }
+    }
+
+    let session = ensureCommandSession(msg, target, entry, options, parsed.force);
+    if (!session && !parsed.force) {
+      await replyNoPing(msg, 'Session interview aktif tidak ditemukan. Jalankan `!interview-doctor`, atau gunakan mode `--force` setelah target diverifikasi.');
+      return true;
+    }
+    if (session && !parsed.force && !['RESERVED', 'OPEN'].includes(session.lifecycleStatus)) {
+      await replyNoPing(msg, `Session \`${session.interviewId}\` sudah ${session.lifecycleStatus}. Gunakan \`--force\` hanya setelah memeriksa target dan laporan Interview Doctor.`);
+      return true;
+    }
+    if (session && !parsed.force && parsed.action !== 'close' && session.decision !== 'PENDING') {
+      await replyNoPing(msg, `Session \`${session.interviewId}\` sudah diputuskan ${session.decision}. Keputusan kedua ditolak agar data tidak tumpang tindih.`);
+      return true;
+    }
+    const actor = actorPayload(msg.author);
+    const member = await msg.guild.members.fetch(target.userId).catch(() => null);
+    if (parsed.action === 'accept') {
+      const updated = await options.registerStore.approveUser(target.userId, actor);
+      if (!updated) throw new Error('Record register tidak dapat di-approve');
+      if (session) session = options.database.decideInterviewSession(session, 'APPROVED', { actor, force: parsed.force });
+      if (session && parsed.force && !session.channelId) {
+        session = options.database.closeInterviewSession(session, { actor, force: true, reason: 'Force accept tanpa channel interview aktif' });
+      }
+      if (member) {
+        await moveMemberToCitizenRole(member, {
+          citizenRoleId: options.verifiedRoleId,
+          legacyRoleId: options.pendingRoleId,
+          rejectedRoleId: options.rejectedRoleId,
+        });
+        await syncGamertagNickname(member, updated.gamertag, parsed.force ? 'force accept interview' : 'accept interview command');
+      }
+      queueLegalAccessJob(options.bridge, 'approve', updated, target.userId, msg.author);
+      await replyNoPing(msg, `✅ <@${target.userId}> diputuskan **LOLOS**${parsed.force ? ' melalui force recovery' : ''} sebagai \`${updated.gamertag}\`. Session: \`${session?.interviewId || 'legacy'}\`.`);
+      return true;
+    }
+    if (parsed.action === 'reject') {
+      const reason = parsed.detail || (parsed.force ? 'Force reject oleh admin' : 'Ditolak setelah review interview');
+      const updated = await options.registerStore.rejectUser(target.userId, actor, reason);
+      if (!updated) throw new Error('Record register tidak dapat di-reject');
+      if (session) session = options.database.decideInterviewSession(session, 'REJECTED', { actor, reason, force: parsed.force });
+      if (session && parsed.force && !session.channelId) {
+        session = options.database.closeInterviewSession(session, { actor, force: true, reason: 'Force reject tanpa channel interview aktif' });
+      }
+      if (member) {
+        await moveMemberToRejectedRole(member, {
+          rejectedRoleId: options.rejectedRoleId,
+          pendingRoleId: options.pendingRoleId,
+          verifiedRoleId: options.verifiedRoleId,
+        });
+      }
+      queueLegalAccessJob(options.bridge, 'revoke', updated, target.userId, msg.author);
+      await replyNoPing(msg, `❌ <@${target.userId}> diputuskan **GAGAL**${parsed.force ? ' melalui force recovery' : ''}. Alasan: ${reason}`);
+      return true;
+    }
+
+    if (!parsed.force && entry?.status === 'pending') {
+      await replyNoPing(msg, 'Interview masih PENDING. Putuskan `!accept` atau `!reject` dahulu, atau gunakan `!close --force` untuk menutup tanpa keputusan.');
+      return true;
+    }
+    if (entry) await options.registerStore.closeInterview(target.userId, actor);
+    if (session) session = options.database.closeInterviewSession(session, { actor, force: parsed.force, reason: parsed.detail });
+    const currentChannelOwnedByTarget = isInterviewTicketChannel(msg.channel) &&
+      (!target.channelSession || target.channelSession.userId === target.userId) &&
+      (!target.channelLinked || target.channelLinked.userId === target.userId);
+    const closeChannelId = session?.channelId || entry?.interviewChannelId ||
+      (currentChannelOwnedByTarget ? msg.channelId : '');
+    const targetChannel = closeChannelId
+      ? (closeChannelId === msg.channelId ? msg.channel : await msg.guild.channels.fetch(closeChannelId).catch(() => null))
+      : null;
+    await targetChannel?.permissionOverwrites?.edit(target.userId, { ViewChannel: false, SendMessages: false }).catch(() => null);
+    const closedName = `closed-${session?.interviewId || entry?.interviewId || channelInterviewIdentity(targetChannel).interviewId || 'interview'}`.slice(0, 100);
+    await targetChannel?.setName?.(closedName, parsed.force ? 'Force close interview' : 'Close interview command').catch(() => null);
+    if (options.transcriptStore?.appendTranscript && targetChannel) {
+      const compiled = await compileInterviewChannel(targetChannel, {
+        registerStore: options.registerStore,
+        transcriptStore: options.transcriptStore,
+        actor: msg.author,
+        entryUserId: target.userId,
+        entry,
+        source: parsed.force ? 'force-close-command' : 'close-command',
+      }).catch(error => ({ ok: false, code: error.message }));
+      if (compiled.ok) {
+        await replyNoPing(msg, `🔒 Interview <@${target.userId}> ditutup dan dicompile ke \`${compiled.fileName}\`${parsed.force ? ' melalui force recovery' : ''}.`);
+        const deleted = await deleteCompiledInterviewChannel(
+          targetChannel,
+          options.transcriptStore,
+          parsed.force ? 'Force-closed interview compiled' : 'Interview command close compiled'
+        );
+        await sendCompileLog(msg.client, [
+          `Interview command close: \`${closedName}\``,
+          `Applicant: <@${target.userId}> | Session: \`${session?.interviewId || 'legacy'}\``,
+          `JSON: \`${compiled.fileName}\` | Channel deleted: ${deleted ? 'yes' : 'no'}`,
+        ]);
+        return true;
+      }
+    }
+    if (targetChannel) {
+      await moveChannelToArchive(msg.guild, targetChannel, parsed.force ? 'Force-closed interview archived' : 'Interview archived').catch(() => null);
+    }
+    await replyNoPing(msg, `🔒 Interview <@${target.userId}> ditutup${parsed.force ? ' melalui force recovery' : ''}. Session: \`${session?.interviewId || 'legacy'}\`.`);
+    return true;
+  } catch (error) {
+    console.error('Interview admin command failed:', error);
+    await replyNoPing(msg, `Gagal memproses command: ${error.message}`);
+    return true;
+  } finally {
+    interviewActionLocks.delete(actionKey);
+  }
+}
+
+async function inspectInterviewChannel(channel, registerStore, database) {
+  const identity = channelInterviewIdentity(channel);
+  const linked = registerStore.findUserByInterviewChannel?.(channel.id) || null;
+  const session = database?.getInterviewSession?.(channel.id, { by: 'channel' }) || null;
+  let userId = session?.userId || linked?.userId || '';
+  let gamertag = session?.gamertag || linked?.entry?.gamertag || '';
+  let controlMessageId = '';
+  try {
+    const ordered = await fetchInterviewMessages(channel, 1000);
+    for (const message of ordered) {
+      for (const row of message.components || []) {
+        for (const component of row.components || []) {
+          const parsed = parseInterviewButtonId(component.customId);
+          if (!parsed) continue;
+          userId = userId || parsed.userId;
+          controlMessageId = message.id;
+        }
+      }
+      for (const embed of message.embeds || []) {
+        const description = String(embed.description || '');
+        const applicant = description.match(/Discord ID:\s*`(\d{5,32})`/i) || description.match(/Applicant:\s*<@!?(\d{5,32})>/i);
+        const tag = description.match(/Gamertag:\s*`([^`]+)`/i);
+        if (applicant) userId = userId || applicant[1];
+        if (tag) gamertag = gamertag || normalizeGamertag(tag[1]);
+      }
+      if (!userId) {
+        const mention = String(message.content || '').match(/<@!?(\d{5,32})>/);
+        if (mention) userId = mention[1];
+      }
+    }
+  } catch (error) {
+    return {
+      channelId: channel.id,
+      channelName: channel.name,
+      createdTimestamp: Number(channel.createdTimestamp || 0),
+      ...identity,
+      userId,
+      gamertag,
+      linkedUserId: linked?.userId || '',
+      sessionNumber: session?.sessionNumber || identity.sessionNumber,
+      session,
+      scanError: error.message,
+      controlMessageId,
+    };
+  }
+  return {
+    channelId: channel.id,
+    channelName: channel.name,
+    createdTimestamp: Number(channel.createdTimestamp || 0),
+    ...identity,
+    userId,
+    gamertag,
+    linkedUserId: linked?.userId || '',
+    sessionNumber: session?.sessionNumber || identity.sessionNumber,
+    session,
+    scanError: '',
+    controlMessageId,
+  };
+}
+
+async function buildInterviewDoctorReport(guild, options) {
+  await guild.channels.fetch().catch(() => null);
+  const channels = [...guild.channels.cache.values()]
+    .filter(channel => channel.type === ChannelType.GuildText && isInterviewTicketChannel(channel));
+  const descriptors = [];
+  for (const channel of channels) {
+    descriptors.push(await inspectInterviewChannel(channel, options.registerStore, options.database));
+  }
+  const byCode = new Map();
+  const byUser = new Map();
+  let maxNumber = Number(options.database?.currentInterviewSequence?.() || 0);
+  for (const item of descriptors) {
+    if (item.interviewId) {
+      if (!byCode.has(item.interviewId)) byCode.set(item.interviewId, []);
+      byCode.get(item.interviewId).push(item);
+    }
+    if (item.userId && !/^closed-/i.test(item.channelName)) {
+      if (!byUser.has(item.userId)) byUser.set(item.userId, []);
+      byUser.get(item.userId).push(item);
+    }
+    maxNumber = Math.max(maxNumber, Number(item.sessionNumber || 0));
+  }
+  const duplicateNumbers = [...byCode.entries()]
+    .filter(([, rows]) => rows.length > 1)
+    .map(([interviewId, rows]) => ({ interviewId, channels: rows.map(row => ({ id: row.channelId, name: row.channelName, userId: row.userId })) }));
+  const duplicateActiveUsers = [...byUser.entries()]
+    .filter(([, rows]) => rows.length > 1)
+    .map(([userId, rows]) => ({ userId, channels: rows.map(row => ({ id: row.channelId, name: row.channelName })) }));
+  const orphanChannels = descriptors.filter(item => !item.userId || (!item.session && !item.linkedUserId));
+  const missingChannels = options.registerStore.getEntries()
+    .filter(entry => entry.interviewChannelId && !guild.channels.cache.has(entry.interviewChannelId))
+    .map(entry => ({ userId: entry.userId, interviewId: entry.interviewId, channelId: entry.interviewChannelId }));
+  const mappingMismatches = descriptors.filter(item => item.linkedUserId && item.userId && item.linkedUserId !== item.userId);
+  const openConflicts = options.database?.listRegistrationConflicts?.({ openOnly: true, limit: 1000 }) || [];
+  const issueSessions = (options.database?.listInterviewSessions?.({ limit: 10000 }) || [])
+    .filter(session => ['ORPHANED', 'CONFLICT', 'PROVISION_FAILED'].includes(session.lifecycleStatus));
+  let plannedMax = maxNumber;
+  const plannedCodeByChannel = new Map();
+  for (const rows of byCode.values()) {
+    rows.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    rows.forEach((row, index) => {
+      if (row.sessionNumber && index === 0) {
+        plannedCodeByChannel.set(row.channelId, row.interviewId);
+      } else {
+        plannedMax += 1;
+        plannedCodeByChannel.set(row.channelId, `interview-${String(plannedMax).padStart(4, '0')}`);
+      }
+    });
+  }
+  for (const row of descriptors) {
+    if (plannedCodeByChannel.has(row.channelId)) continue;
+    plannedMax += 1;
+    plannedCodeByChannel.set(row.channelId, `interview-${String(plannedMax).padStart(4, '0')}`);
+  }
+  const canonicalByUser = new Map();
+  for (const [userId, rows] of byUser) {
+    const newest = [...rows].sort((a, b) => b.createdTimestamp - a.createdTimestamp)[0];
+    canonicalByUser.set(userId, newest?.channelId || '');
+  }
+  const repairPlan = descriptors.map(item => ({
+    channelId: item.channelId,
+    currentName: item.channelName,
+    applicantUserId: item.userId,
+    proposedInterviewId: plannedCodeByChannel.get(item.channelId) || item.interviewId,
+    action: !item.userId
+      ? 'NEEDS_REVIEW'
+      : canonicalByUser.get(item.userId) === item.channelId
+        ? 'RELINK_OPEN'
+        : 'RENUMBER_CLOSE_DUPLICATE',
+  }));
+  return {
+    generatedAt: new Date().toISOString(),
+    guildId: guild.id,
+    maxNumber,
+    stats: {
+      channels: descriptors.length,
+      duplicateNumberGroups: duplicateNumbers.length,
+      duplicateActiveUsers: duplicateActiveUsers.length,
+      orphanChannels: orphanChannels.length,
+      missingChannels: missingChannels.length,
+      mappingMismatches: mappingMismatches.length,
+      registrationConflicts: openConflicts.length,
+      issueSessions: issueSessions.length,
+    },
+    duplicateNumbers,
+    duplicateActiveUsers,
+    orphanChannels,
+    missingChannels,
+    mappingMismatches,
+    registrationConflicts: openConflicts,
+    issueSessions,
+    repairPlan,
+    channels: descriptors,
+  };
+}
+
+function doctorSummary(report, mode = 'DRY-RUN') {
+  const stats = report.stats;
+  return [
+    `Interview Doctor — ${mode}`,
+    `Channel diperiksa: ${stats.channels}`,
+    `Grup nomor ganda: ${stats.duplicateNumberGroups}`,
+    `User dengan beberapa interview aktif: ${stats.duplicateActiveUsers}`,
+    `Channel orphan/belum punya mapping: ${stats.orphanChannels}`,
+    `Record menunjuk channel hilang: ${stats.missingChannels}`,
+    `Mapping applicant berbeda: ${stats.mappingMismatches}`,
+    `Konflik registrasi tersimpan: ${stats.registrationConflicts}`,
+    `Session bermasalah: ${stats.issueSessions}`,
+    `Sequence maksimum: ${report.maxNumber}`,
+  ].join('\n');
+}
+
+async function sendDoctorReport(msg, report, mode) {
+  const fileName = `interview-${String(mode).toLowerCase()}-${Date.now()}.json`;
+  const attachment = new AttachmentBuilder(Buffer.from(JSON.stringify(report, null, 2), 'utf8'), { name: fileName });
+  const summaryReport = report?.stats ? report : report?.after;
+  const repairSummary = report?.after
+    ? [
+      `Renamed: ${report.renamed?.length || 0}`,
+      `Duplicate ditutup: ${report.closedDuplicates?.length || 0}`,
+      `Relink: ${report.relinked?.length || 0}`,
+      `Reconstructed: ${report.reconstructed?.length || 0}`,
+      `Unresolved: ${report.unresolved?.length || 0}`,
+      `Failed: ${report.failed?.length || 0}`,
+    ].join('\n')
+    : '';
+  await msg.reply({
+    content: `${doctorSummary(summaryReport, mode)}${repairSummary ? `\n${repairSummary}` : ''}\n\nLaporan lengkap: \`${fileName}\``,
+    files: [attachment],
+    allowedMentions: { parse: [], repliedUser: false },
+  });
+}
+
+async function applyInterviewRepair(msg, report, options) {
+  const database = options.database;
+  const actor = actorPayload(msg.author);
+  const result = {
+    startedAt: new Date().toISOString(),
+    renamed: [],
+    closedDuplicates: [],
+    relinked: [],
+    reconstructed: [],
+    unresolved: [],
+    failed: [],
+  };
+  if (database?.createBackup) {
+    result.databaseBackup = await database.createBackup({ reason: 'before-interview-repair' });
+  }
+
+  let simulatedMax = Math.max(report.maxNumber, database?.currentInterviewSequence?.() || 0);
+  const assigned = new Map();
+  const groupedByCode = new Map();
+  for (const descriptor of report.channels) {
+    if (!groupedByCode.has(descriptor.interviewId || `missing:${descriptor.channelId}`)) {
+      groupedByCode.set(descriptor.interviewId || `missing:${descriptor.channelId}`, []);
+    }
+    groupedByCode.get(descriptor.interviewId || `missing:${descriptor.channelId}`).push(descriptor);
+  }
+  for (const rows of groupedByCode.values()) {
+    rows.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const numberConflict = row.sessionNumber
+        ? database?.getInterviewSession?.(String(row.sessionNumber), { by: 'number' })
+        : null;
+      const mustAllocate = !row.sessionNumber || index > 0 ||
+        (numberConflict && numberConflict.channelId && numberConflict.channelId !== row.channelId);
+      if (mustAllocate) {
+        const next = database.allocateInterviewCode({ minimum: simulatedMax });
+        simulatedMax = next.sessionNumber;
+        assigned.set(row.channelId, next);
+      } else {
+        database.setInterviewSequenceAtLeast(row.sessionNumber);
+        assigned.set(row.channelId, { sessionNumber: row.sessionNumber, interviewId: row.interviewId });
+      }
+    }
+  }
+
+  const byUser = new Map();
+  for (const descriptor of report.channels) {
+    if (!descriptor.userId) continue;
+    if (!byUser.has(descriptor.userId)) byUser.set(descriptor.userId, []);
+    byUser.get(descriptor.userId).push(descriptor);
+  }
+  const canonicalByUser = new Map();
+  for (const [userId, rows] of byUser) {
+    const openRows = rows.filter(row => !/^closed-/i.test(row.channelName));
+    const candidates = openRows.length ? openRows : rows;
+    candidates.sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+    canonicalByUser.set(userId, candidates[0]?.channelId || '');
+    for (const active of database.listInterviewSessions({ userId, lifecycle: 'OPEN', limit: 100 })) {
+      database.closeInterviewSession(active, { actor, force: true, reason: 'Superseded during interview repair' });
+    }
+    for (const reserved of database.listInterviewSessions({ userId, lifecycle: 'RESERVED', limit: 100 })) {
+      database.failInterviewSession(reserved.sessionNumber, 'Superseded during interview repair', actor);
+    }
+  }
+
+  const ordered = [...report.channels].sort((a, b) => {
+    const aCanonical = canonicalByUser.get(a.userId) === a.channelId ? 1 : 0;
+    const bCanonical = canonicalByUser.get(b.userId) === b.channelId ? 1 : 0;
+    return aCanonical - bCanonical;
+  });
+  for (const descriptor of ordered) {
+    const channel = msg.guild.channels.cache.get(descriptor.channelId) ||
+      await msg.guild.channels.fetch(descriptor.channelId).catch(() => null);
+    const allocation = assigned.get(descriptor.channelId);
+    if (!channel || !allocation) {
+      result.unresolved.push({ channelId: descriptor.channelId, reason: !channel ? 'channel-missing' : 'allocation-missing' });
+      continue;
+    }
+    try {
+      const canonical = descriptor.userId && canonicalByUser.get(descriptor.userId) === descriptor.channelId;
+      const closed = descriptor.userId ? !canonical : /^closed-/i.test(descriptor.channelName);
+      const newName = `${closed ? 'closed-' : ''}${allocation.interviewId}`.slice(0, 100);
+      if (channel.name !== newName) {
+        await channel.setName(newName, 'Interview duplicate-number repair');
+        result.renamed.push({ channelId: channel.id, from: descriptor.channelName, to: newName });
+      }
+      if (!descriptor.userId) {
+        result.unresolved.push({ channelId: channel.id, interviewId: allocation.interviewId, reason: 'applicant-unknown' });
+        continue;
+      }
+      const entry = options.registerStore.getUser(descriptor.userId);
+      const gamertag = descriptor.gamertag || entry?.gamertag || '';
+      if (!isValidGamertag(gamertag)) {
+        result.unresolved.push({ channelId: channel.id, userId: descriptor.userId, reason: 'gamertag-unknown' });
+        continue;
+      }
+      const decision = entry?.status === 'approved' ? 'APPROVED' : entry?.status === 'rejected' ? 'REJECTED' : 'PENDING';
+      const session = database.upsertInterviewSessionFromRepair({
+        sessionNumber: allocation.sessionNumber,
+        interviewId: allocation.interviewId,
+        legacyInterviewId: descriptor.interviewId,
+        userId: descriptor.userId,
+        username: entry?.username || '',
+        gamertag,
+        channelId: channel.id,
+        lifecycleStatus: closed ? 'CLOSED' : 'OPEN',
+        decision,
+        openedAt: channel.createdAt?.toISOString?.(),
+        closedAt: closed ? new Date().toISOString() : null,
+      }, actor);
+      if (closed) {
+        await channel.permissionOverwrites.edit(descriptor.userId, { ViewChannel: false, SendMessages: false }).catch(() => null);
+        await moveChannelToArchive(msg.guild, channel, 'Duplicate interview archived after repair').catch(() => null);
+        result.closedDuplicates.push({ channelId: channel.id, userId: descriptor.userId, interviewId: session.interviewId });
+      } else {
+        let canonicalEntry = entry;
+        if (!canonicalEntry) {
+          const duplicate = options.registerStore.findUserByGamertag?.(gamertag, descriptor.userId);
+          if (!duplicate) {
+            canonicalEntry = (await options.registerStore.upsertPendingUser(descriptor.userId, gamertag, '', {
+              interviewId: session.interviewId,
+              interviewChannelId: channel.id,
+              interviewCreatedAt: channel.createdAt?.toISOString?.(),
+            }))?.entry;
+            result.reconstructed.push({ userId: descriptor.userId, gamertag, channelId: channel.id });
+          }
+        }
+        if (canonicalEntry) {
+          await options.registerStore.relinkInterview(descriptor.userId, {
+            interviewId: session.interviewId,
+            interviewChannelId: channel.id,
+            interviewCreatedAt: canonicalEntry.interviewCreatedAt || channel.createdAt?.toISOString?.(),
+            interviewClosedAt: null,
+          });
+          await channel.send({
+            content: `Session interview diperbaiki dan dihubungkan kembali ke <@${descriptor.userId}> sebagai \`${session.interviewId}\`.`,
+            components: [buildInterviewButtons(descriptor.userId, false, session.sessionNumber, session.decision)],
+            allowedMentions: { users: [descriptor.userId], roles: [] },
+          }).catch(() => null);
+          result.relinked.push({ userId: descriptor.userId, channelId: channel.id, interviewId: session.interviewId });
+        } else {
+          result.unresolved.push({ channelId: channel.id, userId: descriptor.userId, reason: 'gamertag-conflict' });
+        }
+      }
+    } catch (error) {
+      result.failed.push({ channelId: descriptor.channelId, error: error.message });
+    }
+  }
+  database.setInterviewSequenceAtLeast(simulatedMax);
+  result.finishedAt = new Date().toISOString();
+  result.sequence = database.currentInterviewSequence();
+  result.after = await buildInterviewDoctorReport(msg.guild, options);
+  return result;
+}
+
+async function handleInterviewDoctorCommand(msg, options) {
+  const raw = String(msg.content || '').trim();
+  const doctor = /^!interview-doctor(?:\s|$)/i.test(raw);
+  const repairMatch = raw.match(/^!repair-interviews(?:\s+(--dry-run|--apply))?$/i);
+  if (!doctor && !repairMatch) return false;
+  if (!await isInterviewAdmin(msg)) {
+    await replyNoPing(msg, 'Interview Doctor khusus admin/interviewer.');
+    return true;
+  }
+  await ensureRegisterStore(options.registerStore, msg.client);
+  const apply = repairMatch?.[1]?.toLowerCase() === '--apply';
+  if (apply && interviewRepairInProgress) {
+    await replyNoPing(msg, 'Repair interview lain masih berjalan.');
+    return true;
+  }
+  if (apply) {
+    const dryRun = interviewDoctorDryRuns.get(msg.guild.id);
+    if (!dryRun || Date.now() - dryRun.at > INTERVIEW_DRY_RUN_VALID_MS) {
+      await replyNoPing(msg, 'Jalankan `!repair-interviews --dry-run` terlebih dahulu. Dry-run berlaku 30 menit sebelum `--apply`.');
+      return true;
+    }
+  }
+  const progress = await msg.reply({ content: apply ? 'Membuat backup dan memperbaiki interview...' : 'Memindai channel dan database interview...', allowedMentions: { repliedUser: false } });
+  if (apply) interviewRepairInProgress = true;
+  try {
+    const report = await buildInterviewDoctorReport(msg.guild, options);
+    if (!apply) {
+      interviewDoctorDryRuns.set(msg.guild.id, { at: Date.now(), report });
+      await progress.delete().catch(() => null);
+      await sendDoctorReport(msg, report, 'DRY-RUN');
+      return true;
+    }
+    const repaired = await applyInterviewRepair(msg, report, options);
+    interviewDoctorDryRuns.delete(msg.guild.id);
+    await progress.delete().catch(() => null);
+    await sendDoctorReport(msg, repaired, 'APPLY');
+    return true;
+  } catch (error) {
+    console.error('Interview doctor failed:', error);
+    await progress.edit(`Interview Doctor gagal: ${error.message}`).catch(() => null);
+    return true;
+  } finally {
+    if (apply) interviewRepairInProgress = false;
+  }
+}
+
+async function handleInterviewStatusAdminCommand(msg, options) {
+  const match = String(msg.content || '').trim().match(/^!interview-status(?:\s+<@!?(\d{5,32})>)?$/i);
+  if (!match) return false;
+  if (!await isInterviewAdmin(msg)) {
+    await replyNoPing(msg, 'Command ini khusus admin/interviewer.');
+    return true;
+  }
+  await ensureRegisterStore(options.registerStore, msg.client);
+  const linked = options.registerStore.findUserByInterviewChannel?.(msg.channelId);
+  const userId = match[1] || linked?.userId || options.database?.getInterviewSession?.(msg.channelId, { by: 'channel' })?.userId;
+  if (!userId) {
+    await replyNoPing(msg, 'User tidak ditemukan. Gunakan `!interview-status @user`.');
+    return true;
+  }
+  const entry = options.registerStore.getUser(userId);
+  const sessions = options.database?.listInterviewSessions?.({ userId, limit: 20 }) || [];
+  await replyNoPing(msg, [
+    `Interview status <@${userId}>`,
+    `Registry: ${entry ? `${entry.status} | ${entry.gamertag} | ${entry.interviewId || '-'}` : 'TIDAK ADA'}`,
+    `Channel registry: ${entry?.interviewChannelId ? channelMention(entry.interviewChannelId) : '-'}`,
+    `Sessions: ${sessions.length}`,
+    ...sessions.slice(0, 8).map(session => `- \`${session.interviewId}\` ${session.lifecycleStatus}/${session.decision} ${session.channelId ? `<#${session.channelId}>` : '-'}`),
+  ].join('\n'));
+  return true;
+}
+
+async function handleRelinkInterviewCommand(msg, options) {
+  const match = String(msg.content || '').trim().match(/^!relink-interview\s+<@!?(\d{5,32})>(?:\s+(.+))?$/i);
+  if (!match) return false;
+  if (!await isInterviewAdmin(msg)) {
+    await replyNoPing(msg, 'Command relink khusus admin/interviewer.');
+    return true;
+  }
+  if (!isInterviewTicketChannel(msg.channel)) {
+    await replyNoPing(msg, 'Jalankan `!relink-interview` di dalam channel interview yang ingin dihubungkan.');
+    return true;
+  }
+  await ensureRegisterStore(options.registerStore, msg.client);
+  const userId = match[1];
+  let entry = options.registerStore.getUser(userId);
+  const gamertag = normalizeGamertag(match[2] || entry?.gamertag || '');
+  if (!entry) {
+    if (!isValidGamertag(gamertag)) {
+      await replyNoPing(msg, 'Record tidak ada. Format recovery: `!relink-interview @user gamertag`.');
+      return true;
+    }
+    const duplicate = options.registerStore.findUserByGamertag?.(gamertag, userId);
+    if (duplicate) {
+      await replyNoPing(msg, `Gamertag konflik dengan <@${duplicate.userId}>; relink dibatalkan.`);
+      return true;
+    }
+    entry = (await options.registerStore.upsertPendingUser(userId, gamertag, '', {}))?.entry;
+  }
+  const target = { userId, entry, session: options.database?.getInterviewSession?.(msg.channelId, { by: 'channel' }) || options.database?.getInterviewSession?.(userId, { by: 'user', activeOnly: true }) };
+  const session = ensureCommandSession(msg, target, entry, options, true);
+  await options.registerStore.relinkInterview(userId, {
+    interviewId: session.interviewId,
+    interviewChannelId: msg.channelId,
+    interviewCreatedAt: msg.channel.createdAt?.toISOString?.(),
+    interviewClosedAt: null,
+  });
+  await replyNoPing(msg, `Channel ini berhasil direlink ke <@${userId}> sebagai \`${session.interviewId}\` / \`${entry.gamertag}\`.`);
   return true;
 }
 
@@ -1955,6 +2906,7 @@ async function handleHelpCommand(msg, options) {
     showBridgeAdmin: topupAdmin,
     showTopupAdmin: topupAdmin,
     showModerationAdmin: moderationAdmin,
+    showLawAdmin: registerAdmin || interviewAdmin || topupAdmin || moderationAdmin || memberHasAnyRole(msg.member, LAW_ADMIN_ROLE_IDS),
     registrationChannelId: options.registrationChannelId,
     privateChatChannelId: options.privateChatChannelId,
   }));
@@ -2001,6 +2953,19 @@ function queueLegalAccessJob(bridge, action, entry, userId, reviewer) {
   });
 }
 
+async function updateInterviewMessage(interaction, payload) {
+  if (interaction.deferred || interaction.replied) {
+    return interaction.message?.edit(payload).catch(() => null);
+  }
+  return interaction.update(payload).catch(() => null);
+}
+
+async function replyInterviewInteraction(interaction, content) {
+  const payload = { content, ephemeral: true };
+  if (interaction.deferred || interaction.replied) return interaction.followUp(payload).catch(() => null);
+  return interaction.reply(payload).catch(() => null);
+}
+
 async function approveInterview(interaction, registerStore, entryUserId, options) {
   const member = await interaction.guild.members.fetch(entryUserId).catch(() => null);
   const entry = await registerStore.approveUser(entryUserId, {
@@ -2008,7 +2973,7 @@ async function approveInterview(interaction, registerStore, entryUserId, options
     tag: interaction.user?.tag || interaction.user?.username || '',
   });
   if (!entry) {
-    await interaction.reply({ content: 'Data interview tidak ditemukan.', ephemeral: true }).catch(() => null);
+    await replyInterviewInteraction(interaction, 'Data interview tidak ditemukan. Gunakan `!accept --force @user [gamertag]` untuk recovery.');
     return true;
   }
   if (member) {
@@ -2022,10 +2987,15 @@ async function approveInterview(interaction, registerStore, entryUserId, options
     });
     await syncGamertagNickname(member, entry.gamertag, 'approve interview');
   }
-  await interaction.update({
+  const session = options.database?.getInterviewSession?.(
+    String(options.sessionNumber || interaction.channelId),
+    { by: options.sessionNumber ? 'number' : 'channel' }
+  );
+  if (session) options.database.decideInterviewSession(session, 'APPROVED', { actor: interaction.user, force: false });
+  await updateInterviewMessage(interaction, {
     embeds: [buildInterviewEmbed({ ...entry, userId: entryUserId }, { id: entryUserId })],
-    components: [buildInterviewButtons(entryUserId, false)],
-  }).catch(() => null);
+    components: [buildInterviewButtons(entryUserId, false, session?.sessionNumber || options.sessionNumber, 'APPROVED')],
+  });
   await interaction.channel?.send(
     `Approved. <@${entryUserId}> sekarang LEGAL dan boleh masuk Minecraft sebagai \`${entry.gamertag}\`.`
   ).catch(() => null);
@@ -2040,7 +3010,7 @@ async function rejectInterview(interaction, registerStore, entryUserId, options)
     tag: interaction.user?.tag || interaction.user?.username || '',
   });
   if (!entry) {
-    await interaction.reply({ content: 'Data interview tidak ditemukan.', ephemeral: true }).catch(() => null);
+    await replyInterviewInteraction(interaction, 'Data interview tidak ditemukan. Gunakan `!reject --force @user [alasan]` untuk recovery.');
     return true;
   }
   if (member) {
@@ -2050,10 +3020,15 @@ async function rejectInterview(interaction, registerStore, entryUserId, options)
       verifiedRoleId: options.roleId,
     }).catch(() => false);
   }
-  await interaction.update({
+  const session = options.database?.getInterviewSession?.(
+    String(options.sessionNumber || interaction.channelId),
+    { by: options.sessionNumber ? 'number' : 'channel' }
+  );
+  if (session) options.database.decideInterviewSession(session, 'REJECTED', { actor: interaction.user, force: false });
+  await updateInterviewMessage(interaction, {
     embeds: [buildInterviewEmbed({ ...entry, userId: entryUserId }, { id: entryUserId })],
-    components: [buildInterviewButtons(entryUserId, false)],
-  }).catch(() => null);
+    components: [buildInterviewButtons(entryUserId, false, session?.sessionNumber || options.sessionNumber, 'REJECTED')],
+  });
   await interaction.channel?.send(
     `Rejected. <@${entryUserId}> belum mendapat akses legal Minecraft, tapi masih bisa coba lagi dengan register ulang.`
   ).catch(() => null);
@@ -2067,14 +3042,19 @@ async function closeInterview(interaction, registerStore, entryUserId, options =
     tag: interaction.user?.tag || interaction.user?.username || '',
   });
   if (!entry) {
-    await interaction.reply({ content: 'Data interview tidak ditemukan.', ephemeral: true }).catch(() => null);
+    await replyInterviewInteraction(interaction, 'Data interview tidak ditemukan. Gunakan `!close --force @user` untuk recovery.');
     return true;
   }
 
-  await interaction.update({
+  const session = options.database?.getInterviewSession?.(
+    String(options.sessionNumber || interaction.channelId),
+    { by: options.sessionNumber ? 'number' : 'channel' }
+  );
+  if (session) options.database.closeInterviewSession(session, { actor: interaction.user, force: false });
+  await updateInterviewMessage(interaction, {
     embeds: [buildInterviewEmbed({ ...entry, userId: entryUserId }, { id: entryUserId })],
-    components: [buildInterviewButtons(entryUserId, true)],
-  }).catch(() => null);
+    components: [buildInterviewButtons(entryUserId, true, session?.sessionNumber || options.sessionNumber, session?.decision)],
+  });
   await interaction.channel?.permissionOverwrites.edit(entryUserId, {
     ViewChannel: false,
     SendMessages: false,
@@ -2141,6 +3121,7 @@ function createRegisterInteractionHandler({
   registerStore,
   bridge = null,
   transcriptStore = null,
+  database = null,
 } = {}) {
   return async function handleRegisterInteraction(interaction) {
     try {
@@ -2159,11 +3140,46 @@ function createRegisterInteractionHandler({
 
       const interview = parseInterviewButtonId(interaction.customId);
       if (!interview) return false;
+      if (interviewRepairInProgress) {
+        await interaction.reply({ content: 'Tombol interview dikunci sementara karena repair sedang berjalan.', ephemeral: true }).catch(() => null);
+        return true;
+      }
       if (!interaction.guild || !await canUseInterviewButton(interaction, interview.userId)) {
         await interaction.reply({ content: 'Tombol interview khusus admin.', ephemeral: true }).catch(() => null);
         return true;
       }
+      await interaction.deferUpdate().catch(() => null);
       await ensureRegisterStore(registerStore, interaction.client);
+
+      const buttonSession = interview.sessionNumber && database?.getInterviewSession
+        ? database.getInterviewSession(String(interview.sessionNumber), { by: 'number' })
+        : null;
+      if (interview.sessionNumber && database?.getInterviewSession && !buttonSession) {
+        await replyInterviewInteraction(interaction, 'Session tombol tidak ditemukan di database. Jalankan `!interview-doctor` atau gunakan command recovery `--force`.');
+        return true;
+      }
+      if (buttonSession && buttonSession.userId !== interview.userId) {
+        await replyInterviewInteraction(interaction, 'Session tombol tidak cocok dengan applicant. Jalankan `!interview-doctor` sebelum memproses.');
+        return true;
+      }
+      if (buttonSession?.channelId && String(buttonSession.channelId) !== String(interaction.channelId)) {
+        await replyInterviewInteraction(interaction, 'Tombol ini bukan milik channel session tersebut. Jalankan `!interview-doctor` sebelum memproses.');
+        return true;
+      }
+      if (buttonSession && !['RESERVED', 'OPEN'].includes(buttonSession.lifecycleStatus)) {
+        await replyInterviewInteraction(interaction, `Session \`${buttonSession.interviewId}\` sudah ${buttonSession.lifecycleStatus}; tombol lama tidak boleh dipakai.`);
+        return true;
+      }
+      if (buttonSession && interview.action !== 'close' && buttonSession.decision !== 'PENDING') {
+        await replyInterviewInteraction(interaction, `Session ini sudah diputuskan ${buttonSession.decision}. Gunakan command \`--force\` hanya jika keputusan memang harus dikoreksi.`);
+        return true;
+      }
+      const actionLock = String(interview.sessionNumber || `${interview.userId}:${interaction.channelId}`);
+      if (interviewActionLocks.has(actionLock)) {
+        await replyInterviewInteraction(interaction, 'Session ini sedang diproses admin lain. Tunggu sebentar.');
+        return true;
+      }
+      interviewActionLocks.add(actionLock);
 
       const options = {
         roleId,
@@ -2171,13 +3187,23 @@ function createRegisterInteractionHandler({
         rejectedRoleId,
         bridge,
         transcriptStore,
+        database,
+        sessionNumber: interview.sessionNumber,
       };
-      if (interview.action === 'approve') return approveInterview(interaction, registerStore, interview.userId, options);
-      if (interview.action === 'reject') return rejectInterview(interaction, registerStore, interview.userId, options);
-      if (interview.action === 'close') return closeInterview(interaction, registerStore, interview.userId, options);
-      return false;
+      try {
+        if (interview.action === 'approve') return await approveInterview(interaction, registerStore, interview.userId, options);
+        if (interview.action === 'reject') return await rejectInterview(interaction, registerStore, interview.userId, options);
+        if (interview.action === 'close') return await closeInterview(interaction, registerStore, interview.userId, options);
+        return false;
+      } finally {
+        interviewActionLocks.delete(actionLock);
+      }
     } catch (err) {
       console.error('Register interaction handler error:', err);
+      if (String(interaction?.customId || '').startsWith(`${INTERVIEW_BUTTON_PREFIX}:`)) {
+        await replyInterviewInteraction(interaction, `Gagal memproses tombol interview: ${err.message || err}`);
+        return true;
+      }
       return false;
     }
   };
@@ -2192,6 +3218,7 @@ function createRegisterHandler({
   transcriptStore = null,
   registrationChannelId = REGISTRATION_INBOX_CHANNEL_ID,
   privateChatChannelId = PRIVATE_CHAT_CHANNEL_ID,
+  database = null,
 }) {
   return async function handleRegisterMessage(msg) {
     try {
@@ -2209,10 +3236,15 @@ function createRegisterHandler({
         transcriptStore,
         registrationChannelId,
         privateChatChannelId,
+        database,
       };
 
       if (await handleRegisterCommand(msg, options)) return true;
       if (await handleSetRegisterGamertagCommand(msg, options)) return true;
+      if (await handleInterviewAdminCommand(msg, options)) return true;
+      if (await handleRelinkInterviewCommand(msg, options)) return true;
+      if (await handleInterviewStatusAdminCommand(msg, options)) return true;
+      if (await handleInterviewDoctorCommand(msg, options)) return true;
       if (await handleHelpCommand(msg, options)) return true;
       if (await handleSyncCitizenCommand(msg, options)) return true;
       if (await handleCompileCommand(msg, options)) return true;

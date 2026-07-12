@@ -6,6 +6,7 @@ const {
 } = require('discord.js');
 const {
   INTERVIEW_ADMIN_ROLE_IDS,
+  LAW_ADMIN_ROLE_IDS,
   MINECRAFT_CHAT_LOG_CHANNEL_ID,
   MINECRAFT_REGISTER_RESET_ADMIN_ID,
   TOPUP_ADMIN_DISCORD_ID,
@@ -378,6 +379,7 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         showBridgeAdmin: bridgeAdmin,
         showTopupAdmin: bridgeAdmin,
         showModerationAdmin: moderationAdmin,
+        showLawAdmin: registerAdmin || interviewAdmin || bridgeAdmin || moderationAdmin || memberHasAnyRole(msg.member, LAW_ADMIN_ROLE_IDS),
       }));
       return true;
     }

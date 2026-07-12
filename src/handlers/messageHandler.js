@@ -3,6 +3,8 @@ function createMessageHandler({
   keywordReply,
   registerHandler,
   moderationHandler,
+  rulesHandler,
+  lawHandler,
   shopHandler,
   socialFinanceHandler,
   companyPanelHandler,
@@ -17,6 +19,16 @@ function createMessageHandler({
 
     if (moderationHandler) {
       const handled = await moderationHandler(msg);
+      if (handled) return;
+    }
+
+    if (rulesHandler) {
+      const handled = await rulesHandler(msg);
+      if (handled) return;
+    }
+
+    if (lawHandler) {
+      const handled = await lawHandler(msg);
       if (handled) return;
     }
 

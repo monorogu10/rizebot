@@ -20,6 +20,8 @@ const { createMinecraftBridgeHandler } = require('./src/handlers/minecraftBridge
 const { createCompanyPanelHandler } = require('./src/handlers/companyPanelHandler');
 const { createSocialFinanceHandler } = require('./src/handlers/socialFinanceHandler');
 const { createShopHandler } = require('./src/handlers/shopHandler');
+const { createRulesHandler } = require('./src/handlers/rulesHandler');
+const { createLawHandler } = require('./src/handlers/lawHandler');
 const { createTopupHandler } = require('./src/handlers/topupHandler');
 const { registerEthergeonCitizenRoleEvents } = require('./src/handlers/ethergeonCitizenRoleHandler');
 const {
@@ -168,7 +170,8 @@ const registerHandler = createRegisterHandler({
   registerStore: legacyRegisterStore,
   bridge: bridgeService,
   transcriptStore: interviewTranscriptStore,
-  submissionStore
+  submissionStore,
+  database: databaseService,
 });
 const registerInteractionHandler = createRegisterInteractionHandler({
   roleId: MINECRAFT_REGISTER_ROLE_ID,
@@ -176,7 +179,8 @@ const registerInteractionHandler = createRegisterInteractionHandler({
   rejectedRoleId: MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   registerStore: legacyRegisterStore,
   bridge: bridgeService,
-  transcriptStore: interviewTranscriptStore
+  transcriptStore: interviewTranscriptStore,
+  database: databaseService,
 });
 const minecraftBridgeHandler = createMinecraftBridgeHandler({
   bridge: bridgeService,
@@ -192,6 +196,14 @@ const socialFinanceHandler = createSocialFinanceHandler({
 });
 const shopHandler = createShopHandler({
   bridge: bridgeService,
+  serverStatusNotifier,
+});
+const rulesHandler = createRulesHandler({
+  bridge: bridgeService,
+  database: databaseService,
+});
+const lawHandler = createLawHandler({
+  database: databaseService,
   serverStatusNotifier,
 });
 const topupHandler = createTopupHandler({
@@ -211,6 +223,8 @@ const baseHandleMessage = createMessageHandler({
   keywordReply: maybeReplyKeyword,
   registerHandler,
   moderationHandler,
+  rulesHandler,
+  lawHandler,
   shopHandler,
   socialFinanceHandler,
   companyPanelHandler,
@@ -505,6 +519,18 @@ function getMessageContent(msg) {
 
 function diagnosticCommandName(content) {
   const raw = String(content || '').trim();
+  if (/^!rules(?:\s|$)/i.test(raw)) return '!rules';
+  if (/^!uu(?:\s|$)/i.test(raw)) return '!uu';
+  if (/^!create-uu(?:\s|$)/i.test(raw)) return '!create-uu';
+  if (/^!(?:draft-uu|edit-uu)(?:\s|$)/i.test(raw)) return '!draft-uu';
+  if (/^!revise-uu(?:\s|$)/i.test(raw)) return '!revise-uu';
+  if (/^!cabut-uu(?:\s|$)/i.test(raw)) return '!cabut-uu';
+  if (/^!(?:accept|approve)(?:\s|$)/i.test(raw)) return '!accept';
+  if (/^!reject(?:\s|$)/i.test(raw)) return '!reject';
+  if (/^!close(?:\s|$)/i.test(raw)) return '!close';
+  if (/^!relink-interview(?:\s|$)/i.test(raw)) return '!relink-interview';
+  if (/^!interview-status(?:\s|$)/i.test(raw)) return '!interview-status';
+  if (/^!(?:interview-doctor|repair-interviews)(?:\s|$)/i.test(raw)) return '!repair-interviews';
   if (/^!shopsetting(?:\s|$)/i.test(raw)) return '!shopsetting';
   if (/^!shop(?:\s|$)/i.test(raw)) return '!shop';
   if (/^!bansos(?:\s|$)/i.test(raw)) return '!bansos';

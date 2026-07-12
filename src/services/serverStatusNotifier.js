@@ -112,6 +112,56 @@ function createServerStatusNotifier({ client, channelId }) {
     );
   }
 
+  function lawName(law = {}) {
+    return law.number && law.year ? `UU No. ${law.number} Tahun ${law.year}` : law.code || 'UU Ethergeon';
+  }
+
+  async function notifyLawPublished(law = {}, adminTag = 'Admin') {
+    return sendEmbed(
+      new EmbedBuilder()
+        .setColor(0x2f80ed)
+        .setTitle('Undang-Undang Ethergeon Diterbitkan')
+        .setDescription(`**${lawName(law)} — ${law.title || 'Tanpa Judul'}** telah resmi diterbitkan dan berlaku.`)
+        .addFields(
+          { name: 'Kode', value: `\`${law.code || '-'}\``, inline: true },
+          { name: 'Versi', value: String(law.version || 1), inline: true },
+          { name: 'Diterbitkan Oleh', value: String(adminTag).slice(0, 1024), inline: false }
+        )
+        .setFooter({ text: 'Gunakan !uu untuk membaca isi lengkap.' })
+        .setTimestamp()
+    );
+  }
+
+  async function notifyLawRevised(law = {}, adminTag = 'Admin') {
+    return sendEmbed(
+      new EmbedBuilder()
+        .setColor(0xf2c94c)
+        .setTitle('Undang-Undang Ethergeon Direvisi')
+        .setDescription(`**${lawName(law)} — ${law.title || 'Tanpa Judul'}** diperbarui ke versi **${law.version || law.currentVersion || '-'}**.`)
+        .addFields(
+          { name: 'Catatan Perubahan', value: String(law.changeNote || '-').slice(0, 1024), inline: false },
+          { name: 'Direvisi Oleh', value: String(adminTag).slice(0, 1024), inline: false }
+        )
+        .setFooter({ text: 'Riwayat versi tetap tersimpan. Gunakan !uu untuk membaca versi terbaru.' })
+        .setTimestamp()
+    );
+  }
+
+  async function notifyLawRevoked(law = {}, adminTag = 'Admin') {
+    return sendEmbed(
+      new EmbedBuilder()
+        .setColor(0xe74c3c)
+        .setTitle('Undang-Undang Ethergeon Dicabut')
+        .setDescription(`**${lawName(law)} — ${law.title || 'Tanpa Judul'}** telah dicabut.`)
+        .addFields(
+          { name: 'Alasan', value: String(law.revokeReason || '-').slice(0, 1024), inline: false },
+          { name: 'Dicabut Oleh', value: String(adminTag).slice(0, 1024), inline: false }
+        )
+        .setFooter({ text: 'Dokumen tetap tersedia sebagai arsip publik.' })
+        .setTimestamp()
+    );
+  }
+
   function scheduleNextRestartNotice(nowMs = Date.now()) {
     if (stopped) return null;
     if (restartTimer) clearTimeout(restartTimer);
@@ -143,6 +193,9 @@ function createServerStatusNotifier({ client, channelId }) {
     notifyConnected,
     notifyRestarting,
     notifyShopPriceChanged,
+    notifyLawPublished,
+    notifyLawRevised,
+    notifyLawRevoked,
     nextRestartAtMs,
   };
 }
