@@ -451,7 +451,7 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
     if (parsed.command === 'tf') {
       const transfer = parseGeonTransferArgs(parsed.args, bridge);
       if (!transfer) {
-        await replyNoPing(msg, buildFormatErrorPayload('!tf <nama_player> <jumlah_geon>'));
+        await replyNoPing(msg, buildFormatErrorPayload('!tf <nama_player/mention> <jumlah_geon> [alasan opsional]'));
         return true;
       }
 
@@ -465,17 +465,35 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         return true;
       }
 
+      let targetQuery = transfer.target;
+      if (transfer.discordUserId) {
+        const linkedTarget = registerStore.getUser(transfer.discordUserId);
+        if (!isApprovedRegisterEntry(linkedTarget) || !linkedTarget?.gamertag) {
+          await replyNoPing(msg, buildCommandEmbed({
+            color: 0xe74c3c,
+            title: 'Target Discord Tidak Terhubung',
+            description: 'User Discord yang disebut belum approved/legal atau belum memiliki gamertag Minecraft.',
+          }));
+          return true;
+        }
+        targetQuery = linkedTarget.gamertag;
+      }
+
       await enqueueBridgeJobWithLoading(msg, bridge, 'wallet_transfer', {
         fromKey: entry.gamertag,
         fromName: entry.gamertag,
         fromDiscordUserId: msg.author.id,
         fromDiscordTag: msg.author?.tag || msg.author?.username || '',
-        targetQuery: transfer.target,
+        targetQuery,
         amount: transfer.amount,
+        reason: transfer.reason,
         requestedBy: msg.author.id,
       }, {
         title: 'Transfer Geon',
-        description: `Mengirim **${bridge.formatNumber(transfer.amount)} Geon** dari \`${entry.gamertag}\` ke player yang mendekati \`${transfer.target}\`.`,
+        description: [
+          `Mengirim **${bridge.formatNumber(transfer.amount)} Geon** dari \`${entry.gamertag}\` ke player yang mendekati \`${targetQuery}\`.`,
+          transfer.reason ? `Alasan: \`${transfer.reason}\`` : '',
+        ].filter(Boolean).join('\n'),
       });
       return true;
     }
@@ -630,12 +648,42 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
 }
 
 function parseGeonTransferArgs(args, bridge) {
-  const parts = normalizeSpaces(args).split(' ').filter(Boolean);
-  if (parts.length < 2) return null;
-  const amount = bridge.normalizePositiveInt(parts.pop(), GEON_TRANSFER_MAX);
-  const target = normalizeSpaces(parts.join(' '));
+  const raw = normalizeSpaces(args);
+  if (!raw) return null;
+
+  const amountFromToken = token => {
+    if (!/^\d[\d.,_]*$/.test(String(token || ''))) return null;
+    return bridge.normalizePositiveInt(token, GEON_TRANSFER_MAX);
+  };
+
+  const mention = raw.match(/^<@!?(\d{5,30})>\s+(\S+)(?:\s+(.+))?$/);
+  if (mention) {
+    const amount = amountFromToken(mention[2]);
+    if (!amount) return null;
+    return {
+      target: `<@${mention[1]}>`,
+      discordUserId: mention[1],
+      amount,
+      reason: normalizeSpaces(mention[3] || '').slice(0, 180),
+    };
+  }
+
+  const quoted = raw.match(/^(?:"([^"]+)"|'([^']+)'|`([^`]+)`)\s+(\S+)(?:\s+(.+))?$/);
+  if (quoted) {
+    const amount = amountFromToken(quoted[4]);
+    const target = normalizeSpaces(quoted[1] || quoted[2] || quoted[3] || '');
+    if (!target || !amount) return null;
+    return { target, amount, reason: normalizeSpaces(quoted[5] || '').slice(0, 180) };
+  }
+
+  const parts = raw.split(' ').filter(Boolean);
+  const amountIndex = parts.findIndex((part, index) => index > 0 && amountFromToken(part));
+  if (amountIndex < 1) return null;
+  const amount = amountFromToken(parts[amountIndex]);
+  const target = normalizeSpaces(parts.slice(0, amountIndex).join(' '));
+  const reason = normalizeSpaces(parts.slice(amountIndex + 1).join(' ')).slice(0, 180);
   if (!target || !amount) return null;
-  return { target, amount };
+  return { target, amount, reason };
 }
 
 function isApprovedRegisterEntry(entry) {

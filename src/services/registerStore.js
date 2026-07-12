@@ -139,8 +139,8 @@ function removeDuplicateGamertags(users, order) {
   };
 }
 
-function createRegisterStore() {
-  const saveChannelStore = createEditableJsonMessageStore({
+function createRegisterStore({ database = null, saveChannelStore: providedSaveChannelStore = null } = {}) {
+  const saveChannelStore = providedSaveChannelStore || createEditableJsonMessageStore({
     channelId: SAVE_CHANNEL_ID,
     fileName: REGISTER_STORAGE_FILE_NAME
   });
@@ -161,19 +161,50 @@ function createRegisterStore() {
     };
   }
 
-  async function persist() {
+  async function persist(operation = 'save') {
     if (!clientRef) throw new Error('Register store not initialized');
-    await saveChannelStore.save(clientRef, serialize());
+    const snapshot = serialize();
+    if (database) {
+      database.saveRegistrationSnapshot(snapshot, { operation });
+      await saveChannelStore.save(clientRef, snapshot).catch(error => {
+        console.error('SQLite sudah tersimpan, tetapi sinkronisasi JSON Discord gagal:', error);
+      });
+      return;
+    }
+    await saveChannelStore.save(clientRef, snapshot);
   }
 
   async function init(client) {
     if (initPromise) return initPromise;
     clientRef = client;
     initPromise = (async () => {
+      if (database) {
+        database.init();
+        const stored = database.loadRegistrationSnapshot();
+        if (stored.initialized) {
+          const applied = applyLoadedData(stored.data);
+          if (!applied) throw new Error('Data registrasi SQLite tidak valid. Startup dihentikan untuk melindungi data.');
+          if (lastLoadRemovedDuplicateCount > 0) await persist('deduplicate-on-load');
+          return;
+        }
+
+        const localBackup = database.loadRegistrationJsonBackup();
+        const loaded = localBackup || await saveChannelStore.load(clientRef);
+        const applied = applyLoadedData(loaded);
+        if (!applied) {
+          throw new Error(
+            'SQLite belum diinisialisasi dan JSON registrasi tidak dapat dimuat. ' +
+            'Startup dihentikan agar data lama tidak tertimpa.'
+          );
+        }
+        await persist(localBackup ? 'bootstrap-import-local-json' : 'bootstrap-import-discord-json');
+        return;
+      }
+
       const loaded = await saveChannelStore.load(clientRef);
       const applied = applyLoadedData(loaded);
       if (applied && lastLoadRemovedDuplicateCount > 0) {
-        await persist();
+        await persist('deduplicate-on-load');
       }
     })();
     return initPromise;
@@ -669,9 +700,8 @@ function createRegisterStore() {
     await ensureReady();
     const loaded = await saveChannelStore.loadFromMessage(message);
     const applied = applyLoadedData(loaded);
-    if (applied && lastLoadRemovedDuplicateCount > 0) {
-      await persist();
-    }
+    if (applied && database) await persist('restore-from-discord-json');
+    else if (applied && lastLoadRemovedDuplicateCount > 0) await persist('deduplicate-json-edit');
     return applied;
   }
 

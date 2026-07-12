@@ -48,9 +48,19 @@ function createRizebotHelpPayload({
           ['!status', 'lihat Ethergeon ID Card.'],
           ['!player <nama>', 'cek Ethergeon ID Card player lain, dengan tombol pilihan kalau hasilnya mirip.'],
           ['!organisasi [nama]', 'lihat daftar berhalaman, atau detail anggota, kas, holding, dan pemegang saham jika nama diisi. Alias: `!org`.'],
-          ['!tf <nama> <geon>', 'transfer Geon ke player lain lewat Discord, diproses langsung oleh finance Minecraft.'],
-          ['!geonrate <rupiah>', 'cek estimasi Geon dari nominal rupiah. Alias: `!kurs`, `!harga`, `!rate`.'],
           ['!member', 'lihat total member Discord saat ini.'],
+        ]),
+        inline: false,
+      },
+      {
+        name: 'Ekonomi & Server',
+        value: commandLines([
+          ['!shop', 'lihat daftar harga terbaru ETHERGEON SHOP langsung dari server.'],
+          ['!perusahaan', 'buka Company Control untuk tambah, edit, atau hapus divisi sesuai permission Minecraft.'],
+          ['!tf <nama/mention> <geon> [alasan]', 'transfer Geon dengan alasan opsional yang tampil di server.'],
+          ['!tf --all <geon>', 'kirim Geon per orang ke semua player lain yang sedang online.'],
+          ['!bansos <geon> <orang>', 'buat bansos dengan konfirmasi; claim tetap dilakukan di server Minecraft.'],
+          ['!geonrate <rupiah>', 'cek estimasi Geon dari nominal rupiah. Alias: `!kurs`, `!harga`, `!rate`.'],
         ]),
         inline: false,
       },
@@ -116,6 +126,16 @@ function createRizebotHelpPayload({
         inline: false,
       }
     );
+  }
+
+  if (showBridgeAdmin || showModerationAdmin) {
+    embed.addFields({
+      name: 'Admin Shop',
+      value: commandLines([
+        ['!shopsetting <index/nama> <geon>', 'ubah harga shop dan umumkan kenaikan/penurunan di server serta Discord.'],
+      ]),
+      inline: false,
+    });
   }
 
   if (showTopupAdmin) {

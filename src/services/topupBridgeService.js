@@ -1176,6 +1176,7 @@ function buildMigrationApplyEmbed(record = {}, result = {}) {
 
 function createTopupBridgeService({ registerStore, client = null }) {
   const jobs = new Map();
+  const pendingBridgeWaiters = new Map();
   const pendingVerifications = new Map();
   const onlinePlayers = new Map();
   const discordUserCache = new Map();
@@ -1715,6 +1716,20 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
   function enqueueBridgeQuery(type, payload, context) {
     return enqueueJob(type, payload, context);
+  }
+
+  function enqueueBridgeQueryWithResult(type, payload, { timeoutMs = 45_000 } = {}) {
+    const job = enqueueJob(type, payload, null);
+    const safeTimeoutMs = Math.max(5_000, Math.min(120_000, Math.floor(Number(timeoutMs) || 45_000)));
+    const result = new Promise(resolve => {
+      const timer = setTimeout(() => {
+        pendingBridgeWaiters.delete(job.id);
+        resolve({ ok: false, jobId: job.id, code: 'bridge-result-timeout' });
+      }, safeTimeoutMs);
+      timer.unref?.();
+      pendingBridgeWaiters.set(job.id, { resolve, timer });
+    });
+    return { job, result };
   }
 
   function createVerification({ userId, gamertag, message }) {
@@ -2539,6 +2554,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const to = result.to || {};
     const fromName = playerNameFromTransferSide(from, record.job?.fromName || '-');
     const toName = playerNameFromTransferSide(to, record.job?.targetName || record.job?.targetQuery || '-');
+    const reason = cleanText(result.reason || record.job?.reason || '', 180);
 
     await message.reply(noPingPayload({
       embeds: [
@@ -2551,6 +2567,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
             { name: 'Penerima', value: `${inlineCode(toName, 80)}\nSaldo: ${formatNumber(to.balanceGeon)} Geon`, inline: true },
             { name: 'Discord', value: discordMentionOrDash(record.job?.fromDiscordUserId, record.job?.requestedBy, message.author?.id), inline: true }
           )
+          .addFields(reason ? [{ name: 'Alasan', value: reason, inline: false }] : [])
           .setFooter({ text: `Transparansi finance aktif | Ref ${record.job?.id || record.id || '-'}` })
           .setTimestamp(new Date()),
       ],
@@ -2633,6 +2650,15 @@ function createTopupBridgeService({ registerStore, client = null }) {
     record.result = resultRaw;
     bridgeStats.lastResultAt = new Date().toISOString();
     saveJobsToDisk(record.updatedAt);
+
+    const waiter = pendingBridgeWaiters.get(jobId);
+    if (waiter) {
+      pendingBridgeWaiters.delete(jobId);
+      clearTimeout(waiter.timer);
+      waiter.resolve(resultRaw);
+      pruneJobs();
+      return { ok: true };
+    }
 
     if (record.job.type === 'organization_search' ||
       record.job.type === 'organization_directory' ||
@@ -2979,6 +3005,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     enqueueTopup,
     enqueueCoupon,
     enqueueBridgeQuery,
+    enqueueBridgeQueryWithResult,
     takeJobs,
     completeJob,
     handleMinecraftEvent,

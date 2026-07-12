@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "db:status": "node scripts/db-status.js",
+    "db:backup": "node scripts/db-backup.js",
+    "db:export-json": "node scripts/db-export-json.js"
   },
   "keywords": [],
   "author": "",

@@ -3,6 +3,9 @@ function createMessageHandler({
   keywordReply,
   registerHandler,
   moderationHandler,
+  shopHandler,
+  socialFinanceHandler,
+  companyPanelHandler,
   minecraftBridgeHandler,
   topupHandler
 }) {
@@ -14,6 +17,21 @@ function createMessageHandler({
 
     if (moderationHandler) {
       const handled = await moderationHandler(msg);
+      if (handled) return;
+    }
+
+    if (shopHandler) {
+      const handled = await shopHandler(msg);
+      if (handled) return;
+    }
+
+    if (socialFinanceHandler) {
+      const handled = await socialFinanceHandler(msg);
+      if (handled) return;
+    }
+
+    if (companyPanelHandler) {
+      const handled = await companyPanelHandler(msg);
       if (handled) return;
     }
 

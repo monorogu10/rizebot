@@ -17,6 +17,9 @@ const {
   expireUnansweredInterviews,
 } = require('./src/handlers/registerHandler');
 const { createMinecraftBridgeHandler } = require('./src/handlers/minecraftBridgeHandler');
+const { createCompanyPanelHandler } = require('./src/handlers/companyPanelHandler');
+const { createSocialFinanceHandler } = require('./src/handlers/socialFinanceHandler');
+const { createShopHandler } = require('./src/handlers/shopHandler');
 const { createTopupHandler } = require('./src/handlers/topupHandler');
 const { registerEthergeonCitizenRoleEvents } = require('./src/handlers/ethergeonCitizenRoleHandler');
 const {
@@ -30,6 +33,8 @@ const { createModerationStore } = require('./src/services/moderationStore');
 const { createInterviewTranscriptStore } = require('./src/services/interviewTranscriptStore');
 const { createTopupBridgeService } = require('./src/services/topupBridgeService');
 const { createTopupBridgeServer } = require('./src/services/topupBridgeServer');
+const { createServerStatusNotifier } = require('./src/services/serverStatusNotifier');
+const { createRizebotDatabase } = require('./src/services/rizebotDatabase');
 const { createSociabuzzTopupService } = require('./src/services/sociabuzzTopupService');
 const {
   REGISTER_ROLE_ID,
@@ -38,6 +43,7 @@ const {
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
   MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   REGISTRATION_INBOX_CHANNEL_ID,
+  SERVER_STATUS_CHANNEL_ID,
   TOPUP_BRIDGE_HOST,
   TOPUP_BRIDGE_PORT,
   TOPUP_BRIDGE_TOKEN,
@@ -130,7 +136,8 @@ const client = new Client({
 });
 
 const submissionStore = createSubmissionStore();
-const legacyRegisterStore = createRegisterStore();
+const databaseService = createRizebotDatabase();
+const legacyRegisterStore = createRegisterStore({ database: databaseService });
 const moderationStore = createModerationStore();
 const interviewTranscriptStore = createInterviewTranscriptStore();
 const bridgeService = createTopupBridgeService({
@@ -149,6 +156,10 @@ const bridgeServer = createTopupBridgeServer({
   token: TOPUP_BRIDGE_TOKEN,
   sociabuzz: sociabuzzTopupService,
   sociabuzzToken: SOCIABUZZ_WEBHOOK_TOKEN,
+});
+const serverStatusNotifier = createServerStatusNotifier({
+  client,
+  channelId: SERVER_STATUS_CHANNEL_ID,
 });
 const registerHandler = createRegisterHandler({
   roleId: MINECRAFT_REGISTER_ROLE_ID,
@@ -171,6 +182,18 @@ const minecraftBridgeHandler = createMinecraftBridgeHandler({
   bridge: bridgeService,
   registerStore: legacyRegisterStore,
 });
+const companyPanelHandler = createCompanyPanelHandler({
+  bridge: bridgeService,
+  registerStore: legacyRegisterStore,
+});
+const socialFinanceHandler = createSocialFinanceHandler({
+  bridge: bridgeService,
+  registerStore: legacyRegisterStore,
+});
+const shopHandler = createShopHandler({
+  bridge: bridgeService,
+  serverStatusNotifier,
+});
 const topupHandler = createTopupHandler({
   bridge: bridgeService,
 });
@@ -188,6 +211,9 @@ const baseHandleMessage = createMessageHandler({
   keywordReply: maybeReplyKeyword,
   registerHandler,
   moderationHandler,
+  shopHandler,
+  socialFinanceHandler,
+  companyPanelHandler,
   minecraftBridgeHandler,
   topupHandler
 });
@@ -312,6 +338,7 @@ async function checkBridgeHealth() {
       await sendBridgeAlert(
         bridgeLogLine('INFO', '[secRules][bridge]', `HTTP Discord bridge connected: ${redactedBridgeUrl()}.`)
       );
+      await serverStatusNotifier.notifyConnected();
     }
     return;
   }
@@ -379,9 +406,21 @@ client.once('clientReady', async () => {
   await submissionStore.init(client).catch(err => {
     console.error('Failed to init submission store:', err);
   });
-  await legacyRegisterStore.init(client).catch(err => {
-    console.error('Failed to init legacy register store:', err);
-  });
+  try {
+    await legacyRegisterStore.init(client);
+    const databaseStatus = databaseService.getStatus();
+    console.log(
+      `SQLite ready. registrations=${databaseStatus.registrationCount}, database=${databaseStatus.databaseFile}, json=${databaseStatus.registrationJsonFile}`
+    );
+    await databaseService.createBackup({ reason: 'startup' })
+      .then(result => console.log(`SQLite startup backup: ${result.file}`))
+      .catch(err => console.error('Failed to create SQLite startup backup:', err));
+    databaseService.startBackupScheduler();
+  } catch (err) {
+    console.error('FATAL: Failed to initialize SQLite registration store:', err);
+    process.exit(1);
+    return;
+  }
   await moderationStore.init(client).catch(err => {
     console.error('Failed to init moderation store:', err);
   });
@@ -410,6 +449,11 @@ client.once('clientReady', async () => {
     .catch(err => {
       console.error('Failed to start Minecraft bridge server:', err);
     });
+
+  const nextRestartNoticeAt = serverStatusNotifier.start();
+  if (nextRestartNoticeAt) {
+    console.log(`Next Ethergeon restart notice: ${new Date(nextRestartNoticeAt).toISOString()}`);
+  }
 
   await runArchiveSweep('startup');
   const archiveInterval = setInterval(() => {
@@ -461,6 +505,11 @@ function getMessageContent(msg) {
 
 function diagnosticCommandName(content) {
   const raw = String(content || '').trim();
+  if (/^!shopsetting(?:\s|$)/i.test(raw)) return '!shopsetting';
+  if (/^!shop(?:\s|$)/i.test(raw)) return '!shop';
+  if (/^!bansos(?:\s|$)/i.test(raw)) return '!bansos';
+  if (/^!tf\s+--all(?:\s|$)/i.test(raw)) return '!tf --all';
+  if (/^!(?:perusahaan|company|company-panel)(?:\s|$)/i.test(raw)) return '!perusahaan';
   if (/^!(?:organisasi|organization|org)(?:\s|$)/i.test(raw)) return '!organisasi';
   if (/^!(?:list|listreg|list-reg|registry|registrasi|pendaftaran)(?:\s|$)/i.test(raw)) return '!list';
   return '';
