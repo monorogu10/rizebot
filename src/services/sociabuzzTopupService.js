@@ -26,6 +26,10 @@ const MAX_CANDIDATES = 5;
 const PAYMENT_STORE_LIMIT = 1000;
 const DEFAULT_GEON_PER_1000 = 100;
 const RESOLUTION_TOKEN_TTL_MS = 15 * 60 * 1000;
+const SOCIABUZZ_BACKFILL_LIMIT = Math.max(
+  1,
+  Math.min(1000, Math.floor(Number(process.env.SOCIABUZZ_BACKFILL_LIMIT) || 500))
+);
 const ACTIVE_PAYMENT_STATUSES = new Set(['needs_target', 'pending', 'resolving', 'failed']);
 const UNKNOWN_NAMES = new Set([
   'someone',
@@ -944,7 +948,7 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
       (record.status === 'preparing' && !record.jobId) ||
       (!record.logMessageId && ['queued', 'needs_target', 'pending', 'resolving', 'failed'].includes(record.status))
     ));
-    const summary = { checked: candidates.length, recovered: 0, failed: 0 };
+    const summary = { checked: candidates.length, recovered: 0, refreshed: 0, failed: 0 };
     for (const record of candidates) {
       try {
         const context = paymentContext();
@@ -961,6 +965,60 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
       } catch (error) {
         summary.failed += 1;
         console.error(`Failed to recover SociaBuzz payment ${record.id || '-'}:`, error);
+      }
+    }
+    const refreshable = Object.values(store.records || {}).filter(record => (
+      record.logMessageId && ['queued', 'pending_join', 'delivered', 'failed'].includes(record.status)
+    ));
+    for (const record of refreshable) {
+      const components = record.status === 'failed' ? buildReviewComponents(record) : [];
+      if (await updateLogMessage(record, components)) summary.refreshed += 1;
+    }
+    return summary;
+  }
+
+  async function backfillRecentDiscordPayments({ limit = SOCIABUZZ_BACKFILL_LIMIT } = {}) {
+    const safeLimit = Math.max(1, Math.min(1000, Math.floor(Number(limit) || SOCIABUZZ_BACKFILL_LIMIT)));
+    const summary = { channels: 0, scanned: 0, matched: 0, failed: 0 };
+    if (!client?.channels?.fetch) return summary;
+
+    for (const channelId of SOCIABUZZ_SOURCE_CHANNEL_IDS) {
+      const channel = await client.channels.fetch(channelId).catch(error => {
+        summary.failed += 1;
+        console.error(`Failed to fetch SociaBuzz source channel ${channelId}:`, error);
+        return null;
+      });
+      if (!channel?.messages?.fetch) continue;
+      summary.channels += 1;
+      const messages = [];
+      let before;
+      while (messages.length < safeLimit) {
+        const requestLimit = Math.min(100, safeLimit - messages.length);
+        const batch = await channel.messages.fetch({ limit: requestLimit, ...(before ? { before } : {}) })
+          .catch(error => {
+            summary.failed += 1;
+            console.error(`Failed to backfill SociaBuzz channel ${channelId}:`, error);
+            return null;
+          });
+        if (!batch?.size) break;
+        const page = [...batch.values()];
+        messages.push(...page);
+        before = String(page[page.length - 1]?.id || '');
+        if (!before || page.length < requestLimit) break;
+      }
+
+      messages.sort((left, right) => (
+        Number(left.createdTimestamp || 0) - Number(right.createdTimestamp || 0) ||
+        String(left.id || '').localeCompare(String(right.id || ''))
+      ));
+      for (const message of messages) {
+        summary.scanned += 1;
+        try {
+          if (await handleDiscordMessage(message)) summary.matched += 1;
+        } catch (error) {
+          summary.failed += 1;
+          console.error(`Failed to backfill SociaBuzz message ${message?.id || '-'}:`, error);
+        }
       }
     }
     return summary;
@@ -1262,6 +1320,7 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
     listRateHistory,
     resolvePayment,
     recoverPendingPayments,
+    backfillRecentDiscordPayments,
     handleDiscordMessage,
     handleWebhookPayload,
     handleInteraction,

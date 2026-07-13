@@ -2224,10 +2224,6 @@ async function handleStatusCommand(msg, options) {
     return true;
   }
   const userId = match[1] || msg.author.id;
-  if (userId !== msg.author.id && !await isInterviewAdmin(msg)) {
-    await replyNoPing(msg, 'Status user lain hanya dapat dilihat admin/interviewer.');
-    return true;
-  }
   const user = userId === msg.author.id
     ? msg.author
     : (msg.client.users.cache.get(userId) || await msg.client.users.fetch(userId).catch(() => null));

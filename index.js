@@ -65,6 +65,8 @@ const {
 } = require('./src/utils/commandDiagnostics');
 
 const LOCK_FILE = process.env.RIZEBOT_LOCK_FILE || path.join(os.tmpdir(), 'rizebot.lock');
+let beforeShutdown = async () => {};
+let shutdownRequested = false;
 
 function isProcessAlive(pid) {
   if (!Number.isFinite(pid) || pid <= 0) return false;
@@ -88,6 +90,23 @@ function releaseLock() {
   }
 }
 
+function requestShutdown(signal, exitCode) {
+  if (shutdownRequested) return;
+  shutdownRequested = true;
+  const forceExit = setTimeout(() => {
+    releaseLock();
+    process.exit(exitCode);
+  }, 5_000);
+  void Promise.resolve()
+    .then(() => beforeShutdown(signal))
+    .catch(error => console.error(`Failed to announce ${signal} shutdown:`, error))
+    .finally(() => {
+      clearTimeout(forceExit);
+      releaseLock();
+      process.exit(exitCode);
+    });
+}
+
 function acquireLock() {
   const lockPayload = JSON.stringify({
     pid: process.pid,
@@ -101,12 +120,10 @@ function acquireLock() {
     fs.closeSync(fd);
     process.once('exit', releaseLock);
     process.once('SIGINT', () => {
-      releaseLock();
-      process.exit(130);
+      requestShutdown('SIGINT', 130);
     });
     process.once('SIGTERM', () => {
-      releaseLock();
-      process.exit(143);
+      requestShutdown('SIGTERM', 143);
     });
     return;
   } catch (err) {
@@ -167,6 +184,23 @@ const bridgeServer = createTopupBridgeServer({
 const serverStatusNotifier = createServerStatusNotifier({
   client,
   channelId: SERVER_STATUS_CHANNEL_ID,
+});
+beforeShutdown = async signal => {
+  const reason = signal === 'UNCAUGHT_EXCEPTION' || signal === 'UNHANDLED_REJECTION'
+    ? 'BOT mengalami error fatal dan akan dihentikan agar dapat direstart dengan aman.'
+    : `BOT menerima ${signal} dan sedang dihentikan atau direload.`;
+  await serverStatusNotifier.notifyBotStopping(
+    reason
+  );
+  serverStatusNotifier.stop();
+};
+process.once('uncaughtException', error => {
+  console.error('Uncaught exception:', error);
+  requestShutdown('UNCAUGHT_EXCEPTION', 1);
+});
+process.once('unhandledRejection', reason => {
+  console.error('Unhandled promise rejection:', reason);
+  requestShutdown('UNHANDLED_REJECTION', 1);
 });
 const registerHandler = createRegisterHandler({
   roleId: MINECRAFT_REGISTER_ROLE_ID,
@@ -347,6 +381,7 @@ async function sendBotReloadNotice() {
       `Bot reload selesai. User=${tag} | PID=${process.pid} | Node=${process.version}`
     )
   );
+  await serverStatusNotifier.notifyBotOnline({ tag });
 }
 
 async function checkBridgeHealth() {
@@ -380,6 +415,10 @@ async function checkBridgeHealth() {
       `Discord bridge check gagal: Minecraft BP tidak polling bridge selama ${staleText}. Jika BDS menampilkan InternalHttpRequestError code 111, cek rizebot bridge di port ${TOPUP_BRIDGE_PORT}.`
     )
   );
+  await serverStatusNotifier.notifyDisconnected({
+    lastContactAt: lastPollMs ? new Date(lastPollMs) : null,
+    staleText,
+  });
 }
 
 async function runArchiveSweep(reason = 'auto') {
@@ -450,11 +489,39 @@ client.once('clientReady', async () => {
     .then(summary => {
       if (summary.checked) {
         console.log(
-          `SociaBuzz recovery selesai. checked=${summary.checked}, recovered=${summary.recovered}, failed=${summary.failed}`
+          `SociaBuzz recovery selesai. checked=${summary.checked}, recovered=${summary.recovered}, refreshed=${summary.refreshed}, failed=${summary.failed}`
         );
       }
     })
     .catch(err => console.error('Failed to recover pending SociaBuzz payments:', err));
+  await sociabuzzTopupService.backfillRecentDiscordPayments()
+    .then(summary => {
+      console.log(
+        `SociaBuzz backfill selesai. channels=${summary.channels}, scanned=${summary.scanned}, matched=${summary.matched}, failed=${summary.failed}`
+      );
+    })
+    .catch(err => console.error('Failed to backfill SociaBuzz source channels:', err));
+  await bridgeService.redeliverCompletedTopupNotifications()
+    .then(summary => {
+      if (summary.checked) {
+        console.log(
+          `Topup notification recovery selesai. checked=${summary.checked}, delivered=${summary.delivered}, failed=${summary.failed}`
+        );
+      }
+    })
+    .catch(err => console.error('Failed to redeliver completed topup notifications:', err));
+  const topupNotificationRetryInterval = setInterval(() => {
+    void bridgeService.redeliverCompletedTopupNotifications()
+      .then(summary => {
+        if (summary.delivered || summary.failed) {
+          console.log(
+            `Topup notification retry. checked=${summary.checked}, delivered=${summary.delivered}, failed=${summary.failed}`
+          );
+        }
+      })
+      .catch(err => console.error('Failed to retry completed topup notifications:', err));
+  }, 60_000);
+  topupNotificationRetryInterval.unref?.();
   await moderationStore.init(client).catch(err => {
     console.error('Failed to init moderation store:', err);
   });
@@ -788,6 +855,28 @@ async function handleMessageUpdate(oldMsg, newMsg) {
 
 client.on('messageCreate', handleMessageCreate);
 client.on('messageUpdate', handleMessageUpdate);
+let discordDisconnectedAt = 0;
+client.on('shardDisconnect', (_event, shardId) => {
+  discordDisconnectedAt = Date.now();
+  console.warn(`Discord shard ${shardId} disconnected; waiting for resume.`);
+});
+client.on('shardResume', (shardId, replayedEvents) => {
+  void (async () => {
+    const disconnectedForMs = discordDisconnectedAt ? Date.now() - discordDisconnectedAt : 0;
+    discordDisconnectedAt = 0;
+    await serverStatusNotifier.notifyBotOnline({
+      tag: client.user?.tag || client.user?.username || 'unknown',
+      reconnected: true,
+      shardId,
+    });
+    const recovery = await sociabuzzTopupService.recoverPendingPayments();
+    const backfill = await sociabuzzTopupService.backfillRecentDiscordPayments();
+    const notifications = await bridgeService.redeliverCompletedTopupNotifications();
+    console.log(
+      `SociaBuzz reconnect recovery shard=${shardId}, replayed=${replayedEvents}, disconnectedMs=${disconnectedForMs}, recovered=${recovery.recovered}, refreshed=${recovery.refreshed}, scanned=${backfill.scanned}, matched=${backfill.matched}, notifications=${notifications.delivered}, failed=${recovery.failed + backfill.failed + notifications.failed}`
+    );
+  })().catch(err => console.error('Failed to recover SociaBuzz after Discord reconnect:', err));
+});
 client.on('interactionCreate', async interaction => {
   const handledApplicationCommand = await applicationCommandHandler(interaction).catch(async err => {
     console.error('Application command handler error:', err);

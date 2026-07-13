@@ -1595,7 +1595,10 @@ function createTopupBridgeService({ registerStore, client = null }) {
       ? record.status
       : 'queued';
     const updatedAt = Math.floor(Number(record.updatedAt) || now);
-    if (safeStatus === 'done' && now - updatedAt > JOB_TTL_MS) return null;
+    const result = record.result && typeof record.result === 'object' ? record.result : null;
+    const notificationDeliveredAt = Math.floor(Number(record.notificationDeliveredAt) || 0);
+    const awaitingTopupNotification = safeStatus === 'done' && type === 'topup' && result?.ok && !notificationDeliveredAt;
+    if (safeStatus === 'done' && now - updatedAt > JOB_TTL_MS && !awaitingTopupNotification) return null;
 
     const leaseUntil = Math.floor(Number(record.leaseUntil) || 0);
     return {
@@ -1611,7 +1614,9 @@ function createTopupBridgeService({ registerStore, client = null }) {
       leaseUntil: safeStatus === 'leased' && leaseUntil > now ? leaseUntil : 0,
       createdAt: Math.floor(Number(record.createdAt) || updatedAt || now),
       updatedAt,
-      result: record.result && typeof record.result === 'object' ? record.result : null,
+      result,
+      notificationDeliveredAt,
+      notificationAttempts: Math.max(0, Math.floor(Number(record.notificationAttempts) || 0)),
     };
   }
 
@@ -1654,33 +1659,35 @@ function createTopupBridgeService({ registerStore, client = null }) {
   }
 
   function saveJobsToDisk(now = Date.now()) {
-    const records = [...jobs.values()]
-      .map(record => normalizeJobRecord(record, now))
-      .filter(Boolean)
-      .map(record => ({
-        id: record.id,
-        job: record.job,
-        context: persistedJobContext(record.context),
-        status: record.status,
-        attempts: record.attempts,
-        leaseUntil: record.leaseUntil,
-        createdAt: record.createdAt,
-        updatedAt: record.updatedAt,
-        result: record.result,
-      }));
-
-    const payload = JSON.stringify({
-      updatedAt: new Date(now).toISOString(),
-      records,
-    }, null, 2);
-
     try {
+      const records = [...jobs.values()]
+        .map(record => normalizeJobRecord(record, now))
+        .filter(Boolean)
+        .map(record => ({
+          id: record.id,
+          job: record.job,
+          context: persistedJobContext(record.context),
+          status: record.status,
+          attempts: record.attempts,
+          leaseUntil: record.leaseUntil,
+          createdAt: record.createdAt,
+          updatedAt: record.updatedAt,
+          result: record.result,
+          notificationDeliveredAt: record.notificationDeliveredAt,
+          notificationAttempts: record.notificationAttempts,
+        }));
+      const payload = JSON.stringify({
+        updatedAt: new Date(now).toISOString(),
+        records,
+      }, null, 2);
       fs.mkdirSync(path.dirname(JOB_STORE_FILE), { recursive: true });
       const tmpFile = `${JOB_STORE_FILE}.tmp`;
       fs.writeFileSync(tmpFile, payload);
       fs.renameSync(tmpFile, JOB_STORE_FILE);
+      return true;
     } catch (err) {
       console.error('Failed to write Minecraft bridge job store:', err);
+      return false;
     }
   }
 
@@ -1688,16 +1695,21 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const diskChanged = loadJobsFromDisk(now);
     let changed = diskChanged;
     for (const [jobId, record] of jobs.entries()) {
-      if (record.status === 'done' && now - record.updatedAt > JOB_TTL_MS) {
+      const awaitingTopupNotification = record.status === 'done' && record.job?.type === 'topup' &&
+        record.result?.ok && !record.notificationDeliveredAt;
+      if (record.status === 'done' && now - record.updatedAt > JOB_TTL_MS && !awaitingTopupNotification) {
         jobs.delete(jobId);
         changed = true;
       }
     }
 
     while (jobs.size > JOB_LIMIT) {
-      const first = jobs.keys().next().value;
-      if (!first) break;
-      jobs.delete(first);
+      const completed = [...jobs.entries()].find(([, record]) => (
+        record.status === 'done' &&
+        !(record.job?.type === 'topup' && record.result?.ok && !record.notificationDeliveredAt)
+      ));
+      if (!completed) break;
+      jobs.delete(completed[0]);
       changed = true;
     }
 
@@ -2010,8 +2022,13 @@ function createTopupBridgeService({ registerStore, client = null }) {
       leaseUntil: 0,
       createdAt: now,
       updatedAt: now,
+      notificationDeliveredAt: 0,
+      notificationAttempts: 0,
     });
-    saveJobsToDisk(now);
+    if (!saveJobsToDisk(now)) {
+      jobs.delete(id);
+      throw new Error('bridge-job-persist-failed');
+    }
     return job;
   }
 
@@ -2179,7 +2196,17 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
     if (result.length > 0) {
       bridgeStats.lastJobPollHadJobsAt = new Date().toISOString();
-      saveJobsToDisk(now);
+      if (!saveJobsToDisk(now)) {
+        for (const job of result) {
+          const record = jobs.get(job.id);
+          if (!record) continue;
+          record.status = 'queued';
+          record.leaseUntil = 0;
+          record.attempts = Math.max(0, record.attempts - 1);
+          record.updatedAt = now;
+        }
+        return [];
+      }
     }
     return result;
   }
@@ -2215,9 +2242,11 @@ function createTopupBridgeService({ registerStore, client = null }) {
     }
   }
 
-  async function sendTopupResult(record, result) {
+  async function sendTopupResult(record, result, { notifyRequester = true } = {}) {
     const message = record.context?.message;
-    const requester = message?.author || await resolveDiscordUser(record.job?.requestedBy);
+    const requester = notifyRequester
+      ? (message?.author || await resolveDiscordUser(record.job?.requestedBy))
+      : null;
     const canNotifyRequester = Boolean(message || requester);
 
     const targetName = result.targetName || record.context?.target?.gamertag || record.job?.targetName || '-';
@@ -2231,17 +2260,52 @@ function createTopupBridgeService({ registerStore, client = null }) {
       )
       : `TOPUP gagal untuk \`${targetName}\`: \`${result.code || 'unknown'}\`.`;
     if (result.ok) {
-      await sendTopupSuccessEmbed(record, result).catch(err => {
+      const announcementSent = await sendTopupSuccessEmbed(record, result).catch(err => {
         console.error('Failed to send topup success embed:', err);
+        return false;
       });
-      if (!canNotifyRequester) return;
-      if (message) await message.reply(text).catch(() => {});
-      else await requester.send(text).catch(() => {});
+      if (notifyRequester && canNotifyRequester) {
+        if (message) await message.reply(text).catch(() => {});
+        else await requester.send(text).catch(() => {});
+      }
+      return announcementSent;
     } else {
-      if (!canNotifyRequester) return;
-      if (message) await message.reply(text).catch(() => {});
-      else await requester.send(text).catch(() => {});
+      if (notifyRequester && canNotifyRequester) {
+        if (message) await message.reply(text).catch(() => {});
+        else await requester.send(text).catch(() => {});
+      }
+      return true;
     }
+  }
+
+  async function redeliverCompletedTopupNotifications({ limit = 100 } = {}) {
+    pruneJobs();
+    const safeLimit = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 100)));
+    const records = [...jobs.values()]
+      .filter(record => (
+        record.status === 'done' &&
+        record.job?.type === 'topup' &&
+        record.result?.ok &&
+        !record.notificationDeliveredAt
+      ))
+      .sort((left, right) => left.updatedAt - right.updatedAt)
+      .slice(0, safeLimit);
+    const summary = { checked: records.length, delivered: 0, failed: 0 };
+    for (const record of records) {
+      record.notificationAttempts += 1;
+      const sent = await sendTopupResult(record, record.result, { notifyRequester: false }).catch(error => {
+        console.error(`Failed to redeliver topup notification ${record.id}:`, error);
+        return false;
+      });
+      if (sent) {
+        record.notificationDeliveredAt = Date.now();
+        summary.delivered += 1;
+      } else {
+        summary.failed += 1;
+      }
+      saveJobsToDisk(Date.now());
+    }
+    return summary;
   }
 
   async function resolvePrivateChatChannel() {
@@ -2257,7 +2321,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
   }
 
   async function sendTopupSuccessEmbed(record, result) {
-    if (!result?.ok || result.status === 'pending') return false;
+    if (!result?.ok) return false;
 
     const channel = await resolvePrivateChatChannel();
     if (!channel?.send) return false;
@@ -2274,11 +2338,14 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const user = await resolveDiscordUser(linked?.userId);
     const source = cleanText(record.job?.source || 'manual', 80);
     const paymentId = cleanText(record.job?.paymentId || '', 120);
+    const pending = result.status === 'pending';
 
     const embed = new EmbedBuilder()
-      .setColor(EMBED_COLOR_TOPUP)
-      .setTitle('Topup Berhasil')
-      .setDescription(`\`${targetName}\` berhasil menerima **${formatNumber(geon)} Geon**.`)
+      .setColor(pending ? 0xf2c94c : EMBED_COLOR_TOPUP)
+      .setTitle(pending ? 'Topup Menunggu Player Join' : 'Topup Berhasil')
+      .setDescription(pending
+        ? `\`${targetName}\` akan menerima **${formatNumber(geon)} Geon** saat masuk ke server Minecraft.`
+        : `\`${targetName}\` berhasil menerima **${formatNumber(geon)} Geon**.`)
       .addFields(
         { name: 'Gamertag', value: `\`${targetName}\``, inline: true },
         { name: 'Geon', value: `${formatNumber(geon)} Geon`, inline: true },
@@ -2288,7 +2355,8 @@ function createTopupBridgeService({ registerStore, client = null }) {
           value: linked?.userId ? `<@${linked.userId}>` : 'Belum terhubung',
           inline: true,
         },
-        { name: 'Sumber', value: source || 'manual', inline: true }
+        { name: 'Sumber', value: source || 'manual', inline: true },
+        { name: 'Status', value: pending ? 'Menunggu player join' : 'Sudah diterima', inline: true }
       )
       .setFooter({ text: paymentId ? `Payment ${paymentId}` : `Ref ${record.job?.id || record.id || '-'}` })
       .setTimestamp();
@@ -3061,7 +3129,16 @@ function createTopupBridgeService({ registerStore, client = null }) {
       if (record.job.type === 'coupon') {
         deliveryResult = await sendCouponResult(record, resultRaw);
       } else if (record.job.type === 'topup') {
-        deliveryResult = await sendTopupResult(record, resultRaw);
+        if (resultRaw.ok && record.notificationDeliveredAt) {
+          deliveryResult = true;
+        } else {
+          if (resultRaw.ok) record.notificationAttempts += 1;
+          deliveryResult = await sendTopupResult(record, resultRaw);
+          if (resultRaw.ok && deliveryResult === true) {
+            record.notificationDeliveredAt = Date.now();
+            saveJobsToDisk(record.notificationDeliveredAt);
+          }
+        }
       } else {
         deliveryResult = await sendQueryResult(record, resultRaw);
       }
@@ -3487,6 +3564,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     takeJobs,
     completeJob,
     onJobResult,
+    redeliverCompletedTopupNotifications,
     handleMinecraftEvent,
     getBridgeStatus,
   };

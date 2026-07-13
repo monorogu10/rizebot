@@ -26,6 +26,10 @@ const ONLINE_COLLECTOR_MS = 2 * 60 * 1000;
 const DISCORD_BROADCAST_MAX_LENGTH = 240;
 const GEON_TRANSFER_MAX = 100_000_000;
 const LOADING_GIF_URL = 'https://media1.tenor.com/m/UnFx-k_lSckAAAAd/amalie-steiness.gif';
+const PUBLIC_BRIDGE_STALE_MS = Math.max(
+  15_000,
+  Number(process.env.MINECRAFT_BRIDGE_STALE_MS) || 30_000
+);
 
 function isBridgeAdmin(userId) {
   return String(userId || '') === TOPUP_ADMIN_DISCORD_ID;
@@ -56,7 +60,7 @@ function normalizeSpaces(value) {
 
 function parseCommand(content) {
   const raw = normalizeSpaces(content);
-  const match = raw.match(/^!(verify|verifyme|verifme|veryfyme|mc-help|mcstatus|mcping|online|srcsrv|srcpl|geon|player|organisasi|organization|org|p|tf|transfer|bonus|migrasi|migration|migrate)(?:\s+(.+))?$/i);
+  const match = raw.match(/^!(verify|verifyme|verifme|veryfyme|mc-help|cekserver|mcstatus|mcping|online|srcsrv|srcpl|geon|player|organisasi|organization|org|p|tf|transfer|bonus|migrasi|migration|migrate)(?:\s+(.+))?$/i);
   if (!match) return null;
   const command = match[1].toLowerCase();
   return {
@@ -315,7 +319,7 @@ async function sendOnlinePagination(msg, onlinePlayers) {
   collector.on('collect', async interaction => {
     if (String(interaction.user?.id || '') !== String(msg.author?.id || '')) {
       await interaction.reply({
-        content: 'Pagination ini hanya untuk admin yang menjalankan `/minecraft online`.',
+        content: 'Pagination ini hanya bisa dipakai oleh user yang menjalankan `/cek online`.',
         ephemeral: true,
       }).catch(() => {});
       return;
@@ -363,6 +367,54 @@ function formatBridgeStatus(status) {
     `Queue Minecraft sukses/gagal: ${timeOrDash(status.minecraftQueueLastSuccessAt)} / ${timeOrDash(status.minecraftQueueLastFailureAt)}`,
     `Pending verify: ${formatNumber(status.pendingVerifyCount || 0)}`,
   ].join('\n');
+}
+
+function bridgeContactTimeMs(status = {}) {
+  const raw = status.lastJobPollAt || status.lastEventAt || status.lastSnapshotAt;
+  if (!raw) return 0;
+  const parsed = new Date(raw).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function publicBridgeHealth(status = {}, nowMs = Date.now()) {
+  const lastContactMs = bridgeContactTimeMs(status);
+  const ageMs = lastContactMs ? Math.max(0, nowMs - lastContactMs) : Number.POSITIVE_INFINITY;
+  return {
+    connected: lastContactMs > 0 && ageMs <= PUBLIC_BRIDGE_STALE_MS,
+    lastContactMs,
+    ageMs,
+  };
+}
+
+function buildPublicServerStatus(status = {}, nowMs = Date.now()) {
+  const health = publicBridgeHealth(status, nowMs);
+  const lastContact = health.lastContactMs
+    ? `<t:${Math.floor(health.lastContactMs / 1000)}:R>`
+    : 'Belum ada sejak bot aktif';
+  const jobs = status.jobs || {};
+  return noPing({
+    embeds: [new EmbedBuilder()
+      .setColor(health.connected ? 0x2ecc71 : 0xe74c3c)
+      .setTitle('Status Ethergeon')
+      .setDescription(
+        health.connected
+          ? 'Bot Discord dan bridge Minecraft Ethergeon sedang terhubung.'
+          : 'Bot Discord aktif, tetapi server Minecraft Ethergeon belum terhubung ke bridge.'
+      )
+      .addFields(
+        { name: 'BOT Discord', value: '✅ ONLINE', inline: true },
+        {
+          name: 'Server Minecraft',
+          value: health.connected ? '✅ ONLINE / TERHUBUNG' : '❌ OFFLINE / TIDAK TERHUBUNG',
+          inline: true,
+        },
+        { name: 'Player Online', value: health.connected ? formatNumber(status.onlineCount || 0) : 'Tidak dapat dipastikan', inline: true },
+        { name: 'Kontak Bridge Terakhir', value: lastContact, inline: true },
+        { name: 'Antrean Minecraft', value: formatNumber((jobs.queued || 0) + (jobs.leased || 0)), inline: true },
+      )
+      .setFooter({ text: `Status otomatis • batas koneksi ${Math.ceil(PUBLIC_BRIDGE_STALE_MS / 1000)} detik` })
+      .setTimestamp(new Date(nowMs))],
+  });
 }
 
 function createMinecraftBridgeHandler({ bridge, registerStore }) {
@@ -424,6 +476,30 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
             'Jika kamu menjalankan `!verify` lagi, kode yang sama akan dipakai selama masih aktif.',
           ].join('\n')
       );
+      return true;
+    }
+
+    if (parsed.command === 'cekserver') {
+      await replyNoPing(msg, buildPublicServerStatus(bridge.getBridgeStatus()));
+      return true;
+    }
+
+    if (parsed.command === 'online') {
+      const status = bridge.getBridgeStatus();
+      const health = publicBridgeHealth(status);
+      if (!health.connected) {
+        await replyNoPing(msg, buildCommandEmbed({
+          color: 0xe74c3c,
+          title: 'Player Online Tidak Tersedia',
+          description: [
+            'Bot Discord aktif, tetapi server Minecraft Ethergeon sedang offline atau belum terhubung ke bridge.',
+            'Daftar cache lama tidak ditampilkan agar tidak memberi informasi online yang keliru.',
+            'Gunakan `/cek server` untuk melihat status koneksi.',
+          ].join('\n'),
+        }));
+        return true;
+      }
+      await sendOnlinePagination(msg, bridge.getOnlinePlayers());
       return true;
     }
 
@@ -613,12 +689,6 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         title: 'Kirim Chat ke Minecraft',
         description: `Mengirim pesan ke Minecraft: \`${text}\``,
       });
-      return true;
-    }
-
-    if (parsed.command === 'online') {
-      const online = bridge.getOnlinePlayers();
-      await sendOnlinePagination(msg, online);
       return true;
     }
 

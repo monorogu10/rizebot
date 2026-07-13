@@ -8,6 +8,7 @@ const APPLICATION_COMMAND_NAMES = new Set([
   'register',
   'status',
   'player',
+  'cek',
   'interview',
   'registry',
   'help',
@@ -49,7 +50,7 @@ function buildApplicationCommands() {
       .setDMPermission(false)
       .addUserOption(option => option
         .setName('user')
-        .setDescription('User lain; hanya tersedia untuk admin/interviewer')
+        .setDescription('User yang ingin dilihat; kosong berarti diri sendiri')
         .setRequired(false)),
 
     new SlashCommandBuilder()
@@ -63,6 +64,27 @@ function buildApplicationCommands() {
         .setMaxLength(80)
         .setAutocomplete(true)
         .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('cek')
+      .setDescription('Cek status server dan player Ethergeon')
+      .setDMPermission(false)
+      .addSubcommand(subcommand => subcommand
+        .setName('server')
+        .setDescription('Cek apakah bot dan server Minecraft Ethergeon aktif'))
+      .addSubcommand(subcommand => subcommand
+        .setName('online')
+        .setDescription('Lihat player yang sedang online di Ethergeon'))
+      .addSubcommand(subcommand => subcommand
+        .setName('player')
+        .setDescription('Cek data player lain dari Minecraft bridge')
+        .addStringOption(option => option
+          .setName('nama')
+          .setDescription('Nama player atau gamertag Minecraft')
+          .setMinLength(2)
+          .setMaxLength(80)
+          .setAutocomplete(true)
+          .setRequired(true))),
 
     new SlashCommandBuilder()
       .setName('interview')
@@ -634,6 +656,12 @@ function commandToLegacyContent(interaction) {
     return `!status${target ? ` ${mention(target)}` : ''}`;
   }
   if (interaction.commandName === 'player') {
+    return `!player ${options.getString('nama', true)}`;
+  }
+  if (interaction.commandName === 'cek') {
+    const subcommand = options.getSubcommand(true);
+    if (subcommand === 'server') return '!cekserver';
+    if (subcommand === 'online') return '!online';
     return `!player ${options.getString('nama', true)}`;
   }
   if (interaction.commandName === 'registry') {

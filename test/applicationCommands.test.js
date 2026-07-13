@@ -45,6 +45,7 @@ test('application command definitions expose the complete slash-only surface', (
     'register',
     'status',
     'player',
+    'cek',
     'interview',
     'registry',
     'help',
@@ -79,6 +80,9 @@ test('application command definitions expose the complete slash-only surface', (
 
   const registry = payloads.find(command => command.name === 'registry');
   assert.deepEqual(registry.options.map(option => option.name), ['list', 'sync', 'set-gamertag']);
+
+  const cek = payloads.find(command => command.name === 'cek');
+  assert.deepEqual(cek.options.map(option => option.name), ['server', 'online', 'player']);
 });
 
 test('legacy Discord prefix commands are recognized for deprecation handling', () => {
@@ -142,6 +146,9 @@ test('every migrated command family maps to its internal handler command', () =>
     ['uu', 'revise', { id: 'UU-EG-1', alasan: 'Pembaruan' }, '!revise-uu UU-EG-1 | Pembaruan'],
     ['uu', 'cabut', { id: 'UU-EG-1', alasan: 'Tidak berlaku' }, '!cabut-uu UU-EG-1 | Tidak berlaku'],
     ['moderasi', 'timeout', { user: target }, '!timeout <@123456789>'],
+    ['cek', 'server', {}, '!cekserver'],
+    ['cek', 'online', {}, '!online'],
+    ['cek', 'player', { nama: 'Damp' }, '!player Damp'],
     ['minecraft', 'status', {}, '!mcstatus'],
     ['minecraft', 'ping', {}, '!mcping'],
     ['minecraft', 'online', {}, '!online'],

@@ -39,6 +39,129 @@ test('topup bridge persists jobs when message context is null', () => {
   assert.equal(persisted.records[0].context, null);
 });
 
+test('pending topup is announced to Ethergeon chat', async () => {
+  const sent = [];
+  const privateChannel = {
+    async send(payload) {
+      sent.push(payload);
+      return { id: `ethergeon-${sent.length}` };
+    },
+  };
+  const bridge = createTopupBridgeService({
+    registerStore: {
+      getEntries: () => [],
+      findUserByGamertag: () => null,
+      findUserByPersistentId: () => null,
+    },
+    client: {
+      channels: { fetch: async () => privateChannel },
+      users: { cache: new Map(), fetch: async () => null },
+    },
+  });
+  const job = bridge.enqueueTopup({
+    target: { userId: '1', gamertag: 'Offline Player' },
+    geon: 1_500,
+    rupiah: 10_000,
+    requestedBy: 'admin',
+    message: null,
+    loadingMessage: null,
+    source: 'sociabuzz',
+    paymentId: 'sb_pending_announcement',
+  });
+
+  assert.deepEqual(bridge.takeJobs(10).some(item => item.id === job.id), true);
+  assert.equal((await bridge.completeJob({
+    jobId: job.id,
+    ok: true,
+    status: 'pending',
+    targetName: 'Offline Player',
+    geon: 1_500,
+    rupiah: 10_000,
+  })).ok, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].embeds[0].data.title, 'Topup Menunggu Player Join');
+  assert.equal((await bridge.redeliverCompletedTopupNotifications()).checked, 0);
+});
+
+test('completed topup notification is retried after Discord delivery failure', async () => {
+  const sent = [];
+  let discordAvailable = false;
+  const privateChannel = {
+    async send(payload) {
+      if (!discordAvailable) throw new Error('Discord temporarily unavailable');
+      sent.push(payload);
+      return { id: `ethergeon-retry-${sent.length}` };
+    },
+  };
+  const bridge = createTopupBridgeService({
+    registerStore: {
+      getEntries: () => [],
+      findUserByGamertag: () => null,
+      findUserByPersistentId: () => null,
+    },
+    client: {
+      channels: { fetch: async () => privateChannel },
+      users: { cache: new Map(), fetch: async () => null },
+    },
+  });
+  const job = bridge.enqueueTopup({
+    target: { userId: '2', gamertag: 'Reconnect Player' },
+    geon: 2_100,
+    rupiah: 10_000,
+    requestedBy: 'admin',
+    source: 'sociabuzz',
+    paymentId: 'sb_reconnect_announcement',
+  });
+  bridge.takeJobs(10);
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    assert.equal((await bridge.completeJob({
+      jobId: job.id,
+      ok: true,
+      status: 'success',
+      targetName: 'Reconnect Player',
+      geon: 2_100,
+      rupiah: 10_000,
+    })).ok, true);
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(sent.length, 0);
+
+  discordAvailable = true;
+  const recovery = await bridge.redeliverCompletedTopupNotifications();
+  assert.equal(recovery.delivered, 1);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].embeds[0].data.title, 'Topup Berhasil');
+});
+
+test('active bridge backlog is never silently pruned at the history limit', () => {
+  const bridge = createTopupBridgeService({
+    registerStore: {
+      getEntries: () => [],
+      findUserByGamertag: () => null,
+      findUserByPersistentId: () => null,
+    },
+  });
+  const paymentIds = [];
+  for (let index = 0; index < 105; index += 1) {
+    const paymentId = `sb_backlog_${index}`;
+    paymentIds.push(paymentId);
+    bridge.enqueueTopup({
+      target: { userId: String(index), gamertag: `Player${index}` },
+      geon: 100,
+      rupiah: 1_000,
+      requestedBy: 'admin',
+      source: 'sociabuzz',
+      paymentId,
+    });
+  }
+  const records = JSON.parse(fs.readFileSync(jobStoreFile, 'utf8')).records;
+  const persistedPaymentIds = new Set(records.map(record => record.job.paymentId));
+  assert.equal(paymentIds.every(paymentId => persistedPaymentIds.has(paymentId)), true);
+});
+
 test.after(() => {
   fs.rmSync(runtimeDirectory, { recursive: true, force: true });
 });

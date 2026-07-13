@@ -90,6 +90,65 @@ function createServerStatusNotifier({ client, channelId }) {
     );
   }
 
+  async function notifyDisconnected({ lastContactAt = null, staleText = '' } = {}) {
+    const fields = [];
+    if (lastContactAt) {
+      const timestamp = new Date(lastContactAt).getTime();
+      if (Number.isFinite(timestamp)) {
+        fields.push({
+          name: 'Kontak Bridge Terakhir',
+          value: `<t:${Math.floor(timestamp / 1000)}:R>`,
+          inline: true,
+        });
+      }
+    }
+    if (staleText) fields.push({ name: 'Tidak Merespons', value: String(staleText).slice(0, 1024), inline: true });
+    return sendEmbed(
+      new EmbedBuilder()
+        .setColor(0xe74c3c)
+        .setTitle('Server Ethergeon Tidak Terhubung')
+        .setDescription([
+          'Bot Discord masih aktif, tetapi server Minecraft Ethergeon berhenti menghubungi bridge.',
+          'Command yang membutuhkan data langsung Minecraft akan menunggu sampai server terhubung kembali.',
+        ].join('\n'))
+        .addFields(fields)
+        .setFooter({ text: 'Status akan diumumkan otomatis saat server tersambung kembali.' })
+        .setTimestamp()
+    );
+  }
+
+  async function notifyBotOnline({ tag = '', reconnected = false, shardId = null } = {}) {
+    const details = [];
+    if (tag) details.push({ name: 'Akun Bot', value: String(tag).slice(0, 1024), inline: true });
+    if (shardId !== null && shardId !== undefined) {
+      details.push({ name: 'Shard', value: String(shardId), inline: true });
+    }
+    return sendEmbed(
+      new EmbedBuilder()
+        .setColor(0x2ecc71)
+        .setTitle(reconnected ? 'BOT monoDeco Kembali Online' : 'BOT monoDeco Sudah Online')
+        .setDescription(
+          reconnected
+            ? 'Koneksi bot ke Discord sempat terputus dan sekarang sudah pulih.'
+            : 'Reload bot selesai dan command Discord sudah dapat digunakan kembali.'
+        )
+        .addFields(details)
+        .setFooter({ text: 'Gunakan /cek server untuk memeriksa koneksi Minecraft Ethergeon.' })
+        .setTimestamp()
+    );
+  }
+
+  async function notifyBotStopping(reason = 'Bot sedang dihentikan atau direload.') {
+    return sendEmbed(
+      new EmbedBuilder()
+        .setColor(0xe74c3c)
+        .setTitle('BOT monoDeco Akan Offline')
+        .setDescription(String(reason || 'Bot sedang dihentikan atau direload.').slice(0, 4096))
+        .setFooter({ text: 'Notifikasi online akan muncul setelah bot selesai reload.' })
+        .setTimestamp()
+    );
+  }
+
   async function notifyShopPriceChanged(result = {}, adminTag = "Discord Admin") {
     const entry = result.entry || {};
     const previousValue = Math.max(0, Math.floor(Number(result.previousValue) || 0));
@@ -190,7 +249,10 @@ function createServerStatusNotifier({ client, channelId }) {
   return {
     start,
     stop,
+    notifyBotOnline,
+    notifyBotStopping,
     notifyConnected,
+    notifyDisconnected,
     notifyRestarting,
     notifyShopPriceChanged,
     notifyLawPublished,

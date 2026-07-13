@@ -181,6 +181,14 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
       },
     },
   };
+  let backfillMessages = [];
+  const sourceChannel = {
+    messages: {
+      async fetch() {
+        return new Map(backfillMessages.map(message => [message.id, message]));
+      },
+    },
+  };
   let resultListener = null;
   let failNextEnqueue = false;
   const jobs = [];
@@ -200,7 +208,11 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
     },
   };
   const client = {
-    channels: { fetch: async () => logChannel },
+    channels: {
+      fetch: async channelId => (
+        channelId === '1519567676836413490' ? logChannel : sourceChannel
+      ),
+    },
     users: { cache: new Map() },
     guilds: { cache: new Map() },
   };
@@ -285,6 +297,26 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
     const recovery = await service.recoverPendingPayments();
     assert.equal(recovery.failed, 0);
     assert.equal(database.getSociabuzzPayment(recoverable.id).status, 'queued');
+
+    backfillMessages = [{
+      id: 'missed-while-disconnected-001',
+      channelId: '1195891719154184295',
+      author: { id: 'foundation-bot', username: 'monoFoundation', bot: true },
+      content: '',
+      embeds: [{
+        title: 'DANA SEBESAR IDR1,000 DARI INVESTOR Someone',
+        description: 'Gt: RealPlayer',
+        fields: [],
+      }],
+      createdTimestamp: Date.now(),
+      url: 'https://discord.test/missed-while-disconnected-001',
+    }];
+    const jobsBeforeBackfill = jobs.length;
+    const backfill = await service.backfillRecentDiscordPayments({ limit: 20 });
+    assert.equal(backfill.matched, 1);
+    assert.equal(jobs.length, jobsBeforeBackfill + 1);
+    await service.backfillRecentDiscordPayments({ limit: 20 });
+    assert.equal(jobs.length, jobsBeforeBackfill + 1, 'backfill remains idempotent');
   } finally {
     database.close();
   }
