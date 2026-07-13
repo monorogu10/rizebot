@@ -306,6 +306,13 @@ function createRizebotDatabase({
       CREATE INDEX IF NOT EXISTS idx_sociabuzz_payments_status
       ON sociabuzz_payments(status, updated_at DESC);
 
+      CREATE TABLE IF NOT EXISTS sociabuzz_ingest_cursors (
+        channel_id TEXT PRIMARY KEY,
+        last_message_id TEXT NOT NULL,
+        last_message_timestamp INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+
     `);
 
     const versionColumns = new Set(connection.prepare('PRAGMA table_info(law_versions)').all().map(row => String(row.name)));
@@ -749,6 +756,42 @@ function createRizebotDatabase({
     const safeLimit = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 1000)));
     return db.prepare(`SELECT * FROM sociabuzz_payments ORDER BY updated_at DESC LIMIT ${safeLimit}`)
       .all().map(sociabuzzPaymentFromRow).filter(Boolean);
+  }
+
+  function getSociabuzzIngestCursor(channelIdRaw) {
+    ensureOpen();
+    const channelId = String(channelIdRaw || '').trim();
+    if (!channelId) return null;
+    const row = db.prepare(`
+      SELECT channel_id, last_message_id, last_message_timestamp, updated_at
+      FROM sociabuzz_ingest_cursors
+      WHERE channel_id = ?
+    `).get(channelId);
+    return row ? {
+      channelId: String(row.channel_id),
+      lastMessageId: String(row.last_message_id),
+      lastMessageTimestamp: Math.max(0, Math.floor(Number(row.last_message_timestamp) || 0)),
+      updatedAt: String(row.updated_at || ''),
+    } : null;
+  }
+
+  function saveSociabuzzIngestCursor(cursor = {}) {
+    ensureOpen();
+    const channelId = String(cursor.channelId || '').trim();
+    const lastMessageId = String(cursor.lastMessageId || '').trim();
+    const lastMessageTimestamp = Math.max(0, Math.floor(Number(cursor.lastMessageTimestamp) || 0));
+    if (!channelId || !lastMessageId) throw new Error('Cursor ingest SociaBuzz tidak valid');
+    const updatedAt = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO sociabuzz_ingest_cursors(
+        channel_id, last_message_id, last_message_timestamp, updated_at
+      ) VALUES (?, ?, ?, ?)
+      ON CONFLICT(channel_id) DO UPDATE SET
+        last_message_id = excluded.last_message_id,
+        last_message_timestamp = excluded.last_message_timestamp,
+        updated_at = excluded.updated_at
+    `).run(channelId, lastMessageId, lastMessageTimestamp, updatedAt);
+    return getSociabuzzIngestCursor(channelId);
   }
 
   function insertInterviewAudit(session, action, actor = {}, detail = '') {
@@ -1905,6 +1948,8 @@ function createRizebotDatabase({
     saveSociabuzzPayment,
     getSociabuzzPayment,
     listSociabuzzPayments,
+    getSociabuzzIngestCursor,
+    saveSociabuzzIngestCursor,
     currentInterviewSequence,
     setInterviewSequenceAtLeast,
     allocateInterviewCode,

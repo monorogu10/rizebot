@@ -487,9 +487,10 @@ client.once('clientReady', async () => {
   }
   await sociabuzzTopupService.recoverPendingPayments()
     .then(summary => {
-      if (summary.checked) {
+      const security = summary.quarantine || {};
+      if (summary.checked || security.checked) {
         console.log(
-          `SociaBuzz recovery selesai. checked=${summary.checked}, recovered=${summary.recovered}, refreshed=${summary.refreshed}, failed=${summary.failed}`
+          `SociaBuzz recovery selesai. checked=${summary.checked}, recovered=${summary.recovered}, refreshed=${summary.refreshed}, failed=${summary.failed}, historicalBlocked=${security.quarantined || 0}, historicalReview=${security.reviewRequired || 0}, jobsCanceled=${security.canceledJobs || 0}`
         );
       }
     })
@@ -497,7 +498,7 @@ client.once('clientReady', async () => {
   await sociabuzzTopupService.backfillRecentDiscordPayments()
     .then(summary => {
       console.log(
-        `SociaBuzz backfill selesai. channels=${summary.channels}, scanned=${summary.scanned}, matched=${summary.matched}, failed=${summary.failed}`
+        `SociaBuzz backfill selesai. channels=${summary.channels}, initialized=${summary.initialized}, skippedHistorical=${summary.skippedHistorical}, scanned=${summary.scanned}, matched=${summary.matched}, failed=${summary.failed}`
       );
     })
     .catch(err => console.error('Failed to backfill SociaBuzz source channels:', err));
@@ -873,7 +874,7 @@ client.on('shardResume', (shardId, replayedEvents) => {
     const backfill = await sociabuzzTopupService.backfillRecentDiscordPayments();
     const notifications = await bridgeService.redeliverCompletedTopupNotifications();
     console.log(
-      `SociaBuzz reconnect recovery shard=${shardId}, replayed=${replayedEvents}, disconnectedMs=${disconnectedForMs}, recovered=${recovery.recovered}, refreshed=${recovery.refreshed}, scanned=${backfill.scanned}, matched=${backfill.matched}, notifications=${notifications.delivered}, failed=${recovery.failed + backfill.failed + notifications.failed}`
+      `SociaBuzz reconnect recovery shard=${shardId}, replayed=${replayedEvents}, disconnectedMs=${disconnectedForMs}, recovered=${recovery.recovered}, historicalBlocked=${recovery.quarantine?.quarantined || 0}, historicalReview=${recovery.quarantine?.reviewRequired || 0}, initialized=${backfill.initialized}, skippedHistorical=${backfill.skippedHistorical}, scanned=${backfill.scanned}, matched=${backfill.matched}, notifications=${notifications.delivered}, failed=${recovery.failed + backfill.failed + notifications.failed}`
     );
   })().catch(err => console.error('Failed to recover SociaBuzz after Discord reconnect:', err));
 });

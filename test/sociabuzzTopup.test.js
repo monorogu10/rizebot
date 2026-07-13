@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -192,6 +193,7 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
   let resultListener = null;
   let failNextEnqueue = false;
   const jobs = [];
+  const canceledPayments = [];
   const bridge = {
     onJobResult(listener) {
       resultListener = listener;
@@ -205,6 +207,10 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
       const job = { id: `job-${jobs.length + 1}`, type: 'topup', ...payload };
       jobs.push(job);
       return job;
+    },
+    cancelTopupPayment(paymentId) {
+      canceledPayments.push(paymentId);
+      return { matched: 1, canceled: 1, leased: 0, done: 0, doneSucceeded: 0 };
     },
   };
   const client = {
@@ -273,6 +279,28 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
     assert.equal(duplicateResults[0].record.id, duplicateResults[1].record.id);
     assert.equal(jobs.length, 2, 'concurrent copies of one payment enqueue one bridge job');
 
+    const ledgerOnlyExternalId = 'ledger-only-duplicate-001';
+    const ledgerOnlyId = `sb_${crypto.createHash('sha1').update(`webhook:${ledgerOnlyExternalId}`).digest('hex').slice(0, 16)}`;
+    database.saveSociabuzzPayment({
+      id: ledgerOnlyId,
+      sourceKey: `webhook:${ledgerOnlyExternalId}`,
+      source: { kind: 'webhook', sourceKey: `webhook:${ledgerOnlyExternalId}`, createdAt: new Date().toISOString() },
+      status: 'delivered',
+      rupiah: 1_000,
+      geon: 100,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const jobsBeforeLedgerDuplicate = jobs.length;
+    const ledgerDuplicate = await service.handleWebhookPayload({
+      payment_id: ledgerOnlyExternalId,
+      provider: 'SociaBuzz',
+      amount: '1000',
+      message: 'Nama: RealPlayer | Nama DC: monodeco',
+    });
+    assert.ok(['already-seen', 'already-seen-log-restored'].includes(ledgerDuplicate.code));
+    assert.equal(jobs.length, jobsBeforeLedgerDuplicate, 'SQLite ledger blocks duplicates outside memory cache');
+
     await resultListener({
       job: jobs[0],
       result: { ok: true, status: 'pending' },
@@ -298,7 +326,27 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
     assert.equal(recovery.failed, 0);
     assert.equal(database.getSociabuzzPayment(recoverable.id).status, 'queued');
 
+    const baselineTimestamp = Date.now() - 60_000;
     backfillMessages = [{
+      id: 'historical-payment-must-not-replay',
+      channelId: '1195891719154184295',
+      author: { id: 'foundation-bot', username: 'monoFoundation', bot: true },
+      content: '',
+      embeds: [{
+        title: 'DANA SEBESAR IDR1,000 DARI INVESTOR Someone',
+        description: 'Gt: RealPlayer',
+        fields: [],
+      }],
+      createdTimestamp: baselineTimestamp,
+      url: 'https://discord.test/historical-payment-must-not-replay',
+    }];
+    const jobsBeforeBackfill = jobs.length;
+    const initialized = await service.backfillRecentDiscordPayments({ limit: 20 });
+    assert.equal(initialized.initialized, 1);
+    assert.equal(initialized.matched, 0);
+    assert.equal(jobs.length, jobsBeforeBackfill, 'first checkpoint must never replay payment history');
+
+    backfillMessages.push({
       id: 'missed-while-disconnected-001',
       channelId: '1195891719154184295',
       author: { id: 'foundation-bot', username: 'monoFoundation', bot: true },
@@ -308,15 +356,46 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
         description: 'Gt: RealPlayer',
         fields: [],
       }],
-      createdTimestamp: Date.now(),
+      createdTimestamp: baselineTimestamp + 30_000,
       url: 'https://discord.test/missed-while-disconnected-001',
-    }];
-    const jobsBeforeBackfill = jobs.length;
+    });
     const backfill = await service.backfillRecentDiscordPayments({ limit: 20 });
     assert.equal(backfill.matched, 1);
     assert.equal(jobs.length, jobsBeforeBackfill + 1);
     await service.backfillRecentDiscordPayments({ limit: 20 });
     assert.equal(jobs.length, jobsBeforeBackfill + 1, 'backfill remains idempotent');
+
+    const dangerousHistoricalRecord = {
+      id: 'sb_historical_replay_queued',
+      sourceKey: 'discord:historical-replay-queued',
+      source: {
+        kind: 'discord',
+        sourceKey: 'discord:historical-replay-queued',
+        messageId: 'historical-replay-queued',
+        channelId: '1195891719154184295',
+        createdAt: new Date(Date.now() - 24 * 60 * 60_000).toISOString(),
+      },
+      status: 'queued',
+      jobId: 'dangerous-job-1',
+      rupiah: 10_000,
+      geon: 1_000,
+      rate: { version: 1, geonPer1000: 100 },
+      identity: { gamertag: 'RealPlayer' },
+      candidates: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    database.saveSociabuzzPayment(dangerousHistoricalRecord);
+    const restartedService = createSociabuzzTopupService({ bridge, registerStore, client });
+    const jobsBeforeRestartBackfill = jobs.length;
+    const restartBackfill = await restartedService.backfillRecentDiscordPayments({ limit: 20 });
+    assert.equal(restartBackfill.initialized, 0);
+    assert.equal(restartBackfill.matched, 0);
+    assert.equal(jobs.length, jobsBeforeRestartBackfill, 'persisted cursor prevents replay after bot reload');
+    const securedRecovery = await restartedService.recoverPendingPayments();
+    assert.equal(securedRecovery.quarantine.quarantined, 1);
+    assert.deepEqual(canceledPayments, [dangerousHistoricalRecord.id]);
+    assert.equal(database.getSociabuzzPayment(dangerousHistoricalRecord.id).status, 'quarantined');
   } finally {
     database.close();
   }

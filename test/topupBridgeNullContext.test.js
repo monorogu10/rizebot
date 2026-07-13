@@ -136,6 +136,31 @@ test('completed topup notification is retried after Discord delivery failure', a
   assert.equal(sent[0].embeds[0].data.title, 'Topup Berhasil');
 });
 
+test('historical payment quarantine removes queued topup from Minecraft delivery', () => {
+  const bridge = createTopupBridgeService({
+    registerStore: {
+      getEntries: () => [],
+      findUserByGamertag: () => null,
+      findUserByPersistentId: () => null,
+    },
+  });
+  const job = bridge.enqueueTopup({
+    target: { userId: '3', gamertag: 'Historical Player' },
+    geon: 10_000,
+    rupiah: 100_000,
+    requestedBy: 'sociabuzz-history',
+    source: 'sociabuzz',
+    paymentId: 'sb_historical_must_cancel',
+  });
+
+  const canceled = bridge.cancelTopupPayment('sb_historical_must_cancel', 'historical-replay-blocked');
+  assert.equal(canceled.canceled, 1);
+  const persisted = JSON.parse(fs.readFileSync(jobStoreFile, 'utf8')).records
+    .find(record => record.id === job.id);
+  assert.equal(persisted.status, 'canceled');
+  assert.equal(bridge.takeJobs(10).some(item => item.id === job.id), false);
+});
+
 test('active bridge backlog is never silently pruned at the history limit', () => {
   const bridge = createTopupBridgeService({
     registerStore: {

@@ -30,6 +30,10 @@ const SOCIABUZZ_BACKFILL_LIMIT = Math.max(
   1,
   Math.min(1000, Math.floor(Number(process.env.SOCIABUZZ_BACKFILL_LIMIT) || 500))
 );
+const LEGACY_HISTORY_REPLAY_THRESHOLD_MS = Math.max(
+  60_000,
+  Number(process.env.SOCIABUZZ_HISTORY_REPLAY_THRESHOLD_MS) || 5 * 60_000
+);
 const ACTIVE_PAYMENT_STATUSES = new Set(['needs_target', 'pending', 'resolving', 'failed']);
 const UNKNOWN_NAMES = new Set([
   'someone',
@@ -393,6 +397,32 @@ function candidateFromEntry(entry, reason, confidence, score = 0) {
   };
 }
 
+function sourceMessageTimestamp(source = {}) {
+  const parsed = new Date(source.createdAt || '').getTime();
+  return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+}
+
+function compareMessageIds(leftRaw, rightRaw) {
+  const left = String(leftRaw || '');
+  const right = String(rightRaw || '');
+  if (left === right) return 0;
+  try {
+    const leftId = BigInt(left);
+    const rightId = BigInt(right);
+    return leftId > rightId ? 1 : -1;
+  } catch {
+    return left.localeCompare(right);
+  }
+}
+
+function sourceAfterCursor(source = {}, cursor = null) {
+  if (!cursor?.lastMessageId) return true;
+  const timestamp = sourceMessageTimestamp(source);
+  const cursorTimestamp = Math.max(0, Math.floor(Number(cursor.lastMessageTimestamp) || 0));
+  if (timestamp !== cursorTimestamp) return timestamp > cursorTimestamp;
+  return compareMessageIds(source.messageId, cursor.lastMessageId) > 0;
+}
+
 function confidenceRank(value) {
   return ({ exact: 3, learned: 2, fuzzy: 1 })[value] || 0;
 }
@@ -516,10 +546,12 @@ function parsePayment(source, registerStore, context = {}) {
 function loadStore() {
   try {
     const data = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
-    return data && typeof data === 'object' ? data : { version: 1, records: {} };
+    return data && typeof data === 'object'
+      ? { ...data, records: data.records || {}, cursors: data.cursors || {} }
+      : { version: 2, records: {}, cursors: {} };
   } catch (err) {
     if (err?.code !== 'ENOENT') console.error('Failed to read SociaBuzz topup store:', err);
-    return { version: 1, records: {} };
+    return { version: 2, records: {}, cursors: {} };
   }
 }
 
@@ -528,8 +560,9 @@ function saveStore(store) {
     .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
     .slice(0, PAYMENT_STORE_LIMIT);
   const next = {
-    version: 1,
+    version: 2,
     updatedAt: new Date().toISOString(),
+    cursors: store.cursors || {},
     records: Object.fromEntries(records.map(record => [record.id, record])),
   };
 
@@ -573,10 +606,12 @@ function buildPaymentEmbed(record, statusOverride = '') {
     canceled: 'CANCELED',
     rejected: 'CANCELED',
     ignored: 'IGNORED',
+    quarantined: 'BLOCKED HISTORICAL REPLAY',
+    incident_review: 'HISTORICAL REPLAY - REVIEW REQUIRED',
   }[status] || status.toUpperCase();
   const color = status === 'queued' || status === 'delivered'
     ? 0x2ecc71
-    : (status === 'failed' || status === 'canceled' || status === 'rejected' ? 0xe74c3c : 0xf2c94c);
+    : (['failed', 'canceled', 'rejected', 'quarantined', 'incident_review'].includes(status) ? 0xe74c3c : 0xf2c94c);
   const source = record.source || {};
   const title = ['queued', 'delivered', 'pending_join'].includes(status)
     ? 'SociaBuzz Topup'
@@ -594,6 +629,7 @@ function buildPaymentEmbed(record, statusOverride = '') {
       record.jobId ? `Job: \`${record.jobId}\`` : '',
       record.reason ? `Reason: \`${record.reason}\`` : '',
       record.failureCode ? `Hasil Minecraft: \`${record.failureCode}\`` : '',
+      record.securityReason ? `Security: \`${record.securityReason}\`` : '',
     ].filter(Boolean).join('\n'))
     .addFields(
       { name: 'Data terbaca', value: fieldValue(identityText(record.identity)), inline: false },
@@ -679,10 +715,15 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
     const persisted = database.listSociabuzzPayments({ limit: PAYMENT_STORE_LIMIT });
     if (persisted.length) {
       store.records = Object.fromEntries(persisted.map(record => [record.id, record]));
-      return;
+    } else {
+      for (const record of Object.values(store.records || {})) {
+        if (record?.id && record?.sourceKey) database.saveSociabuzzPayment(record);
+      }
     }
-    for (const record of Object.values(store.records || {})) {
-      if (record?.id && record?.sourceKey) database.saveSociabuzzPayment(record);
+    for (const cursor of Object.values(store.cursors || {})) {
+      if (!cursor?.channelId || !cursor?.lastMessageId || !database.getSociabuzzIngestCursor ||
+          database.getSociabuzzIngestCursor(cursor.channelId)) continue;
+      database.saveSociabuzzIngestCursor?.(cursor);
     }
   }
 
@@ -722,6 +763,39 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
     ensureDatabaseHydrated();
     if (record?.id && record?.sourceKey) database?.saveSociabuzzPayment?.(record);
     store = saveStore(store);
+  }
+
+  function ingestCursor(channelIdRaw) {
+    ensureDatabaseHydrated();
+    const channelId = String(channelIdRaw || '').trim();
+    if (!channelId) return null;
+    const databaseCursor = database?.getSociabuzzIngestCursor?.(channelId) || null;
+    const fileCursor = store.cursors?.[channelId] || null;
+    if (!databaseCursor) return fileCursor;
+    if (!fileCursor) return databaseCursor;
+    const databaseSource = {
+      messageId: databaseCursor.lastMessageId,
+      createdAt: new Date(databaseCursor.lastMessageTimestamp || 0).toISOString(),
+    };
+    return sourceAfterCursor(databaseSource, fileCursor) ? databaseCursor : fileCursor;
+  }
+
+  function advanceIngestCursor(source = {}) {
+    const channelId = String(source.channelId || '').trim();
+    const messageId = String(source.messageId || '').trim();
+    if (!channelId || !messageId) return null;
+    const current = ingestCursor(channelId);
+    if (current && !sourceAfterCursor(source, current)) return current;
+    const cursor = {
+      channelId,
+      lastMessageId: messageId,
+      lastMessageTimestamp: sourceMessageTimestamp(source),
+      updatedAt: new Date().toISOString(),
+    };
+    const saved = database?.saveSociabuzzIngestCursor?.(cursor) || cursor;
+    store.cursors = { ...(store.cursors || {}), [channelId]: saved };
+    store = saveStore(store);
+    return saved;
   }
 
   async function resolveLogChannel() {
@@ -886,8 +960,10 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
     return { ok: true, code: 'queued', record, job };
   }
 
-  async function processPaymentUnlocked(payment, requestedBy = 'sociabuzz-auto') {
-    const existing = store.records[payment.id];
+  async function processPaymentUnlocked(payment, requestedBy = 'sociabuzz-auto', { ingestMode = '' } = {}) {
+    ensureDatabaseHydrated();
+    const existing = store.records[payment.id] || database?.getSociabuzzPayment?.(payment.id) || null;
+    if (existing && !store.records[payment.id]) store.records[payment.id] = existing;
     if (existing && !['ignored'].includes(existing.status)) {
       if (existing.status === 'preparing' && !existing.jobId) {
         // Recover a process that stopped between persisting the receipt and enqueueing the bridge job.
@@ -910,6 +986,7 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
       let record = upsertRecord(payment, {
         status: 'preparing',
         target: targetFromCandidate(payment.autoCandidate),
+        ingestMode: ingestMode || 'realtime',
       });
       const job = await queueTopup(record, payment.autoCandidate, requestedBy, null);
       const logMessage = await sendLog(record, []);
@@ -922,7 +999,10 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
       return { ok: true, code: 'queued', record, job };
     }
 
-    let record = upsertRecord(payment, { status: 'needs_target' });
+    let record = upsertRecord(payment, {
+      status: 'needs_target',
+      ingestMode: ingestMode || 'realtime',
+    });
     const logMessage = await sendLog(record, buildReviewComponents(record));
     if (logMessage?.id) {
       record.logMessageId = logMessage.id;
@@ -932,23 +1012,104 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
     return { ok: true, code: 'needs-target', record };
   }
 
-  function processPayment(payment, requestedBy = 'sociabuzz-auto') {
+  function processPayment(payment, requestedBy = 'sociabuzz-auto', options = {}) {
     const active = processingPayments.get(payment.id);
     if (active) return active;
-    const task = processPaymentUnlocked(payment, requestedBy).finally(() => {
+    const task = processPaymentUnlocked(payment, requestedBy, options).finally(() => {
       if (processingPayments.get(payment.id) === task) processingPayments.delete(payment.id);
     });
     processingPayments.set(payment.id, task);
     return task;
   }
 
+  function isLegacyHistoricalReplay(record = {}) {
+    if (record.ingestMode || record.source?.kind !== 'discord') return false;
+    if (['preparing', 'queued', 'needs_target', 'pending', 'resolving', 'failed'].includes(record.status)) {
+      // Old records have no trustworthy provenance marker. Fail closed before they can affect a balance.
+      return true;
+    }
+    const sourceAt = sourceMessageTimestamp(record.source);
+    const recordedAt = new Date(record.createdAt || '').getTime();
+    if (!sourceAt || !Number.isFinite(recordedAt)) return false;
+    return recordedAt - sourceAt > LEGACY_HISTORY_REPLAY_THRESHOLD_MS;
+  }
+
+  async function quarantineLegacyHistoricalReplays() {
+    ensureDatabaseHydrated();
+    const records = Object.values(store.records || {}).filter(isLegacyHistoricalReplay);
+    const summary = {
+      checked: records.length,
+      quarantined: 0,
+      reviewRequired: 0,
+      reviewGeon: 0,
+      reviewRupiah: 0,
+      canceledJobs: 0,
+      leasedJobs: 0,
+    };
+    for (const record of records) {
+      if (['quarantined', 'incident_review'].includes(record.status)) continue;
+      const cancellation = bridge.cancelTopupPayment?.(record.id, 'historical-replay-blocked') || {
+        canceled: 0,
+        leased: 0,
+        doneSucceeded: 0,
+      };
+      const mayAlreadyBeApplied = ['delivered', 'pending_join'].includes(record.status) ||
+        cancellation.doneSucceeded > 0 || cancellation.leased > 0 ||
+        (Boolean(record.jobId) && cancellation.matched === 0);
+      record.status = mayAlreadyBeApplied ? 'incident_review' : 'quarantined';
+      record.securityReason = mayAlreadyBeApplied
+        ? 'historical-replay-may-have-reached-minecraft'
+        : 'historical-replay-blocked-before-delivery';
+      record.failureCode = 'historical-replay-blocked';
+      record.quarantinedAt = new Date().toISOString();
+      record.updatedAt = record.quarantinedAt;
+      store.records[record.id] = record;
+      persist(record);
+      await updateLogMessage(record, []);
+      summary.canceledJobs += cancellation.canceled || 0;
+      summary.leasedJobs += cancellation.leased || 0;
+      if (mayAlreadyBeApplied) {
+        summary.reviewRequired += 1;
+        summary.reviewGeon += Math.max(0, Math.floor(Number(record.geon) || 0));
+        summary.reviewRupiah += Math.max(0, Math.floor(Number(record.rupiah) || 0));
+      } else summary.quarantined += 1;
+    }
+    if (summary.quarantined || summary.reviewRequired || summary.canceledJobs) {
+      const channel = await resolveLogChannel();
+      await channel?.send?.({
+        embeds: [new EmbedBuilder()
+          .setColor(0xe74c3c)
+          .setTitle('SECURITY: Historical Topup Replay Diblokir')
+          .setDescription([
+            'Bot menemukan payment histori yang sebelumnya masuk melalui scan lama.',
+            'Job yang masih berada di antrean Discord bridge sudah dibatalkan sebelum bridge Minecraft dibuka.',
+            summary.reviewRequired
+              ? '**Ada transaksi yang mungkin sudah mencapai Minecraft dan wajib direkonsiliasi manual.**'
+              : 'Tidak ada transaksi terdeteksi sudah mencapai Minecraft dari kelompok yang diblokir ini.',
+          ].join('\n'))
+          .addFields(
+            { name: 'Diblokir Aman', value: formatNumber(summary.quarantined), inline: true },
+            { name: 'Perlu Review Saldo', value: formatNumber(summary.reviewRequired), inline: true },
+            { name: 'Job Dibatalkan', value: formatNumber(summary.canceledJobs), inline: true },
+            { name: 'Total Geon Berisiko', value: formatNumber(summary.reviewGeon), inline: true },
+            { name: 'Nominal Berisiko', value: rupiahText(summary.reviewRupiah), inline: true },
+          )
+          .setFooter({ text: 'Jangan approve ulang record berstatus historical replay.' })
+          .setTimestamp()],
+        allowedMentions: { parse: [] },
+      }).catch(error => console.error('Failed to send historical replay security summary:', error));
+    }
+    return summary;
+  }
+
   async function recoverPendingPayments() {
     ensureDatabaseHydrated();
+    const quarantine = await quarantineLegacyHistoricalReplays();
     const candidates = Object.values(store.records || {}).filter(record => (
       (record.status === 'preparing' && !record.jobId) ||
       (!record.logMessageId && ['queued', 'needs_target', 'pending', 'resolving', 'failed'].includes(record.status))
     ));
-    const summary = { checked: candidates.length, recovered: 0, refreshed: 0, failed: 0 };
+    const summary = { checked: candidates.length, recovered: 0, refreshed: 0, failed: 0, quarantine };
     for (const record of candidates) {
       try {
         const context = paymentContext();
@@ -979,7 +1140,7 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
 
   async function backfillRecentDiscordPayments({ limit = SOCIABUZZ_BACKFILL_LIMIT } = {}) {
     const safeLimit = Math.max(1, Math.min(1000, Math.floor(Number(limit) || SOCIABUZZ_BACKFILL_LIMIT)));
-    const summary = { channels: 0, scanned: 0, matched: 0, failed: 0 };
+    const summary = { channels: 0, scanned: 0, matched: 0, failed: 0, initialized: 0, skippedHistorical: 0 };
     if (!client?.channels?.fetch) return summary;
 
     for (const channelId of SOCIABUZZ_SOURCE_CHANNEL_IDS) {
@@ -1011,29 +1172,46 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
         Number(left.createdTimestamp || 0) - Number(right.createdTimestamp || 0) ||
         String(left.id || '').localeCompare(String(right.id || ''))
       ));
-      for (const message of messages) {
+      const cursor = ingestCursor(channelId);
+      if (!cursor) {
+        const newest = messages[messages.length - 1];
+        if (newest) advanceIngestCursor(sourceFromDiscordMessage(newest));
+        summary.initialized += 1;
+        summary.skippedHistorical += messages.length;
+        continue;
+      }
+
+      const newMessages = messages.filter(message => sourceAfterCursor(sourceFromDiscordMessage(message), cursor));
+      summary.skippedHistorical += messages.length - newMessages.length;
+      for (const message of newMessages) {
         summary.scanned += 1;
         try {
-          if (await handleDiscordMessage(message)) summary.matched += 1;
+          if (await handleDiscordMessage(message, { ingestMode: 'cursor-backfill' })) summary.matched += 1;
+          advanceIngestCursor(sourceFromDiscordMessage(message));
         } catch (error) {
           summary.failed += 1;
           console.error(`Failed to backfill SociaBuzz message ${message?.id || '-'}:`, error);
+          break;
         }
       }
     }
     return summary;
   }
 
-  async function handleDiscordMessage(msg) {
+  async function handleDiscordMessage(msg, { ingestMode = 'discord-realtime' } = {}) {
     if (!msg || !msg.author?.bot) return false;
     if (client?.user?.id && msg.author.id === client.user.id) return false;
     const source = sourceFromDiscordMessage(msg);
     if (source.channelId === SOCIABUZZ_TOPUP_LOG_CHANNEL_ID) return false;
     if (!sourceChannelAllowed(source)) return false;
     const payment = parsePayment(source, registerStore, paymentContext());
-    if (!payment) return false;
+    if (!payment) {
+      advanceIngestCursor(source);
+      return false;
+    }
 
-    await processPayment(payment, `discord:${msg.author.id}`);
+    await processPayment(payment, `discord:${msg.author.id}`, { ingestMode });
+    advanceIngestCursor(source);
     return true;
   }
 
@@ -1041,7 +1219,7 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
     const source = sourceFromWebhookPayload(payload);
     const payment = parsePayment(source, registerStore, paymentContext());
     if (!payment) return { ok: false, code: 'not-payment' };
-    return processPayment(payment, 'sociabuzz-webhook');
+    return processPayment(payment, 'sociabuzz-webhook', { ingestMode: 'webhook-realtime' });
   }
 
   async function stageResolution(interaction, record, candidateRaw, manualQuery = '') {
@@ -1091,7 +1269,14 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
     ensureDatabaseHydrated();
     const record = store.records[job.paymentId];
     if (!record || (record.jobId && record.jobId !== job.id)) return;
-    if (result?.ok) {
+    if (record.securityReason?.startsWith('historical-replay') && result?.ok) {
+      record.status = 'incident_review';
+      record.securityReason = 'historical-replay-reached-minecraft';
+      record.failureCode = 'manual-balance-reconciliation-required';
+    } else if (record.securityReason?.startsWith('historical-replay')) {
+      record.status = 'quarantined';
+      record.failureCode = compact(result?.code || 'historical-replay-blocked', 100);
+    } else if (result?.ok) {
       record.status = result.status === 'pending' ? 'pending_join' : 'delivered';
       record.failureCode = '';
     } else {

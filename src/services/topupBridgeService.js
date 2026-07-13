@@ -1591,14 +1591,14 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const type = cleanText(job?.type, 80);
     if (!id || !job?.id || !type) return null;
 
-    const safeStatus = ['queued', 'leased', 'done'].includes(record.status)
+    const safeStatus = ['queued', 'leased', 'done', 'canceled'].includes(record.status)
       ? record.status
       : 'queued';
     const updatedAt = Math.floor(Number(record.updatedAt) || now);
     const result = record.result && typeof record.result === 'object' ? record.result : null;
     const notificationDeliveredAt = Math.floor(Number(record.notificationDeliveredAt) || 0);
     const awaitingTopupNotification = safeStatus === 'done' && type === 'topup' && result?.ok && !notificationDeliveredAt;
-    if (safeStatus === 'done' && now - updatedAt > JOB_TTL_MS && !awaitingTopupNotification) return null;
+    if (['done', 'canceled'].includes(safeStatus) && now - updatedAt > JOB_TTL_MS && !awaitingTopupNotification) return null;
 
     const leaseUntil = Math.floor(Number(record.leaseUntil) || 0);
     return {
@@ -1697,7 +1697,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     for (const [jobId, record] of jobs.entries()) {
       const awaitingTopupNotification = record.status === 'done' && record.job?.type === 'topup' &&
         record.result?.ok && !record.notificationDeliveredAt;
-      if (record.status === 'done' && now - record.updatedAt > JOB_TTL_MS && !awaitingTopupNotification) {
+      if (['done', 'canceled'].includes(record.status) && now - record.updatedAt > JOB_TTL_MS && !awaitingTopupNotification) {
         jobs.delete(jobId);
         changed = true;
       }
@@ -1705,7 +1705,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
     while (jobs.size > JOB_LIMIT) {
       const completed = [...jobs.entries()].find(([, record]) => (
-        record.status === 'done' &&
+        ['done', 'canceled'].includes(record.status) &&
         !(record.job?.type === 'topup' && record.result?.ok && !record.notificationDeliveredAt)
       ));
       if (!completed) break;
@@ -2065,6 +2065,56 @@ function createTopupBridgeService({ registerStore, client = null }) {
       source,
       paymentId,
     }, { message, target, loadingMessage });
+  }
+
+  function cancelTopupPayment(paymentIdRaw, reason = 'canceled-by-system') {
+    pruneJobs();
+    const paymentId = cleanText(paymentIdRaw, 120);
+    const summary = {
+      matched: 0,
+      canceled: 0,
+      leased: 0,
+      done: 0,
+      doneSucceeded: 0,
+      notificationsSuppressed: 0,
+    };
+    if (!paymentId) return summary;
+    const now = Date.now();
+    let changed = false;
+    for (const record of jobs.values()) {
+      if (record.job?.type !== 'topup' || record.job?.paymentId !== paymentId) continue;
+      summary.matched += 1;
+      if (record.status === 'done') {
+        summary.done += 1;
+        if (record.result?.ok) summary.doneSucceeded += 1;
+        if (!record.notificationDeliveredAt) {
+          record.notificationDeliveredAt = now;
+          record.updatedAt = now;
+          summary.notificationsSuppressed += 1;
+          changed = true;
+        }
+        continue;
+      }
+      if (record.status === 'canceled') continue;
+      if (record.status === 'leased') summary.leased += 1;
+      if (record.status !== 'queued' && record.status !== 'leased') continue;
+      record.status = 'canceled';
+      record.leaseUntil = 0;
+      record.updatedAt = now;
+      record.notificationDeliveredAt = now;
+      record.result = {
+        ok: false,
+        status: 'canceled',
+        code: cleanText(reason, 100) || 'canceled-by-system',
+        canceledAt: new Date(now).toISOString(),
+      };
+      summary.canceled += 1;
+      changed = true;
+    }
+    if (changed && !saveJobsToDisk(now)) {
+      throw new Error('bridge-job-cancel-persist-failed');
+    }
+    return summary;
   }
 
   function enqueueCoupon({ geon, rupiah, count, days, requestedBy, message, loadingMessage = null }) {
@@ -3558,6 +3608,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     getPlayerStatusByGamertag,
     createVerification,
     enqueueTopup,
+    cancelTopupPayment,
     enqueueCoupon,
     enqueueBridgeQuery,
     enqueueBridgeQueryWithResult,
