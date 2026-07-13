@@ -823,10 +823,18 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
   async function reloadFromMessage(message) {
     if (!saveChannelStore.isDataMessage(message)) return false;
     await ensureReady();
+
+    // SQLite is authoritative once the database-backed store is running.
+    // Every normal persist also edits the Discord JSON mirror, which emits a
+    // messageUpdate event. Re-importing that event can replay an older queued
+    // snapshot, roll back a newer decision, and trigger another mirror edit.
+    // Consume storage-message updates without importing them; Discord JSON is
+    // only used by init() to bootstrap a database that has never been set up.
+    if (database) return true;
+
     const loaded = await saveChannelStore.loadFromMessage(message);
     const applied = applyLoadedData(loaded);
-    if (applied && database) await persist('restore-from-discord-json');
-    else if (applied && lastLoadRemovedDuplicateCount > 0) await persist('deduplicate-json-edit');
+    if (applied && lastLoadRemovedDuplicateCount > 0) await persist('deduplicate-json-edit');
     return applied;
   }
 

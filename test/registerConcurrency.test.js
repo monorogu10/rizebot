@@ -43,6 +43,53 @@ test('fallback interview allocator returns its captured number during concurrent
   ]);
 });
 
+test('SQLite registry ignores stale Discord mirror update after approval', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rizebot-mirror-replay-test-'));
+  const database = createRizebotDatabase({ dataDir: directory });
+  const userId = '880001';
+  let mirrorLoads = 0;
+  let mirrorSaves = 0;
+  const pendingEntry = {
+    gamertag: 'ReplaySafe',
+    username: 'replay-safe',
+    registeredAt: new Date(1_000).toISOString(),
+    updatedAt: new Date(1_000).toISOString(),
+    status: 'pending',
+    legal: false,
+  };
+  const saveChannelStore = {
+    async load() {
+      return { users: { [userId]: pendingEntry }, order: [userId], interviewSequence: 1 };
+    },
+    async loadFromMessage() {
+      mirrorLoads += 1;
+      return { users: { [userId]: pendingEntry }, order: [userId], interviewSequence: 1 };
+    },
+    async save() {
+      mirrorSaves += 1;
+    },
+    isDataMessage() {
+      return true;
+    },
+  };
+  const registerStore = createRegisterStore({ database, saveChannelStore });
+
+  try {
+    await registerStore.init({});
+    await registerStore.approveUser(userId, { id: '880002', name: 'reviewer' });
+    const savesAfterApproval = mirrorSaves;
+
+    assert.equal(await registerStore.reloadFromMessage({ id: 'stale-mirror-edit' }), true);
+    assert.equal(mirrorLoads, 0);
+    assert.equal(mirrorSaves, savesAfterApproval);
+    assert.equal(registerStore.getUser(userId).status, 'approved');
+    assert.equal(database.loadRegistrationSnapshot().data.users[userId].status, 'approved');
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('SQLite interview reservation is unique and blocks a second active user session', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rizebot-interview-test-'));
   const database = createRizebotDatabase({ dataDir: directory });
