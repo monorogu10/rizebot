@@ -6,7 +6,7 @@ const DEFAULT_BACKUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_BACKUP_RETENTION = 14;
 
 function normalizeGamertagKey(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return String(value || '').replace(/\s+/g, '').trim().toLowerCase();
 }
 
 function timestampForFile(date = new Date()) {

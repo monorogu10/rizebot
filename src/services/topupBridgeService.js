@@ -26,6 +26,7 @@ const JOB_TTL_MS = 10 * 60 * 1000;
 const JOB_LIMIT = 100;
 const VERIFY_CODE_TTL_MS = 10 * 60 * 1000;
 const ONLINE_TTL_MS = 90 * 1000;
+const LEGAL_ACCESS_JOIN_SYNC_TTL_MS = 5 * 60 * 1000;
 const RUNTIME_DIR = process.env.RIZEBOT_RUNTIME_DIR ||
   path.join(__dirname, '..', '..', '.runtime');
 const VERIFY_STORE_FILE = process.env.RIZEBOT_VERIFY_STORE_FILE ||
@@ -51,6 +52,10 @@ const VERIFY_BYPASS_GAMERTAGS = new Set(['xylofly', 'monoguraa']);
 
 function n(value) {
   return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function gamertagIdentityKey(value) {
+  return n(value).replace(/\s+/g, '');
 }
 
 function normalizePositiveInt(rawValue, maxValue) {
@@ -191,13 +196,17 @@ function isVerifiedMinecraftLink(linked, player = {}) {
   const playerPersistentId = String(player.persistentId || '').trim();
   const entry = linked.entry;
   if (playerPersistentId && entry.persistentId === playerPersistentId) return true;
-  return Boolean(playerName && n(entry.gamertag) === playerName);
+  return Boolean(playerName && gamertagIdentityKey(entry.gamertag) === gamertagIdentityKey(playerName));
 }
 
 function isRegisteredMinecraftLink(linked, player = {}) {
   if (!isApprovedRegistrationEntry(linked?.entry)) return false;
   const playerName = n(player.name || player.gamertag || player.key);
-  return Boolean(linked?.entry?.gamertag && playerName && n(linked.entry.gamertag) === playerName);
+  return Boolean(
+    linked?.entry?.gamertag &&
+    playerName &&
+    gamertagIdentityKey(linked.entry.gamertag) === gamertagIdentityKey(playerName)
+  );
 }
 
 function isVerifyBypassGamertag(gamertag) {
@@ -231,12 +240,14 @@ async function removeRoleIfPresent(member, roleId) {
 
 function targetScore(entry, query) {
   const gamertag = n(entry.gamertag);
+  const gamertagIdentity = gamertagIdentityKey(entry.gamertag);
+  const queryIdentity = gamertagIdentityKey(query);
   const username = n(entry.username);
   const userId = String(entry.userId || '');
   if (!query) return 50;
-  if (gamertag === query || username === query || userId === query) return 0;
-  if (gamertag.startsWith(query) || username.startsWith(query)) return 1;
-  if (gamertag.includes(query) || username.includes(query) || userId.includes(query)) return 2;
+  if (gamertag === query || gamertagIdentity === queryIdentity || username === query || userId === query) return 0;
+  if (gamertag.startsWith(query) || gamertagIdentity.startsWith(queryIdentity) || username.startsWith(query)) return 1;
+  if (gamertag.includes(query) || gamertagIdentity.includes(queryIdentity) || username.includes(query) || userId.includes(query)) return 2;
   return 99;
 }
 
@@ -1180,6 +1191,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
   const pendingVerifications = new Map();
   const onlinePlayers = new Map();
   const discordUserCache = new Map();
+  const legalAccessJoinSyncs = new Map();
   let jobsLoaded = false;
   let chatChannelPromise = null;
   let privateChatChannelPromise = null;
@@ -1479,13 +1491,18 @@ function createTopupBridgeService({ registerStore, client = null }) {
     }
   }
 
-  async function syncOfficialMinecraftRole(userIdRaw) {
+  async function syncOfficialMinecraftRole(userIdRaw, gamertagRaw = '') {
     const userId = String(userIdRaw || '').trim();
+    const gamertag = cleanText(gamertagRaw, 32);
     if (!userId || !client?.guilds?.cache) return false;
 
     for (const guild of client.guilds.cache.values()) {
       const member = await guild.members.fetch(userId).catch(() => null);
       if (!member) continue;
+
+      if (gamertag && member.manageable !== false && member.nickname !== gamertag && member.setNickname) {
+        await member.setNickname(gamertag, 'Canonical Minecraft gamertag sync').catch(() => null);
+      }
 
       const added = await addRoleIfMissing(member, MINECRAFT_REGISTER_ROLE_ID);
       const removedPending = MINECRAFT_REGISTER_PENDING_ROLE_ID === MINECRAFT_REGISTER_ROLE_ID
@@ -1614,14 +1631,14 @@ function createTopupBridgeService({ registerStore, client = null }) {
   }
 
   function getPlayerStatusByGamertag(rawGamertag) {
-    const query = n(rawGamertag);
+    const query = gamertagIdentityKey(rawGamertag);
     if (!query) return null;
 
     const now = Date.now();
     const candidates = [...onlinePlayers.values()]
       .filter(player => {
         const names = [player.name, player.key, player.registeredGamertag]
-          .map(value => n(value))
+          .map(value => gamertagIdentityKey(value))
           .filter(Boolean);
         return names.includes(query);
       })
@@ -1658,7 +1675,9 @@ function createTopupBridgeService({ registerStore, client = null }) {
     }
 
     const candidates = searchTargets(rawQuery, 15);
-    const exact = candidates.filter(entry => n(entry.gamertag) === query || String(entry.userId) === query);
+    const exact = candidates.filter(entry => (
+      gamertagIdentityKey(entry.gamertag) === gamertagIdentityKey(query) || String(entry.userId) === query
+    ));
     if (exact.length === 1) return { ok: true, target: exact[0], candidates };
     if (exact.length > 1) return { ok: false, code: 'target-ambiguous', candidates: exact };
     if (candidates.length === 1) return { ok: true, target: candidates[0], candidates };
@@ -1718,6 +1737,33 @@ function createTopupBridgeService({ registerStore, client = null }) {
     return enqueueJob(type, payload, context);
   }
 
+  function enqueueApprovedJoinAccessSync(linked, player = {}) {
+    if (!client || !isApprovedRegistrationEntry(linked?.entry)) return false;
+    const targetName = cleanText(player.name || player.gamertag || player.key, 80);
+    const identity = gamertagIdentityKey(targetName);
+    const userId = String(linked.userId || '').trim();
+    if (!targetName || !identity || !userId) return false;
+
+    const now = Date.now();
+    const syncKey = `${userId}:${identity}`;
+    if (now - Number(legalAccessJoinSyncs.get(syncKey) || 0) < LEGAL_ACCESS_JOIN_SYNC_TTL_MS) return false;
+    legalAccessJoinSyncs.set(syncKey, now);
+    for (const [key, syncedAt] of legalAccessJoinSyncs) {
+      if (now - syncedAt > LEGAL_ACCESS_JOIN_SYNC_TTL_MS * 2) legalAccessJoinSyncs.delete(key);
+    }
+
+    enqueueBridgeQuery('legal_access', {
+      action: 'approve',
+      targetName,
+      targetKey: identity,
+      discordUserId: userId,
+      approvedAt: linked.entry.approvedAt || '',
+      requestedBy: 'system-player-join-sync',
+      requestedByTag: 'Minecraft join self-healing',
+    });
+    return true;
+  }
+
   function enqueueBridgeQueryWithResult(type, payload, { timeoutMs = 45_000 } = {}) {
     const job = enqueueJob(type, payload, null);
     const safeTimeoutMs = Math.max(5_000, Math.min(120_000, Math.floor(Number(timeoutMs) || 45_000)));
@@ -1742,7 +1788,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     let existingActive = null;
     for (const [code, record] of pendingVerifications.entries()) {
       if (record.userId !== safeUserId) continue;
-      if (n(record.gamertag) === n(safeGamertag) && record.expiresAt > now) {
+      if (gamertagIdentityKey(record.gamertag) === gamertagIdentityKey(safeGamertag) && record.expiresAt > now) {
         existingActive = { ...record, code };
         pendingVerifications.set(code, {
           ...record,
@@ -2858,7 +2904,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
         hasIdentity: Boolean(persistentId),
       };
     }
-    if (n(name) !== n(record.gamertag)) {
+    if (gamertagIdentityKey(name) !== gamertagIdentityKey(record.gamertag)) {
       return {
         ok: false,
         code: 'gamertag-mismatch',
@@ -2886,7 +2932,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
     pendingVerifications.delete(code);
     saveVerificationsToDisk();
-    const roleSynced = await syncOfficialMinecraftRole(record.userId).catch(err => {
+    const roleSynced = await syncOfficialMinecraftRole(record.userId, name).catch(err => {
       console.error('Failed to sync verified Minecraft role:', err);
       return false;
     });
@@ -2929,16 +2975,18 @@ function createTopupBridgeService({ registerStore, client = null }) {
       const registeredMatch = isRegisteredMinecraftLink(linkedByGamertag, player);
       const accessAllowed = bypass || verified || registeredMatch;
       let roleSynced = false;
+      let accessSyncQueued = false;
       if (!bypass && accessAllowed && linked?.userId) {
         if (registeredMatch) {
           await registerStore.markSeenByGamertag?.(player?.name).catch(err => {
             console.error('Failed to mark Minecraft gamertag seen:', err);
           });
         }
-        roleSynced = await syncOfficialMinecraftRole(linked.userId).catch(err => {
+        roleSynced = await syncOfficialMinecraftRole(linked.userId, player?.name).catch(err => {
           console.error('Failed to sync official Minecraft role:', err);
           return false;
         });
+        accessSyncQueued = enqueueApprovedJoinAccessSync(linked, player);
       }
       bridgeStats.lastPresenceAt = bridgeStats.lastEventAt;
       await sendPresenceLog(
@@ -2955,6 +3003,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
         registered: Boolean(linked),
         registeredMatch,
         accessAllowed,
+        accessSyncQueued,
         roleSynced,
         discordUserId: linked?.userId || '',
       };

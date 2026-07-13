@@ -1,5 +1,17 @@
 # Rizebot Ethergeon
 
+## Discord slash commands
+
+Slash command didaftarkan otomatis saat bot ready. Command prefix `!` tetap aktif sebagai fallback dan memakai handler yang sama.
+
+- `/register gamertag:<nama>` membuat atau melanjutkan registrasi.
+- `/status [user]` menampilkan Ethergeon ID Card; target user lain khusus admin/interviewer.
+- `/player nama:<gamertag>` mencari data player dengan autocomplete player online/registry.
+- `/interview accept|reject|close|status|doctor|repair|relink` mengelola interview dan recovery.
+- `/registry list|sync` menampilkan atau menyinkronkan registry.
+
+Secara default command didaftarkan global. Untuk update instan selama development, isi `DISCORD_COMMAND_GUILD_IDS` dengan satu atau beberapa guild ID yang dipisahkan koma. Bot perlu diundang dengan scope `bot`/`applications.commands`.
+
 ## Rules dan Undang-Undang
 
 Command publik:

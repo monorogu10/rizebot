@@ -82,7 +82,18 @@ function normalizeGamertag(value) {
 }
 
 function gamertagKey(value) {
+  return normalizeGamertag(value).replace(/\s+/g, '').toLowerCase();
+}
+
+function gamertagDisplayKey(value) {
   return normalizeGamertag(value).toLowerCase();
+}
+
+function canonicalGamertagFromBridge(bridge, value) {
+  const requested = normalizeGamertag(value);
+  const online = requested ? bridge?.getPlayerStatusByGamertag?.(requested) : null;
+  const canonical = normalizeGamertag(online?.name || '');
+  return isValidGamertag(canonical) ? canonical : requested;
 }
 
 function isValidGamertag(value) {
@@ -1073,12 +1084,13 @@ function maxInterviewNumberFromGuild(guild) {
 }
 
 async function handleRegisterCommandUnlocked(msg, options) {
-  const gamertag = parseRegisterCommand(msg.content);
-  if (gamertag === null) return false;
-  if (!gamertag || !isValidGamertag(gamertag)) {
+  const requestedGamertag = parseRegisterCommand(msg.content);
+  if (requestedGamertag === null) return false;
+  if (!requestedGamertag || !isValidGamertag(requestedGamertag)) {
     await replyNoPing(msg, 'Format: `!register <gamertag_minecraft>` (3-32 huruf/angka/underscore/spasi).');
     return true;
   }
+  const gamertag = canonicalGamertagFromBridge(options.bridge, requestedGamertag);
 
   const { registerStore, pendingRoleId, verifiedRoleId, rejectedRoleId } = options;
   if (!await ensureRegisterStore(registerStore, msg.client)) {
@@ -1092,9 +1104,9 @@ async function handleRegisterCommandUnlocked(msg, options) {
     return true;
   }
 
-  const existing = registerStore.getUser(msg.author.id);
+  let existing = registerStore.getUser(msg.author.id);
   if (existing?.status === 'approved') {
-    const currentGamertag = normalizeGamertag(existing.gamertag);
+    let currentGamertag = normalizeGamertag(existing.gamertag);
     if (gamertagKey(currentGamertag) !== gamertagKey(gamertag)) {
       await replyNoPing(
         msg,
@@ -1105,6 +1117,18 @@ async function handleRegisterCommandUnlocked(msg, options) {
         ].join('\n')
       );
       return true;
+    }
+
+    if (gamertagDisplayKey(currentGamertag) !== gamertagDisplayKey(gamertag)) {
+      const canonicalized = await registerStore.updateApprovedGamertag(
+        msg.author.id,
+        gamertag,
+        msg.author?.tag || msg.author?.username || existing.username || ''
+      );
+      if (canonicalized?.entry) {
+        existing = canonicalized.entry;
+        currentGamertag = normalizeGamertag(existing.gamertag);
+      }
     }
 
     const nicknameNote = await syncGamertagNickname(member, currentGamertag || gamertag, 'approved gamertag refresh');
@@ -1294,6 +1318,7 @@ async function handleSetRegisterGamertagCommand(msg, options) {
     await replyNoPing(msg, 'Format gamertag invalid. Gunakan 3-32 huruf/angka/underscore/spasi.');
     return true;
   }
+  const gamertag = canonicalGamertagFromBridge(options.bridge, parsed.gamertag);
   if (!await ensureRegisterStore(options.registerStore, msg.client)) {
     await replyNoPing(msg, 'Sistem register belum aktif. Hubungi admin.');
     return true;
@@ -1309,7 +1334,7 @@ async function handleSetRegisterGamertagCommand(msg, options) {
     return true;
   }
 
-  const duplicate = options.registerStore.findUserByGamertag?.(parsed.gamertag, parsed.userId);
+  const duplicate = options.registerStore.findUserByGamertag?.(gamertag, parsed.userId);
   if (duplicate) {
     await replyNoPing(msg, `Gamertag \`${parsed.gamertag}\` sudah dipakai oleh <@${duplicate.userId}>.`);
     return true;
@@ -1319,7 +1344,7 @@ async function handleSetRegisterGamertagCommand(msg, options) {
   const user = member?.user || await msg.client.users.fetch(parsed.userId).catch(() => null);
   const updated = await options.registerStore.updateApprovedGamertag?.(
     parsed.userId,
-    parsed.gamertag,
+    gamertag,
     user?.tag || user?.username || entry.username || ''
   );
   if (!updated || updated.duplicate || updated.notApproved) {
@@ -1328,7 +1353,7 @@ async function handleSetRegisterGamertagCommand(msg, options) {
   }
 
   if (member) {
-    await syncGamertagNickname(member, parsed.gamertag, 'admin gamertag update');
+    await syncGamertagNickname(member, gamertag, 'admin gamertag update');
     await moveMemberToCitizenRole(member, {
       citizenRoleId: options.verifiedRoleId,
       legacyRoleId: options.pendingRoleId,
@@ -1339,12 +1364,12 @@ async function handleSetRegisterGamertagCommand(msg, options) {
     });
   }
 
-  if (updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(parsed.gamertag)) {
+  if (updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(gamertag)) {
     queueLegalAccessJob(options.bridge, 'revoke', { gamertag: updated.oldGamertag }, parsed.userId, msg.author);
   }
   queueLegalAccessJob(options.bridge, 'approve', updated.entry, parsed.userId, msg.author);
 
-  const oldText = updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(parsed.gamertag)
+  const oldText = updated.oldGamertag && gamertagDisplayKey(updated.oldGamertag) !== gamertagDisplayKey(gamertag)
     ? ` dari \`${updated.oldGamertag}\``
     : '';
   await replyNoPing(
@@ -1407,7 +1432,10 @@ async function resolveInterviewCommandTarget(msg, parsed, options) {
 async function ensureForceRegistryEntry(msg, parsed, target, options) {
   if (target.entry) return target.entry;
   if (!parsed.force || !target.userId) return null;
-  const gamertag = normalizeGamertag(parsed.action === 'accept' ? parsed.detail : target.session?.gamertag || '');
+  const gamertag = canonicalGamertagFromBridge(
+    options.bridge,
+    parsed.action === 'accept' ? parsed.detail : target.session?.gamertag || ''
+  );
   if (!isValidGamertag(gamertag)) return null;
   const duplicate = options.registerStore.findUserByGamertag?.(gamertag, target.userId);
   if (duplicate) {
@@ -1568,7 +1596,7 @@ async function handleInterviewAdminCommand(msg, options) {
     return true;
   }
   if (parsed.action === 'accept' && parsed.force) {
-    const forcedGamertag = normalizeGamertag(parsed.detail || entry?.gamertag || '');
+    const forcedGamertag = canonicalGamertagFromBridge(options.bridge, parsed.detail || entry?.gamertag || '');
     if (!isValidGamertag(forcedGamertag)) {
       await replyNoPing(msg, 'Data gamertag belum ada. Gunakan `!accept --force @user gamertag`; gamertag harus 3-32 huruf/angka/underscore/spasi.');
       return true;
@@ -1610,8 +1638,8 @@ async function handleInterviewAdminCommand(msg, options) {
       }
     }
     if (parsed.action === 'accept' && parsed.force) {
-      const forcedGamertag = normalizeGamertag(parsed.detail || entry.gamertag);
-      if (gamertagKey(entry.gamertag) !== gamertagKey(forcedGamertag)) {
+      const forcedGamertag = canonicalGamertagFromBridge(options.bridge, parsed.detail || entry.gamertag);
+      if (gamertagDisplayKey(entry.gamertag) !== gamertagDisplayKey(forcedGamertag)) {
         entry = await options.registerStore.updateUser(target.userId, forcedGamertag, entry.username || '');
         if (!entry || entry.duplicate) {
           await replyNoPing(msg, 'Gagal memperbarui gamertag untuk force accept.');
@@ -2189,18 +2217,27 @@ async function handleRelinkInterviewCommand(msg, options) {
 }
 
 async function handleStatusCommand(msg, options) {
-  if (!/^!status\b/i.test(String(msg.content || '').trim())) return false;
+  const match = String(msg.content || '').trim().match(/^!status(?:\s+<@!?(\d{5,32})>)?$/i);
+  if (!match) return false;
   if (!await ensureRegisterStore(options.registerStore, msg.client)) {
     await replyNoPing(msg, 'Sistem register belum aktif. Hubungi admin.');
     return true;
   }
-  const entry = options.registerStore.getUser(msg.author.id);
+  const userId = match[1] || msg.author.id;
+  if (userId !== msg.author.id && !await isInterviewAdmin(msg)) {
+    await replyNoPing(msg, 'Status user lain hanya dapat dilihat admin/interviewer.');
+    return true;
+  }
+  const user = userId === msg.author.id
+    ? msg.author
+    : (msg.client.users.cache.get(userId) || await msg.client.users.fetch(userId).catch(() => null));
+  const entry = options.registerStore.getUser(userId);
   const minecraftProfile = entry?.gamertag
     ? options.bridge?.getPlayerStatusByGamertag?.(entry.gamertag) || null
     : null;
   await replyNoPing(
     msg,
-    buildStatusPayload(entry ? { ...entry, userId: msg.author.id } : null, msg.author, minecraftProfile)
+    buildStatusPayload(entry ? { ...entry, userId } : null, user || { id: userId }, minecraftProfile)
   );
   return true;
 }
@@ -2944,10 +2981,11 @@ async function handleSyncCitizenCommand(msg, options) {
 
 function queueLegalAccessJob(bridge, action, entry, userId, reviewer) {
   if (!bridge?.enqueueBridgeQuery || !entry?.gamertag) return null;
+  const targetName = canonicalGamertagFromBridge(bridge, entry.gamertag);
   return bridge.enqueueBridgeQuery('legal_access', {
     action,
-    targetName: entry.gamertag,
-    targetKey: gamertagKey(entry.gamertag),
+    targetName,
+    targetKey: gamertagKey(targetName),
     discordUserId: userId,
     approvedAt: entry.approvedAt || '',
     requestedBy: reviewer?.id || '',
@@ -2978,7 +3016,7 @@ function gamertagFromInterviewMessage(message) {
   return '';
 }
 
-async function resolveInterviewButtonContext(interaction, parsed, registerStore, database) {
+async function resolveInterviewButtonContext(interaction, parsed, registerStore, database, bridge = null) {
   const channelId = String(interaction.channelId || interaction.channel?.id || '').trim();
   const channelSession = channelId && database?.getInterviewSession
     ? database.getInterviewSession(channelId, { by: 'channel' })
@@ -2999,7 +3037,7 @@ async function resolveInterviewButtonContext(interaction, parsed, registerStore,
   }
 
   let entry = registerStore.getUser(userId) || null;
-  const gamertag = normalizeGamertag(
+  const gamertag = canonicalGamertagFromBridge(bridge,
     session?.gamertag || entry?.gamertag || linked?.entry?.gamertag || gamertagFromInterviewMessage(interaction.message)
   );
 
@@ -3248,7 +3286,7 @@ function createRegisterInteractionHandler({
       await interaction.deferUpdate().catch(() => null);
       await ensureRegisterStore(registerStore, interaction.client);
 
-      const context = await resolveInterviewButtonContext(interaction, interview, registerStore, database);
+      const context = await resolveInterviewButtonContext(interaction, interview, registerStore, database, bridge);
       if (context.error) {
         await replyInterviewInteraction(interaction, context.error);
         return true;

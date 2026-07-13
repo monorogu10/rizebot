@@ -7,6 +7,10 @@ const { Client, GatewayIntentBits: I, Partials: T } = require('discord.js');
 const { maybeBlockLink } = require('./src/features/linkBlocker');
 const { maybeReplyKeyword } = require('./src/features/keywordReply');
 const { createMessageHandler } = require('./src/handlers/messageHandler');
+const {
+  createApplicationCommandHandler,
+  registerApplicationCommands,
+} = require('./src/commands/applicationCommands');
 const { registerMemberEvents } = require('./src/handlers/memberEvents');
 const { registerPrivateRoleEvents } = require('./src/handlers/privateRoleHandler');
 const {
@@ -183,6 +187,12 @@ const registerInteractionHandler = createRegisterInteractionHandler({
   database: databaseService,
 });
 const minecraftBridgeHandler = createMinecraftBridgeHandler({
+  bridge: bridgeService,
+  registerStore: legacyRegisterStore,
+});
+const applicationCommandHandler = createApplicationCommandHandler({
+  registerHandler,
+  minecraftBridgeHandler,
   bridge: bridgeService,
   registerStore: legacyRegisterStore,
 });
@@ -441,6 +451,15 @@ client.once('clientReady', async () => {
   await interviewTranscriptStore.init(client).catch(err => {
     console.error('Failed to init interview transcript store:', err);
   });
+  await registerApplicationCommands(client)
+    .then(result => {
+      console.log(
+        `Discord application commands ready. scope=${result.scope}, guilds=${result.guilds}, commands=${result.commands}`
+      );
+    })
+    .catch(err => {
+      console.error('Failed to register Discord application commands:', err);
+    });
   await privateRoleEvents.sync().catch(err => {
     console.error('Failed to sync private roles:', err);
   });
@@ -751,6 +770,17 @@ async function handleMessageUpdate(oldMsg, newMsg) {
 client.on('messageCreate', handleMessageCreate);
 client.on('messageUpdate', handleMessageUpdate);
 client.on('interactionCreate', async interaction => {
+  const handledApplicationCommand = await applicationCommandHandler(interaction).catch(async err => {
+    console.error('Application command handler error:', err);
+    const payload = { content: `Slash command gagal diproses: ${err.message || err}`, ephemeral: true };
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(payload).catch(() => null);
+    } else {
+      await interaction.reply(payload).catch(() => null);
+    }
+    return true;
+  });
+  if (handledApplicationCommand) return;
   const handledRegister = await registerInteractionHandler(interaction);
   if (handledRegister) return;
   const handledSociabuzz = await sociabuzzTopupService.handleInteraction(interaction).catch(err => {

@@ -44,11 +44,11 @@ function createRizebotHelpPayload({
         name: 'User biasa',
         value: commandLines([
           ['!help', 'lihat daftar command. Alias: `!mc-help`.'],
-          ['!reg <gamertag>', 'daftar Minecraft. Kalau sudah legal, command ini hanya refresh data gamertag yang sama.'],
+          ['/register gamertag:<nama>', 'daftar Minecraft. Prefix lama tetap tersedia: `!reg <gamertag>`.'],
           ['!daftar', 'alias dari `!reg`.'],
           ['!register', 'alias dari `!reg`.'],
-          ['!status', 'lihat Ethergeon ID Card.'],
-          ['!player <nama>', 'cek Ethergeon ID Card player lain, dengan tombol pilihan kalau hasilnya mirip.'],
+          ['/status [user]', 'lihat Ethergeon ID Card sendiri; admin/interviewer dapat memilih user lain. Prefix: `!status`.'],
+          ['/player nama:<gamertag>', 'cek Ethergeon ID Card player lain dengan autocomplete. Prefix: `!player <nama>`.'],
           ['!organisasi [nama]', 'lihat daftar berhalaman, atau detail anggota, kas, holding, dan pemegang saham jika nama diisi. Alias: `!org`.'],
           ['!member', 'lihat total member Discord saat ini.'],
         ]),
@@ -96,23 +96,24 @@ function createRizebotHelpPayload({
   const interviewRecoveryLines = [];
   if (showRegisterAdmin) {
     registerAdminLines.push(
-      ['!sync-citizen', 'paksa migrasi role lama ke Ethergeon Citizen.']
+      ['/registry sync', 'paksa migrasi role lama ke Ethergeon Citizen. Prefix: `!sync-citizen`.']
     );
   }
   if (showInterviewAdmin) {
     registerAdminLines.push(
-      ['!list [semua|lolos|pending|gagal] [halaman]', 'lihat registry Minecraft dengan tombol filter/page. Alias: `!registrasi`.'],
+      ['/registry list [status] [halaman]', 'lihat registry Minecraft dengan tombol filter/page. Prefix: `!list`.'],
       ['!setreg @user <gamertag>', 'ubah gamertag legal setelah review manual admin/interviewer. Alias: `!ganti-reg`.'],
       ['!compile [jumlah|all]', 'compile closed interview lama ke JSON save channel, lalu hapus channel ticket.'],
       ['!archive-interviews [jumlah]', 'pindahkan backlog closed interview ke archive.']
     );
     interviewRecoveryLines.push(
-      ['!accept [--force] [@user] [gamertag]', 'loloskan interview; mode force memulihkan record/mapping yang rusak.'],
-      ['!reject [--force] [@user] [alasan]', 'gagalkan interview dan sinkronkan role serta akses Minecraft.'],
-      ['!close [--force] [@user]', 'tutup dan arsipkan interview; pending membutuhkan force.'],
-      ['!relink-interview @user [gamertag]', 'hubungkan channel interview saat ini ke record/session yang benar.'],
-      ['!interview-status [@user]', 'lihat registry dan histori session interview.'],
-      ['!repair-interviews --dry-run/--apply', 'audit atau perbaiki nomor ganda, orphan channel, dan mapping setelah backup.']
+      ['/interview accept [user] [gamertag] [force]', 'loloskan interview; force memulihkan record/mapping yang rusak. Prefix: `!accept`.'],
+      ['/interview reject [user] [alasan] [force]', 'gagalkan interview dan sinkronkan role serta akses Minecraft. Prefix: `!reject`.'],
+      ['/interview close [user] [force]', 'tutup dan arsipkan interview; pending membutuhkan force. Prefix: `!close`.'],
+      ['/interview relink user [gamertag]', 'hubungkan channel interview saat ini ke record/session yang benar.'],
+      ['/interview status [user]', 'lihat registry dan histori session interview.'],
+      ['/interview doctor', 'diagnosis data registry, session, channel, role, dan akses interview.'],
+      ['/interview repair mode:<dry-run|apply>', 'audit atau perbaiki nomor ganda, orphan channel, dan mapping setelah backup.']
     );
   }
   if (showModerationAdmin) {

@@ -363,7 +363,7 @@ test('legacy legal evidence and approved duplicate survive registry normalizatio
       return {
         users: {
           [pendingUserId]: {
-            gamertag: 'LegacyLegal',
+            gamertag: 'Legacy Legal',
             status: 'pending',
             legal: false,
             registeredAt: new Date(1_000).toISOString(),
@@ -391,6 +391,51 @@ test('legacy legal evidence and approved duplicate survive registry normalizatio
   assert.equal(registerStore.getUser(pendingUserId), undefined);
   assert.equal(registerStore.getUser(approvedUserId).status, 'approved');
   assert.equal(registerStore.getUser(approvedUserId).legal, true);
+});
+
+test('Minecraft join canonicalizes whitespace and recognizes an approved registry link', async () => {
+  const userId = '945001';
+  const saveChannelStore = {
+    async load() {
+      return {
+        users: {
+          [userId]: {
+            gamertag: 'Damp Tester7862',
+            username: 'discord-user',
+            status: 'approved',
+            legal: true,
+            registeredAt: new Date().toISOString(),
+            approvedAt: new Date().toISOString(),
+          },
+        },
+        order: [userId],
+        interviewSequence: 0,
+      };
+    },
+    async save() {},
+    isDataMessage() {
+      return false;
+    },
+  };
+  const registerStore = createRegisterStore({ saveChannelStore });
+  await registerStore.init({});
+  assert.equal(registerStore.findUserByGamertag('DampTester7862').userId, userId);
+
+  const bridge = createTopupBridgeService({ registerStore });
+  const resolved = bridge.resolveTarget('DampTester7862');
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.target.userId, userId);
+  const result = await bridge.handleMinecraftEvent({
+    type: 'player_join',
+    player: { name: 'DampTester7862' },
+  });
+
+  assert.equal(result.registered, true);
+  assert.equal(result.registeredMatch, true);
+  assert.equal(result.accessAllowed, true);
+  assert.equal(result.discordUserId, userId);
+  assert.equal(registerStore.getUser(userId).gamertag, 'DampTester7862');
+  assert.ok(registerStore.getUser(userId).nameHistory.includes('Damp Tester7862'));
 });
 
 test('startup citizen-role sync promotes pending registry and restores nickname', async () => {

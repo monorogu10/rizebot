@@ -78,6 +78,12 @@ function normalizeStatus(rawStatus, entry = {}) {
 }
 
 function normalizeGamertagKey(gamertag) {
+  // The Minecraft bridge/behavior pack may return the same Bedrock gamertag
+  // without display spaces. Treat whitespace as presentation, not identity.
+  return String(gamertag || '').replace(/\s+/g, '').trim().toLowerCase();
+}
+
+function normalizeGamertagDisplayKey(gamertag) {
   return String(gamertag || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
@@ -713,8 +719,19 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
 
       const history = Array.isArray(entry.nameHistory) ? entry.nameHistory : [];
       const nextHistory = [...history];
-      if (gamertag && !nextHistory.some(name => normalizeGamertagKey(name) === normalizeGamertagKey(gamertag))) {
+      if (gamertag && !nextHistory.some(name => normalizeGamertagDisplayKey(name) === normalizeGamertagDisplayKey(gamertag))) {
         nextHistory.push(gamertag);
+      }
+
+      if (
+        gamertag &&
+        normalizeGamertagKey(entry.gamertag) === normalizeGamertagKey(gamertag) &&
+        normalizeGamertagDisplayKey(entry.gamertag) !== normalizeGamertagDisplayKey(gamertag)
+      ) {
+        if (!nextHistory.some(name => normalizeGamertagDisplayKey(name) === normalizeGamertagDisplayKey(entry.gamertag))) {
+          nextHistory.push(entry.gamertag);
+        }
+        entry.gamertag = gamertag;
       }
 
       entry.lastSeenAt = nowIso;
@@ -738,16 +755,25 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
     const nowIso = new Date().toISOString();
     const history = Array.isArray(linked.entry.nameHistory) ? linked.entry.nameHistory : [];
     const nextHistory = [...history];
-    if (!nextHistory.some(name => normalizeGamertagKey(name) === normalizeGamertagKey(gamertag))) {
+    if (!nextHistory.some(name => normalizeGamertagDisplayKey(name) === normalizeGamertagDisplayKey(gamertag))) {
       nextHistory.push(gamertag);
     }
 
+    const previousGamertag = linked.entry.gamertag;
+    const canonicalized = normalizeGamertagDisplayKey(previousGamertag) !== normalizeGamertagDisplayKey(gamertag);
+    if (canonicalized && !nextHistory.some(name => (
+      normalizeGamertagDisplayKey(name) === normalizeGamertagDisplayKey(previousGamertag)
+    ))) {
+      nextHistory.push(previousGamertag);
+    }
+
+    linked.entry.gamertag = gamertag;
     linked.entry.lastSeenAt = nowIso;
     linked.entry.lastSeenName = gamertag;
     linked.entry.updatedAt = nowIso;
     linked.entry.nameHistory = nextHistory.slice(-10);
     await persist();
-    return linked;
+    return { ...linked, canonicalized, previousGamertag };
   }
 
   function findUserByPersistentId(persistentIdRaw) {
