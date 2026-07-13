@@ -11,6 +11,25 @@ Slash command didaftarkan otomatis saat bot ready. Command prefix Discord `!` su
 - `/registry list|sync|set-gamertag` menampilkan dan memperbaiki registry.
 - `/help` menampilkan command finance, UU, moderasi, shop, Minecraft bridge, dan topup sesuai akses user.
 
+## Minecraft server log
+
+Chat, join/leave, kematian player, lifecycle/restart, command attempt, transparansi, security alert, dan error script behavior pack dikirim melalui event bridge yang memakai ID unik, persistent queue, retry, serta deduplikasi. Rizebot menyimpan event ke `.runtime/minecraft-event-outbox.json` sebelum mengirimnya ke Discord, sehingga gangguan Discord tidak langsung menghilangkan log.
+
+Channel dapat dipisahkan melalui `.env` berikut. Semua channel tambahan otomatis memakai chatlog utama sebagai fallback jika belum diisi.
+
+```env
+MINECRAFT_CHAT_LOG_CHANNEL_ID=1519260589208240219
+MINECRAFT_AUDIT_LOG_CHANNEL_ID=
+MINECRAFT_ERROR_LOG_CHANNEL_ID=
+MINECRAFT_ORGANIZATION_LOG_CHANNEL_ID=
+```
+
+- Chat umum, presence, death, dan system message masuk ke chatlog utama.
+- Transparansi, blocked chat, dan command attempt masuk ke audit log.
+- Error/fatal script masuk ke error log.
+- Chat organisasi masuk ke organization log agar tidak bercampur dengan chat umum.
+- `/minecraft status` menampilkan jumlah outbox tertunda, delivery sukses, dan percobaan delivery yang gagal.
+
 Secara default command didaftarkan global. Untuk update instan selama development, isi `DISCORD_COMMAND_GUILD_IDS` dengan satu atau beberapa guild ID yang dipisahkan koma. Bot perlu diundang dengan scope `bot`/`applications.commands`.
 
 ## Rules dan Undang-Undang

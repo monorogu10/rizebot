@@ -8,7 +8,10 @@ const {
   EmbedBuilder,
 } = require('discord.js');
 const {
+  MINECRAFT_AUDIT_LOG_CHANNEL_ID,
   MINECRAFT_CHAT_LOG_CHANNEL_ID,
+  MINECRAFT_ERROR_LOG_CHANNEL_ID,
+  MINECRAFT_ORGANIZATION_LOG_CHANNEL_ID,
   MINECRAFT_REGISTER_PENDING_ROLE_ID,
   MINECRAFT_REGISTER_REJECTED_ROLE_ID,
   MINECRAFT_REGISTER_ROLE_ID,
@@ -33,10 +36,32 @@ const VERIFY_STORE_FILE = process.env.RIZEBOT_VERIFY_STORE_FILE ||
   path.join(RUNTIME_DIR, 'minecraft-verify-codes.json');
 const JOB_STORE_FILE = process.env.RIZEBOT_JOB_STORE_FILE ||
   path.join(RUNTIME_DIR, 'minecraft-bridge-jobs.json');
+const EVENT_OUTBOX_FILE = process.env.RIZEBOT_EVENT_OUTBOX_FILE ||
+  path.join(RUNTIME_DIR, 'minecraft-event-outbox.json');
+const EVENT_OUTBOX_LIMIT = 2_000;
+const EVENT_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
+const EVENT_OUTBOX_RETRY_MS = 5_000;
+const EVENT_OUTBOX_RETRY_BATCH = 5;
+const DURABLE_EVENT_TYPES = new Set([
+  'chat',
+  'transparency',
+  'player_join_log',
+  'player_leave',
+  'server_log',
+  'server_lifecycle',
+  'system_message',
+  'player_death',
+  'command_attempt',
+]);
 const EMBED_COLOR_CHAT = 0x2f80ed;
 const EMBED_COLOR_TRANS = 0xf2c94c;
 const EMBED_COLOR_JOIN = 0x2ecc71;
 const EMBED_COLOR_LEAVE = 0xe74c3c;
+const EMBED_COLOR_DEATH = 0x95a5a6;
+const EMBED_COLOR_COMMAND = 0x9b51e0;
+const EMBED_COLOR_SYSTEM = 0x56ccf2;
+const EMBED_COLOR_WARNING = 0xf2994a;
+const EMBED_COLOR_ERROR = 0xeb5757;
 const EMBED_COLOR_TOPUP = 0x27ae60;
 const EMBED_COLOR_INFO = 0x2f80ed;
 const EMBED_COLOR_TRANSFER = 0x27ae60;
@@ -1192,8 +1217,12 @@ function createTopupBridgeService({ registerStore, client = null }) {
   const onlinePlayers = new Map();
   const discordUserCache = new Map();
   const legalAccessJoinSyncs = new Map();
+  const eventOutbox = new Map();
+  const eventDeliveryPromises = new Map();
+  const logChannelPromises = new Map();
   let jobsLoaded = false;
-  let chatChannelPromise = null;
+  let eventOutboxLoaded = false;
+  let eventOutboxFlushPromise = null;
   let privateChatChannelPromise = null;
   const bridgeStats = {
     lastJobPollAt: null,
@@ -1207,7 +1236,256 @@ function createTopupBridgeService({ registerStore, client = null }) {
     lastTransparencyAt: null,
     lastPresenceAt: null,
     lastVerifyAt: null,
+    lastLogDeliveredAt: null,
+    lastLogFailureAt: null,
+    lastLogFailureCode: '',
+    lastLogEventId: '',
+    deliveredLogCount: 0,
+    failedLogAttemptCount: 0,
+    minecraftQueuePending: 0,
+    minecraftQueueDropped: 0,
+    minecraftQueueLastSuccessAt: null,
+    minecraftQueueLastFailureAt: null,
   };
+
+  function normalizeEventId(value) {
+    return String(value || '')
+      .trim()
+      .replace(/[^a-zA-Z0-9:_-]/g, '')
+      .slice(0, 140);
+  }
+
+  function createReceivedEventId() {
+    return `rb_${Date.now().toString(36)}_${crypto.randomBytes(6).toString('hex')}`;
+  }
+
+  function durableEventValidationCode(event = {}) {
+    const type = n(event.type);
+    if (!DURABLE_EVENT_TYPES.has(type)) return 'invalid-durable-event-type';
+    if (type === 'player_join_log' || type === 'player_leave') {
+      const player = event.player || event;
+      return cleanText(player?.name || event.name, 80) ? '' : 'event-player-name-required';
+    }
+    return cleanEmbedText(event.message || event.detail || event.reason || '', 1600) === '-'
+      ? 'event-message-required'
+      : '';
+  }
+
+  function normalizeOutboxRecord(raw = {}, now = Date.now()) {
+    const event = raw.event && typeof raw.event === 'object' && !Array.isArray(raw.event)
+      ? raw.event
+      : null;
+    const eventId = normalizeEventId(raw.eventId || event?.eventId);
+    const type = n(event?.type);
+    if (!event || !eventId || !DURABLE_EVENT_TYPES.has(type)) return null;
+    if (durableEventValidationCode({ ...event, type })) return null;
+    const status = raw.status === 'delivered' ? 'delivered' : 'pending';
+    const updatedAt = Math.floor(Number(raw.updatedAt) || now);
+    if (status === 'delivered' && now - updatedAt > EVENT_RECEIPT_TTL_MS) return null;
+    return {
+      eventId,
+      event: { ...event, eventId, type },
+      status,
+      attempts: Math.max(0, Math.floor(Number(raw.attempts) || 0)),
+      createdAt: Math.floor(Number(raw.createdAt) || updatedAt),
+      updatedAt,
+      deliveredAt: Math.floor(Number(raw.deliveredAt) || 0),
+      lastError: cleanText(raw.lastError, 300),
+      result: raw.result && typeof raw.result === 'object' ? raw.result : null,
+    };
+  }
+
+  function pruneEventOutbox(now = Date.now()) {
+    for (const [eventId, record] of eventOutbox.entries()) {
+      if (record.status === 'delivered' && now - record.updatedAt > EVENT_RECEIPT_TTL_MS) {
+        eventOutbox.delete(eventId);
+      }
+    }
+
+    if (eventOutbox.size <= EVENT_OUTBOX_LIMIT) return;
+    const delivered = [...eventOutbox.values()]
+      .filter(record => record.status === 'delivered')
+      .sort((a, b) => a.updatedAt - b.updatedAt);
+    for (const record of delivered) {
+      if (eventOutbox.size <= EVENT_OUTBOX_LIMIT) break;
+      eventOutbox.delete(record.eventId);
+    }
+  }
+
+  function saveEventOutbox(now = Date.now()) {
+    pruneEventOutbox(now);
+    const records = [...eventOutbox.values()]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map(record => ({
+        eventId: record.eventId,
+        event: record.event,
+        status: record.status,
+        attempts: record.attempts,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        deliveredAt: record.deliveredAt,
+        lastError: record.lastError,
+        result: record.result,
+      }));
+    const payload = JSON.stringify({
+      updatedAt: new Date(now).toISOString(),
+      records,
+    }, null, 2);
+
+    try {
+      fs.mkdirSync(path.dirname(EVENT_OUTBOX_FILE), { recursive: true });
+      const tmpFile = `${EVENT_OUTBOX_FILE}.tmp`;
+      fs.writeFileSync(tmpFile, payload);
+      fs.renameSync(tmpFile, EVENT_OUTBOX_FILE);
+      return true;
+    } catch (err) {
+      console.error('Failed to write Minecraft event outbox:', err);
+      return false;
+    }
+  }
+
+  function loadEventOutbox(now = Date.now()) {
+    if (eventOutboxLoaded) return;
+    eventOutboxLoaded = true;
+    let raw = '';
+    try {
+      raw = fs.readFileSync(EVENT_OUTBOX_FILE, 'utf8');
+    } catch (err) {
+      if (err?.code !== 'ENOENT') console.error('Failed to read Minecraft event outbox:', err);
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(raw);
+      for (const rawRecord of Array.isArray(parsed?.records) ? parsed.records : []) {
+        const record = normalizeOutboxRecord(rawRecord, now);
+        if (record) eventOutbox.set(record.eventId, record);
+      }
+      pruneEventOutbox(now);
+    } catch (err) {
+      console.error('Failed to parse Minecraft event outbox:', err);
+    }
+  }
+
+  async function performOutboxDelivery(record) {
+    record.attempts += 1;
+    record.updatedAt = Date.now();
+    try {
+      const result = await deliverMinecraftEvent(record.event);
+      if (!result || result.ok === false) {
+        throw new Error(result?.code || 'event-delivery-rejected');
+      }
+      record.status = 'delivered';
+      record.result = result;
+      record.lastError = '';
+      record.deliveredAt = Date.now();
+      record.updatedAt = record.deliveredAt;
+      bridgeStats.lastLogDeliveredAt = new Date(record.deliveredAt).toISOString();
+      bridgeStats.lastLogEventId = record.eventId;
+      bridgeStats.deliveredLogCount += 1;
+      saveEventOutbox(record.updatedAt);
+      return true;
+    } catch (err) {
+      record.status = 'pending';
+      record.lastError = cleanText(err?.message || err, 300) || 'event-delivery-failed';
+      record.updatedAt = Date.now();
+      bridgeStats.lastLogFailureAt = new Date(record.updatedAt).toISOString();
+      bridgeStats.lastLogFailureCode = record.lastError;
+      bridgeStats.lastLogEventId = record.eventId;
+      bridgeStats.failedLogAttemptCount += 1;
+      saveEventOutbox(record.updatedAt);
+      return false;
+    }
+  }
+
+  async function attemptOutboxDelivery(record) {
+    const existing = eventDeliveryPromises.get(record.eventId);
+    if (existing) return existing;
+    const promise = performOutboxDelivery(record).finally(() => {
+      eventDeliveryPromises.delete(record.eventId);
+    });
+    eventDeliveryPromises.set(record.eventId, promise);
+    return promise;
+  }
+
+  async function flushEventOutbox() {
+    loadEventOutbox();
+    if (eventOutboxFlushPromise) return eventOutboxFlushPromise;
+    eventOutboxFlushPromise = (async () => {
+      const pending = [...eventOutbox.values()]
+        .filter(record => record.status === 'pending')
+        .sort((a, b) => a.updatedAt - b.updatedAt)
+        .slice(0, EVENT_OUTBOX_RETRY_BATCH);
+      for (const record of pending) {
+        await attemptOutboxDelivery(record);
+      }
+    })().finally(() => {
+      eventOutboxFlushPromise = null;
+    });
+    return eventOutboxFlushPromise;
+  }
+
+  async function acceptDurableMinecraftEvent(eventRaw = {}) {
+    loadEventOutbox();
+    const now = Date.now();
+    const eventId = normalizeEventId(eventRaw.eventId) || createReceivedEventId();
+    const existing = eventOutbox.get(eventId);
+    if (existing) {
+      if (existing.status === 'delivered') {
+        return {
+          ok: true,
+          accepted: true,
+          delivered: true,
+          duplicate: true,
+          eventId,
+          ...(existing.result || {}),
+        };
+      }
+      void attemptOutboxDelivery(existing);
+      return {
+        ok: true,
+        accepted: true,
+        delivered: false,
+        duplicate: true,
+        eventId,
+        code: 'queued-for-retry',
+      };
+    }
+
+    const validationCode = durableEventValidationCode(eventRaw);
+    if (validationCode) {
+      return { ok: false, accepted: false, eventId, code: validationCode };
+    }
+
+    pruneEventOutbox(now);
+    if (eventOutbox.size >= EVENT_OUTBOX_LIMIT &&
+        ![...eventOutbox.values()].some(record => record.status === 'delivered')) {
+      return { ok: false, accepted: false, eventId, code: 'event-outbox-full' };
+    }
+
+    const record = normalizeOutboxRecord({
+      eventId,
+      event: { ...eventRaw, eventId },
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+    }, now);
+    if (!record) return { ok: false, accepted: false, eventId, code: 'invalid-durable-event' };
+    eventOutbox.set(eventId, record);
+    if (!saveEventOutbox(now)) {
+      eventOutbox.delete(eventId);
+      return { ok: false, accepted: false, eventId, code: 'event-outbox-persist-failed' };
+    }
+
+    void attemptOutboxDelivery(record);
+    return {
+      ok: true,
+      accepted: true,
+      delivered: false,
+      eventId,
+      code: 'queued-for-delivery',
+    };
+  }
 
   function normalizeVerificationRecord(record = {}) {
     const code = String(record.code || '').replace(/[^\d]/g, '');
@@ -2764,20 +3042,32 @@ function createTopupBridgeService({ registerStore, client = null }) {
     return { ok: true };
   }
 
-  async function resolveChatChannel() {
-    if (!client || !MINECRAFT_CHAT_LOG_CHANNEL_ID) return null;
-    if (!chatChannelPromise) {
-      chatChannelPromise = client.channels.fetch(MINECRAFT_CHAT_LOG_CHANNEL_ID).catch(err => {
-        chatChannelPromise = null;
-        console.error('Failed to fetch Minecraft chat log channel:', err);
+  async function resolveLogChannel(channelId, label = 'log') {
+    const id = String(channelId || '').trim();
+    if (!client || !id) return null;
+    if (!logChannelPromises.has(id)) {
+      const promise = client.channels.fetch(id).catch(err => {
+        logChannelPromises.delete(id);
+        console.error(`Failed to fetch Minecraft ${label} channel:`, err);
         return null;
       });
+      logChannelPromises.set(id, promise);
     }
-    return chatChannelPromise;
+    return logChannelPromises.get(id);
+  }
+
+  function chatLogChannelIdForSource(sourceRaw) {
+    const source = n(sourceRaw);
+    if (source.includes('organization')) return MINECRAFT_ORGANIZATION_LOG_CHANNEL_ID;
+    if (source.startsWith('quarantine:') || source.includes('blocked')) {
+      return MINECRAFT_AUDIT_LOG_CHANNEL_ID;
+    }
+    return MINECRAFT_CHAT_LOG_CHANNEL_ID;
   }
 
   async function sendChatLog(event) {
-    const channel = await resolveChatChannel();
+    const source = cleanText(event.source || event.chatSource || 'global', 40) || 'global';
+    const channel = await resolveLogChannel(chatLogChannelIdForSource(source), 'chat log');
     if (!channel?.send) return { ok: false, code: 'chat-channel-unavailable' };
 
     const name = cleanText(event.name || 'unknown', 80);
@@ -2790,7 +3080,9 @@ function createTopupBridgeService({ registerStore, client = null }) {
       ? Math.floor(onlineCountRaw)
       : getOnlinePlayers().length;
     const wallet = normalizeWalletProfile(event.wallet || event.player?.wallet || player.wallet);
-    const source = cleanText(event.source || event.chatSource || 'global', 40) || 'global';
+    const sourceKey = n(source);
+    const isBlocked = sourceKey.startsWith('quarantine:') || sourceKey.includes('blocked');
+    const isOrganization = sourceKey.includes('organization');
     const linked = findLinkedUserForPlayer(event);
     const user = await resolveDiscordUser(linked?.userId);
     const authorIconUrl = discordAvatarUrl(user);
@@ -2806,8 +3098,8 @@ function createTopupBridgeService({ registerStore, client = null }) {
 
     await channel.send({
       embeds: [createLogEmbed({
-        color: EMBED_COLOR_CHAT,
-        title: `Chat | ${name}`,
+        color: isBlocked ? EMBED_COLOR_WARNING : (isOrganization ? EMBED_COLOR_COMMAND : EMBED_COLOR_CHAT),
+        title: `${isBlocked ? 'Blocked Chat' : (isOrganization ? 'Organization Chat' : 'Chat')} | ${name}`,
         description: boldDiscordText(message),
         footerParts,
         authorIconUrl,
@@ -2821,7 +3113,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
   }
 
   async function sendTransparencyLog(event) {
-    const channel = await resolveChatChannel();
+    const channel = await resolveLogChannel(MINECRAFT_AUDIT_LOG_CHANNEL_ID, 'audit log');
     if (!channel?.send) return { ok: false, code: 'chat-channel-unavailable' };
 
     const category = cleanText(event.category || 'unknown', 40);
@@ -2845,7 +3137,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
   }
 
   async function sendPresenceLog(type, event = {}, detail = '') {
-    const channel = await resolveChatChannel();
+    const channel = await resolveLogChannel(MINECRAFT_CHAT_LOG_CHANNEL_ID, 'presence log');
     if (!channel?.send) return { ok: false, code: 'chat-channel-unavailable' };
 
     const player = event.player || event;
@@ -2873,6 +3165,54 @@ function createTopupBridgeService({ registerStore, client = null }) {
       allowedMentions: { parse: [] },
     }).catch(err => {
       throw err;
+    });
+    return { ok: true };
+  }
+
+  async function sendServerEventLog(type, event = {}) {
+    const severity = n(event.severity || event.level || 'info');
+    const isError = severity === 'error' || severity === 'fatal';
+    const isAudit = type === 'command_attempt' || type === 'server_log' ||
+      severity === 'warning' || severity === 'warn';
+    const channelId = isError
+      ? MINECRAFT_ERROR_LOG_CHANNEL_ID
+      : (isAudit ? MINECRAFT_AUDIT_LOG_CHANNEL_ID : MINECRAFT_CHAT_LOG_CHANNEL_ID);
+    const channel = await resolveLogChannel(channelId, isError ? 'error log' : (isAudit ? 'audit log' : 'server log'));
+    if (!channel?.send) return { ok: false, code: 'server-log-channel-unavailable' };
+
+    const actor = cleanText(event.actor || event.player?.name || event.name || '', 80);
+    const message = cleanEmbedText(event.message || event.detail || event.reason || '', 1600);
+    if (!message || message === '-') return { ok: false, code: 'empty-message' };
+    const eventLabel = {
+      server_lifecycle: 'Server Lifecycle',
+      system_message: 'System Message',
+      player_death: 'Player Death',
+      command_attempt: 'Command Attempt',
+      server_log: 'Server Log',
+    }[type] || 'Server Event';
+    const color = type === 'player_death'
+      ? EMBED_COLOR_DEATH
+      : (type === 'command_attempt'
+        ? EMBED_COLOR_COMMAND
+        : (isError
+          ? EMBED_COLOR_ERROR
+          : ((severity === 'warning' || severity === 'warn') ? EMBED_COLOR_WARNING : EMBED_COLOR_SYSTEM)));
+    const footerParts = [
+      `event: ${type}`,
+      `severity: ${severity}`,
+      actor ? `actor: ${actor}` : '',
+      event.source ? `source: ${cleanText(event.source, 80)}` : '',
+    ];
+
+    await channel.send({
+      embeds: [createLogEmbed({
+        color,
+        title: `${eventLabel}${actor ? ` | ${actor}` : ''}`,
+        description: message,
+        footerParts,
+        compact: true,
+      })],
+      allowedMentions: { parse: [] },
     });
     return { ok: true };
   }
@@ -2943,7 +3283,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     return { ok: true, code: 'ok', userId: record.userId, gamertag: name, roleSynced };
   }
 
-  async function handleMinecraftEvent(eventRaw = {}) {
+  async function deliverMinecraftEvent(eventRaw = {}) {
     const type = n(eventRaw.type);
     bridgeStats.lastEventAt = new Date().toISOString();
     bridgeStats.lastEventType = type;
@@ -2960,7 +3300,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
       bridgeStats.lastVerifyAt = bridgeStats.lastEventAt;
       return verifyFromMinecraft(eventRaw);
     }
-    if (type === 'player_join') {
+    if (type === 'player_join' || type === 'player_access') {
       const player = rememberOnlinePlayer(eventRaw.player || eventRaw);
       if (player?.persistentId) {
         await registerStore.markSeenByPersistentId?.(player.persistentId, player.name).catch(() => null);
@@ -2988,15 +3328,17 @@ function createTopupBridgeService({ registerStore, client = null }) {
         });
         accessSyncQueued = enqueueApprovedJoinAccessSync(linked, player);
       }
-      bridgeStats.lastPresenceAt = bridgeStats.lastEventAt;
-      await sendPresenceLog(
-        type,
-        { player },
-        bypass
-          ? 'bypass Discord'
-          : (verified ? 'verified Discord' : (registeredMatch ? 'registered Discord' : 'belum register Discord'))
-      )
-        .catch(err => console.error('Failed to send Minecraft join log:', err));
+      if (type === 'player_join') {
+        bridgeStats.lastPresenceAt = bridgeStats.lastEventAt;
+        await sendPresenceLog(
+          type,
+          { player },
+          bypass
+            ? 'bypass Discord'
+            : (verified ? 'verified Discord' : (registeredMatch ? 'registered Discord' : 'belum register Discord'))
+        )
+          .catch(err => console.error('Failed to send Minecraft join log:', err));
+      }
       return {
         ok: true,
         verified,
@@ -3008,21 +3350,44 @@ function createTopupBridgeService({ registerStore, client = null }) {
         discordUserId: linked?.userId || '',
       };
     }
+    if (type === 'player_join_log') {
+      const player = rememberOnlinePlayer(eventRaw.player || eventRaw);
+      bridgeStats.lastPresenceAt = bridgeStats.lastEventAt;
+      await sendPresenceLog('player_join', { player }, eventRaw.detail || eventRaw.status || '');
+      return { ok: true };
+    }
     if (type === 'player_leave') {
       forgetOnlinePlayer(eventRaw.player || eventRaw);
       bridgeStats.lastPresenceAt = bridgeStats.lastEventAt;
-      await sendPresenceLog(type, eventRaw).catch(err => {
-        console.error('Failed to send Minecraft leave log:', err);
-      });
+      await sendPresenceLog(type, eventRaw);
       return { ok: true };
+    }
+    if (type === 'server_log' || type === 'server_lifecycle' || type === 'system_message' ||
+        type === 'player_death' || type === 'command_attempt') {
+      return sendServerEventLog(type, eventRaw);
     }
     if (type === 'snapshot') {
       applyOnlineSnapshot(Array.isArray(eventRaw.players) ? eventRaw.players : []);
+      const minecraftQueue = eventRaw.bridgeEventQueue && typeof eventRaw.bridgeEventQueue === 'object'
+        ? eventRaw.bridgeEventQueue
+        : {};
+      bridgeStats.minecraftQueuePending = Math.max(0, Math.floor(Number(minecraftQueue.pending) || 0));
+      bridgeStats.minecraftQueueDropped = Math.max(0, Math.floor(Number(minecraftQueue.dropped) || 0));
+      bridgeStats.minecraftQueueLastSuccessAt = cleanText(minecraftQueue.lastSuccessAt, 80) || null;
+      bridgeStats.minecraftQueueLastFailureAt = cleanText(minecraftQueue.lastFailureAt, 80) || null;
       bridgeStats.lastSnapshotAt = bridgeStats.lastEventAt;
       bridgeStats.lastSnapshotOnline = getOnlinePlayers().length;
       return { ok: true, online: getOnlinePlayers().length };
     }
     return { ok: false, code: 'unknown-event-type' };
+  }
+
+  async function handleMinecraftEvent(eventRaw = {}) {
+    const type = n(eventRaw.type);
+    if (DURABLE_EVENT_TYPES.has(type)) {
+      return acceptDurableMinecraftEvent({ ...eventRaw, type });
+    }
+    return deliverMinecraftEvent({ ...eventRaw, type });
   }
 
   function getBridgeStatus() {
@@ -3034,13 +3399,27 @@ function createTopupBridgeService({ registerStore, client = null }) {
       else if (record.status === 'leased') counts.leased += 1;
       else if (record.status === 'done') counts.done += 1;
     }
+    loadEventOutbox();
+    const eventOutboxCounts = { pending: 0, delivered: 0 };
+    for (const record of eventOutbox.values()) {
+      if (record.status === 'delivered') eventOutboxCounts.delivered += 1;
+      else eventOutboxCounts.pending += 1;
+    }
     return {
       ...bridgeStats,
       jobs: counts,
       onlineCount: getOnlinePlayers().length,
       pendingVerifyCount: pendingVerifications.size,
+      eventOutbox: eventOutboxCounts,
     };
   }
+
+  loadEventOutbox();
+  const eventOutboxTimer = setInterval(() => {
+    void flushEventOutbox();
+  }, EVENT_OUTBOX_RETRY_MS);
+  eventOutboxTimer.unref?.();
+  void flushEventOutbox();
 
   return {
     normalizePositiveInt,

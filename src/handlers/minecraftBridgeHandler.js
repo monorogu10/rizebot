@@ -342,6 +342,7 @@ function timeOrDash(value) {
 
 function formatBridgeStatus(status) {
   const jobs = status.jobs || {};
+  const eventOutbox = status.eventOutbox || {};
   return [
     '**Minecraft bridge status**',
     `Job poll terakhir: ${timeOrDash(status.lastJobPollAt)}`,
@@ -352,8 +353,14 @@ function formatBridgeStatus(status) {
     `Transparansi terakhir: ${timeOrDash(status.lastTransparencyAt)}`,
     `Join/leave terakhir: ${timeOrDash(status.lastPresenceAt)}`,
     `Verify terakhir: ${timeOrDash(status.lastVerifyAt)}`,
+    `Log terkirim terakhir: ${timeOrDash(status.lastLogDeliveredAt)}`,
+    `Log gagal terakhir: ${timeOrDash(status.lastLogFailureAt)}${status.lastLogFailureCode ? ` (${status.lastLogFailureCode})` : ''}`,
     `Cache online: ${formatNumber(status.onlineCount || 0)}`,
     `Job queue: queued=${formatNumber(jobs.queued || 0)} leased=${formatNumber(jobs.leased || 0)} done=${formatNumber(jobs.done || 0)}`,
+    `Event outbox: pending=${formatNumber(eventOutbox.pending || 0)} delivered=${formatNumber(eventOutbox.delivered || 0)}`,
+    `Delivery: sukses=${formatNumber(status.deliveredLogCount || 0)} gagal/retry=${formatNumber(status.failedLogAttemptCount || 0)}`,
+    `Queue Minecraft: pending=${formatNumber(status.minecraftQueuePending || 0)} dropped=${formatNumber(status.minecraftQueueDropped || 0)}`,
+    `Queue Minecraft sukses/gagal: ${timeOrDash(status.minecraftQueueLastSuccessAt)} / ${timeOrDash(status.minecraftQueueLastFailureAt)}`,
     `Pending verify: ${formatNumber(status.pendingVerifyCount || 0)}`,
   ].join('\n');
 }
