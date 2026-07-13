@@ -315,7 +315,7 @@ async function sendOnlinePagination(msg, onlinePlayers) {
   collector.on('collect', async interaction => {
     if (String(interaction.user?.id || '') !== String(msg.author?.id || '')) {
       await interaction.reply({
-        content: 'Pagination ini hanya untuk admin yang menjalankan `!online`.',
+        content: 'Pagination ini hanya untuk admin yang menjalankan `/minecraft online`.',
         ephemeral: true,
       }).catch(() => {});
       return;
@@ -387,7 +387,7 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
     if (parsed.command === 'verifyme') {
       const entry = registerStore.getUser(msg.author.id);
       if (!entry?.gamertag) {
-        await replyNoPing(msg, 'Kamu belum punya data Minecraft. Pakai `!reg <gamertag_minecraft>` dulu.');
+        await replyNoPing(msg, 'Kamu belum punya data Minecraft. Gunakan `/register` terlebih dahulu.');
         return true;
       }
 
@@ -422,7 +422,7 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
 
     if (parsed.command === 'player') {
       if (parsed.args.length < 2) {
-        await replyNoPing(msg, buildFormatErrorPayload('!player <nama_player>'));
+        await replyNoPing(msg, buildFormatErrorPayload('/player nama:<player>'));
         return true;
       }
       await enqueueBridgeJobWithLoading(msg, bridge, 'player_info', {
@@ -453,7 +453,7 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
     if (parsed.command === 'tf') {
       const transfer = parseGeonTransferArgs(parsed.args, bridge);
       if (!transfer) {
-        await replyNoPing(msg, buildFormatErrorPayload('!tf <nama_player/mention> <jumlah_geon> [alasan opsional]'));
+        await replyNoPing(msg, buildFormatErrorPayload('/tf player atau /tf user'));
         return true;
       }
 
@@ -505,14 +505,14 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         await replyNoPing(msg, buildCommandEmbed({
           color: 0xe74c3c,
           title: 'Command Admin Utama',
-          description: 'Command `!bonus` khusus admin utama.',
+          description: 'Command `/minecraft bonus` khusus admin utama.',
         }));
         return true;
       }
 
       const bonus = parseGeonTransferArgs(parsed.args, bridge);
       if (!bonus) {
-        await replyNoPing(msg, buildFormatErrorPayload('!bonus <nama_player> <jumlah_geon>'));
+        await replyNoPing(msg, buildFormatErrorPayload('/minecraft bonus nama:<player> jumlah:<geon>'));
         return true;
       }
 
@@ -533,7 +533,7 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
         await replyNoPing(msg, buildCommandEmbed({
           color: 0xe74c3c,
           title: 'Command Admin',
-          description: 'Command `!migrasi` khusus admin.',
+          description: 'Command `/minecraft migrasi` khusus admin.',
         }));
         return true;
       }
@@ -544,9 +544,9 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
           color: 0xe74c3c,
           title: 'Format Migrasi',
           description: [
-            'Format: `!migrasi <nama_lama> -> <nama_baru>`',
-            'Alternatif: `!migrasi "Nama Lama" "Nama Baru"`',
-            'Untuk nama tanpa spasi: `!migrasi Lama Baru`.',
+            'Gunakan `/minecraft migrasi`.',
+            'Isi option `lama` dengan gamertag lama.',
+            'Isi option `baru` dengan gamertag pengganti.',
           ].join('\n'),
         }));
         return true;
@@ -588,13 +588,13 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
 
     if (parsed.command === 'p') {
       if (String(msg.channelId || msg.channel?.id || '') !== MINECRAFT_CHAT_LOG_CHANNEL_ID) {
-        await replyNoPing(msg, `Command \`!p\` hanya dipakai di channel chat log Minecraft: <#${MINECRAFT_CHAT_LOG_CHANNEL_ID}>.`);
+        await replyNoPing(msg, `Command \`/minecraft chat\` hanya dipakai di channel chat log Minecraft: <#${MINECRAFT_CHAT_LOG_CHANNEL_ID}>.`);
         return true;
       }
 
       const text = cleanDiscordBroadcastMessage(parsed.args);
       if (!text) {
-        await replyNoPing(msg, 'Format: `!p <pesan chat>`');
+        await replyNoPing(msg, 'Gunakan `/minecraft chat pesan:<teks>`.');
         return true;
       }
 
@@ -617,7 +617,7 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
 
     if (parsed.command === 'srcsrv') {
       if (parsed.args.length < 2) {
-        await replyNoPing(msg, 'Format: `!srcpl <minimal 2 huruf nama player>`');
+        await replyNoPing(msg, 'Gunakan `/minecraft search nama:<minimal 2 huruf>`.');
         return true;
       }
       await enqueueBridgeJobWithLoading(msg, bridge, 'search_server', {
@@ -632,7 +632,7 @@ function createMinecraftBridgeHandler({ bridge, registerStore }) {
 
     if (parsed.command === 'geon') {
       if (parsed.args.length < 2) {
-        await replyNoPing(msg, 'Format: `!geon <nama_player>`');
+        await replyNoPing(msg, 'Gunakan `/minecraft saldo nama:<player>`.');
         return true;
       }
       await enqueueBridgeJobWithLoading(msg, bridge, 'wallet', {

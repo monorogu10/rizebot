@@ -754,7 +754,7 @@ function buildOrganizationDetailEmbed(organization = {}, record = {}, view = 'ov
     .setColor(organization.isCompany ? 0x27ae60 : EMBED_COLOR_INFO)
     .setTitle(cleanText(title, 256))
     .setDescription(description)
-    .setFooter({ text: `Ref ${record.id || record.job?.id || '-'} | !organisasi ${organization.name || organization.id || ''}`.trim() })
+    .setFooter({ text: `Ref ${record.id || record.job?.id || '-'} | /organisasi nama:${organization.name || organization.id || ''}`.trim() })
     .setTimestamp(new Date());
 
   if (view === 'overview') {
@@ -1558,7 +1558,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     const jobId = record.job?.id || record.id || '-';
     const edited = await loading.edit({
       content: [
-        'Command `!organisasi` mengalami kesalahan.',
+        'Command `/organisasi` mengalami kesalahan.',
         `Tahap: **mengirim hasil bridge ke Discord**`,
         `Penyebab: \`${cleanText(detail, 240)}\``,
         `Ref: \`${jobId}\``,

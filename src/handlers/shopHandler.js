@@ -71,7 +71,7 @@ function shopListEmbed(result) {
       const custom = entry.isDefault ? '' : ' • harga khusus';
       return `\`${entry.index}\` **${entry.label}** — ${formatNumber(entry.currentValue)} ${entry.unit || 'Geon'}${custom}`;
     }).join('\n') || 'Daftar harga kosong.')
-    .setFooter({ text: 'Admin: !shopsetting <index/nama barang> <harga Geon>' })
+    .setFooter({ text: 'Admin: /shop item:<index/nama> harga:<Geon>' })
     .setTimestamp();
 }
 
@@ -82,7 +82,7 @@ function createShopHandler({ bridge, serverStatusNotifier }) {
 
     if (/^!shop(?:\s|$)/i.test(content) && !/^!shopsetting(?:\s|$)/i.test(content)) {
       if (content.toLowerCase() !== '!shop') {
-        await msg.reply(noPing({ content: 'Gunakan `!shop` tanpa parameter untuk melihat seluruh harga.' })).catch(() => {});
+        await msg.reply(noPing({ content: 'Gunakan `/shop` tanpa option untuk melihat seluruh harga.' })).catch(() => {});
         return true;
       }
 
@@ -135,9 +135,9 @@ function createShopHandler({ bridge, serverStatusNotifier }) {
               .setColor(0xe74c3c)
               .setTitle('Format Shop Setting')
               .setDescription([
-                'Gunakan: `!shopsetting <index/nama barang> <harga Geon>`',
-                'Contoh index: `!shopsetting 1 100`',
-                'Contoh nama: `!shopsetting Magic Tool 100`',
+                'Gunakan `/shop` dengan option `item` dan `harga`.',
+                'Contoh item: `1` atau `Magic Tool`.',
+                'Harga harus berupa Geon bulat positif.',
               ].join('\n')),
           ],
         })).catch(() => {});

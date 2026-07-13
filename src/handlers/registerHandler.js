@@ -526,7 +526,7 @@ function buildStatusPayload(entry, user, minecraftProfile = null) {
           .setTitle('Ethergeon ID Card')
           .setDescription([
             'Status: **BELUM REGISTER**',
-            'Daftar dulu dengan `!register <gamertag_minecraft>`.',
+            'Daftar dulu dengan `/register gamertag:<nama_minecraft>`.',
           ].join('\n'))
           .setTimestamp(new Date()),
       ],
@@ -798,7 +798,7 @@ function buildListPayload(entries, pageOrOptions = 1) {
       { name: 'Filter', value: listFilterLabel(filter), inline: true },
       { name: 'Shown', value: `${filtered.length}`, inline: true }
     )
-    .setFooter({ text: `Halaman ${safePage}/${totalPages} | !list ${listFilterCommand(filter)}`.trim() })
+    .setFooter({ text: `Halaman ${safePage}/${totalPages} | /registry list status:${listFilterCommand(filter)}`.trim() })
     .setTimestamp(new Date());
 
   const components = [buildListFilterButtons(filter)];
@@ -1087,7 +1087,7 @@ async function handleRegisterCommandUnlocked(msg, options) {
   const requestedGamertag = parseRegisterCommand(msg.content);
   if (requestedGamertag === null) return false;
   if (!requestedGamertag || !isValidGamertag(requestedGamertag)) {
-    await replyNoPing(msg, 'Format: `!register <gamertag_minecraft>` (3-32 huruf/angka/underscore/spasi).');
+    await replyNoPing(msg, 'Gunakan `/register` dengan gamertag 3-32 huruf/angka/underscore/spasi.');
     return true;
   }
   const gamertag = canonicalGamertagFromBridge(options.bridge, requestedGamertag);
@@ -1112,8 +1112,8 @@ async function handleRegisterCommandUnlocked(msg, options) {
         msg,
         [
           `Akun kamu sudah legal sebagai \`${currentGamertag || '-'}\`.`,
-          'Demi keamanan akun dan wallet, ganti gamertag legal tidak bisa dilakukan dengan `!reg` lagi.',
-          'Minta admin/interviewer review manual, lalu admin bisa pakai `!setreg @user <gamertag>` jika memang sah.',
+          'Demi keamanan akun dan wallet, user legal tidak dapat mengganti gamertag sendiri.',
+          'Minta admin/interviewer melakukan review lalu gunakan `/registry set-gamertag` jika memang sah.',
         ].join('\n')
       );
       return true;
@@ -1161,7 +1161,7 @@ async function handleRegisterCommandUnlocked(msg, options) {
       msg,
       activeSession.channelId
         ? `Kamu sudah punya interview aktif: ${channelMention(activeSession.channelId)} (\`${activeSession.interviewId}\`).`
-        : `Interview \`${activeSession.interviewId}\` sedang dibuat. Tunggu sebentar dan jangan kirim \`!reg\` lagi.`
+        : `Interview \`${activeSession.interviewId}\` sedang dibuat. Tunggu sebentar dan jangan jalankan \`/register\` lagi.`
     );
     return true;
   }
@@ -1291,7 +1291,7 @@ async function handleRegisterCommand(msg, options) {
   const userId = String(msg?.author?.id || '').trim();
   if (!userId) return handleRegisterCommandUnlocked(msg, options);
   if (registerProvisioningUsers.has(userId)) {
-    await replyNoPing(msg, 'Register kamu sedang diproses. Tunggu channel interview selesai dibuat; jangan kirim `!reg` berulang kali.');
+    await replyNoPing(msg, 'Register kamu sedang diproses. Tunggu channel interview selesai dibuat; jangan jalankan `/register` berulang kali.');
     return true;
   }
   registerProvisioningUsers.add(userId);
@@ -1307,11 +1307,11 @@ async function handleSetRegisterGamertagCommand(msg, options) {
   if (!parsed) return false;
 
   if (!await isInterviewAdmin(msg)) {
-    await replyNoPing(msg, 'Command `!setreg` khusus admin/interviewer.');
+    await replyNoPing(msg, 'Command `/registry set-gamertag` khusus admin/interviewer.');
     return true;
   }
   if (!parsed.userId) {
-    await replyNoPing(msg, 'Format: `!setreg @user <gamertag_minecraft>`.');
+    await replyNoPing(msg, 'Gunakan `/registry set-gamertag` dengan option `user` dan `gamertag`.');
     return true;
   }
   if (!parsed.gamertag || !isValidGamertag(parsed.gamertag)) {
@@ -1584,7 +1584,7 @@ async function handleInterviewAdminCommand(msg, options) {
   }
   let target = await resolveInterviewCommandTarget(msg, parsed, options);
   if (!target.userId) {
-    await replyNoPing(msg, `Applicant tidak dapat dikenali. Gunakan \`!${parsed.action}${parsed.force ? ' --force' : ''} @user\`.`);
+    await replyNoPing(msg, `Applicant tidak dapat dikenali. Gunakan \`/interview ${parsed.action}\` dengan option \`user\`${parsed.force ? ' dan `force:true`' : ''}.`);
     return true;
   }
   let entry = target.entry;
@@ -1598,7 +1598,7 @@ async function handleInterviewAdminCommand(msg, options) {
   if (parsed.action === 'accept' && parsed.force) {
     const forcedGamertag = canonicalGamertagFromBridge(options.bridge, parsed.detail || entry?.gamertag || '');
     if (!isValidGamertag(forcedGamertag)) {
-      await replyNoPing(msg, 'Data gamertag belum ada. Gunakan `!accept --force @user gamertag`; gamertag harus 3-32 huruf/angka/underscore/spasi.');
+      await replyNoPing(msg, 'Data gamertag belum ada. Gunakan `/interview accept` dengan `force:true`, `user`, dan `gamertag`.');
       return true;
     }
     const duplicate = options.registerStore.findUserByGamertag?.(forcedGamertag, target.userId);
@@ -1608,7 +1608,7 @@ async function handleInterviewAdminCommand(msg, options) {
     }
   }
   if (parsed.force && parsed.action === 'reject' && !entry && !isValidGamertag(target.session?.gamertag || '')) {
-    await replyNoPing(msg, 'Force reject membutuhkan record atau session dengan gamertag yang valid. Gunakan `!relink-interview @user gamertag` terlebih dahulu.');
+    await replyNoPing(msg, 'Force reject membutuhkan record atau session valid. Gunakan `/interview relink` terlebih dahulu.');
     return true;
   }
   const canCloseCurrentTicket = isInterviewTicketChannel(msg.channel) &&
@@ -1632,7 +1632,7 @@ async function handleInterviewAdminCommand(msg, options) {
       if (!entry) {
         await replyNoPing(
           msg,
-          `Data <@${target.userId}> tidak dapat direkonstruksi. Untuk recovery accept gunakan \`!accept --force @user gamertag\`.`
+          `Data <@${target.userId}> tidak dapat direkonstruksi. Gunakan \`/interview accept\` dengan \`force:true\` dan gamertag.`
         );
         return true;
       }
@@ -1650,7 +1650,7 @@ async function handleInterviewAdminCommand(msg, options) {
 
     let session = ensureCommandSession(msg, target, entry, options, parsed.force);
     if (!session && !parsed.force) {
-      await replyNoPing(msg, 'Session interview aktif tidak ditemukan. Jalankan `!interview-doctor`, atau gunakan mode `--force` setelah target diverifikasi.');
+      await replyNoPing(msg, 'Session interview aktif tidak ditemukan. Jalankan `/interview doctor`, atau gunakan `force:true` setelah target diverifikasi.');
       return true;
     }
     if (session && !parsed.force && !['RESERVED', 'OPEN'].includes(session.lifecycleStatus)) {
@@ -1703,7 +1703,7 @@ async function handleInterviewAdminCommand(msg, options) {
     }
 
     if (!parsed.force && entry?.status === 'pending') {
-      await replyNoPing(msg, 'Interview masih PENDING. Putuskan `!accept` atau `!reject` dahulu, atau gunakan `!close --force` untuk menutup tanpa keputusan.');
+      await replyNoPing(msg, 'Interview masih PENDING. Gunakan `/interview accept` atau `/interview reject`, atau `/interview close force:true`.');
       return true;
     }
     if (entry) await options.registerStore.closeInterview(target.userId, actor);
@@ -2123,7 +2123,7 @@ async function handleInterviewDoctorCommand(msg, options) {
   if (apply) {
     const dryRun = interviewDoctorDryRuns.get(msg.guild.id);
     if (!dryRun || Date.now() - dryRun.at > INTERVIEW_DRY_RUN_VALID_MS) {
-      await replyNoPing(msg, 'Jalankan `!repair-interviews --dry-run` terlebih dahulu. Dry-run berlaku 30 menit sebelum `--apply`.');
+      await replyNoPing(msg, 'Jalankan `/interview repair mode:dry-run` terlebih dahulu. Dry-run berlaku 30 menit sebelum mode apply.');
       return true;
     }
   }
@@ -2162,7 +2162,7 @@ async function handleInterviewStatusAdminCommand(msg, options) {
   const linked = options.registerStore.findUserByInterviewChannel?.(msg.channelId);
   const userId = match[1] || linked?.userId || options.database?.getInterviewSession?.(msg.channelId, { by: 'channel' })?.userId;
   if (!userId) {
-    await replyNoPing(msg, 'User tidak ditemukan. Gunakan `!interview-status @user`.');
+    await replyNoPing(msg, 'User tidak ditemukan. Gunakan `/interview status user:<user>`.');
     return true;
   }
   const entry = options.registerStore.getUser(userId);
@@ -2185,7 +2185,7 @@ async function handleRelinkInterviewCommand(msg, options) {
     return true;
   }
   if (!isInterviewTicketChannel(msg.channel)) {
-    await replyNoPing(msg, 'Jalankan `!relink-interview` di dalam channel interview yang ingin dihubungkan.');
+    await replyNoPing(msg, 'Jalankan `/interview relink` di dalam channel interview yang ingin dihubungkan.');
     return true;
   }
   await ensureRegisterStore(options.registerStore, msg.client);
@@ -2194,7 +2194,7 @@ async function handleRelinkInterviewCommand(msg, options) {
   const gamertag = normalizeGamertag(match[2] || entry?.gamertag || '');
   if (!entry) {
     if (!isValidGamertag(gamertag)) {
-      await replyNoPing(msg, 'Record tidak ada. Format recovery: `!relink-interview @user gamertag`.');
+      await replyNoPing(msg, 'Record tidak ada. Isi option `user` dan `gamertag` pada `/interview relink`.');
       return true;
     }
     const duplicate = options.registerStore.findUserByGamertag?.(gamertag, userId);
@@ -2370,7 +2370,7 @@ async function handleArchiveInterviewsCommand(msg) {
       `Sisa backlog di Interview Area: ${result.remaining}`,
       result.createdCategories.length ? `Category baru: ${result.createdCategories.join(', ')}` : '',
       result.failedLines.length ? `Gagal:\n${result.failedLines.slice(0, 5).join('\n')}` : '',
-      result.remaining > 0 ? 'Jalankan lagi `!archive-interviews` untuk lanjut batch berikutnya.' : '',
+      result.remaining > 0 ? 'Jalankan lagi `/interview archive` untuk lanjut batch berikutnya.' : '',
     ].filter(Boolean).join('\n')
   );
   return true;
@@ -3033,7 +3033,7 @@ async function resolveInterviewButtonContext(interaction, parsed, registerStore,
   const linked = channelId ? registerStore.findUserByInterviewChannel?.(channelId) : null;
   const userId = String(session?.userId || linked?.userId || parsed.userId || '').trim();
   if (!userId) {
-    return { error: 'Applicant tombol tidak dapat dikenali. Gunakan `!relink-interview @user [gamertag]`.' };
+    return { error: 'Applicant tombol tidak dapat dikenali. Gunakan `/interview relink` dengan option user dan gamertag.' };
   }
 
   let entry = registerStore.getUser(userId) || null;
@@ -3044,7 +3044,7 @@ async function resolveInterviewButtonContext(interaction, parsed, registerStore,
   if (!entry) {
     if (!isValidGamertag(gamertag)) {
       return {
-        error: `Data interview <@${userId}> tidak lengkap dan gamertag tidak dapat dipulihkan dari session/panel. Gunakan \`!accept --force @user gamertag\`.`,
+        error: `Data interview <@${userId}> tidak lengkap. Gunakan \`/interview accept\` dengan \`force:true\`, user, dan gamertag.`,
       };
     }
     const duplicate = registerStore.findUserByGamertag?.(gamertag, userId);
@@ -3104,7 +3104,7 @@ async function approveInterview(interaction, registerStore, entryUserId, options
     tag: interaction.user?.tag || interaction.user?.username || '',
   });
   if (!entry) {
-    await replyInterviewInteraction(interaction, 'Data interview tidak ditemukan. Gunakan `!accept --force @user [gamertag]` untuk recovery.');
+    await replyInterviewInteraction(interaction, 'Data interview tidak ditemukan. Gunakan `/interview accept` dengan `force:true` untuk recovery.');
     return true;
   }
   if (member) {
@@ -3143,7 +3143,7 @@ async function rejectInterview(interaction, registerStore, entryUserId, options)
     tag: interaction.user?.tag || interaction.user?.username || '',
   });
   if (!entry) {
-    await replyInterviewInteraction(interaction, 'Data interview tidak ditemukan. Gunakan `!reject --force @user [alasan]` untuk recovery.');
+    await replyInterviewInteraction(interaction, 'Data interview tidak ditemukan. Gunakan `/interview reject` dengan `force:true` untuk recovery.');
     return true;
   }
   if (member) {
@@ -3177,7 +3177,7 @@ async function closeInterview(interaction, registerStore, entryUserId, options =
     tag: interaction.user?.tag || interaction.user?.username || '',
   });
   if (!entry) {
-    await replyInterviewInteraction(interaction, 'Data interview tidak ditemukan. Gunakan `!close --force @user` untuk recovery.');
+    await replyInterviewInteraction(interaction, 'Data interview tidak ditemukan. Gunakan `/interview close` dengan `force:true` untuk recovery.');
     return true;
   }
 

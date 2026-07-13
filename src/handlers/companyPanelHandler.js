@@ -103,7 +103,7 @@ function buildPanelEmbed(snapshot, session, disabled = false) {
     .setTitle(`${overview.companyTicker || 'Company'} — Company Control`)
     .setDescription(
       disabled
-        ? 'Sesi panel sudah berakhir. Jalankan `!perusahaan` untuk membuka panel baru.'
+        ? 'Sesi panel sudah berakhir. Jalankan `/perusahaan` untuk membuka panel baru.'
         : 'Data dan permission selalu divalidasi ulang oleh behavior pack Minecraft.'
     )
     .addFields(

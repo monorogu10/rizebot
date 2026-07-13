@@ -127,7 +127,7 @@ function createServerStatusNotifier({ client, channelId }) {
           { name: 'Versi', value: String(law.version || 1), inline: true },
           { name: 'Diterbitkan Oleh', value: String(adminTag).slice(0, 1024), inline: false }
         )
-        .setFooter({ text: 'Gunakan !uu untuk membaca isi lengkap.' })
+        .setFooter({ text: 'Gunakan /uu lihat untuk membaca isi lengkap.' })
         .setTimestamp()
     );
   }
@@ -142,7 +142,7 @@ function createServerStatusNotifier({ client, channelId }) {
           { name: 'Catatan Perubahan', value: String(law.changeNote || '-').slice(0, 1024), inline: false },
           { name: 'Direvisi Oleh', value: String(adminTag).slice(0, 1024), inline: false }
         )
-        .setFooter({ text: 'Riwayat versi tetap tersimpan. Gunakan !uu untuk membaca versi terbaru.' })
+        .setFooter({ text: 'Riwayat versi tetap tersimpan. Gunakan /uu lihat untuk membaca versi terbaru.' })
         .setTimestamp()
     );
   }

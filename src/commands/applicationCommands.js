@@ -10,7 +10,25 @@ const APPLICATION_COMMAND_NAMES = new Set([
   'player',
   'interview',
   'registry',
+  'help',
+  'verify',
+  'member',
+  'rules',
+  'shop',
+  'perusahaan',
+  'organisasi',
+  'tf',
+  'bansos',
+  'geonrate',
+  'uu',
+  'moderasi',
+  'minecraft',
+  'topup',
 ]);
+
+function isLegacyPrefixCommand(content) {
+  return /^!\s*[a-z][a-z0-9_-]*(?:\s|$)/i.test(String(content || '').trim());
+}
 
 function buildApplicationCommands() {
   return [
@@ -129,6 +147,24 @@ function buildApplicationCommands() {
           .setMinLength(3)
           .setMaxLength(32)
           .setAutocomplete(true)
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName('compile')
+        .setDescription('Compile dan bersihkan channel interview lama')
+        .addIntegerOption(option => option
+          .setName('jumlah')
+          .setDescription('Jumlah channel; kosong berarti semua')
+          .setMinValue(1)
+          .setMaxValue(100)
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName('archive')
+        .setDescription('Arsipkan backlog interview yang sudah ditutup')
+        .addIntegerOption(option => option
+          .setName('jumlah')
+          .setDescription('Maksimal channel yang diarsipkan')
+          .setMinValue(1)
+          .setMaxValue(100)
           .setRequired(false))),
 
     new SlashCommandBuilder()
@@ -155,7 +191,352 @@ function buildApplicationCommands() {
           .setRequired(false)))
       .addSubcommand(subcommand => subcommand
         .setName('sync')
-        .setDescription('Sinkronkan status, role, dan nickname registry')),
+        .setDescription('Sinkronkan status, role, dan nickname registry'))
+      .addSubcommand(subcommand => subcommand
+        .setName('set-gamertag')
+        .setDescription('Ubah gamertag legal setelah review admin')
+        .addUserOption(option => option
+          .setName('user')
+          .setDescription('User yang gamertag-nya akan diubah')
+          .setRequired(true))
+        .addStringOption(option => option
+          .setName('gamertag')
+          .setDescription('Gamertag Minecraft yang benar')
+          .setMinLength(3)
+          .setMaxLength(32)
+          .setAutocomplete(true)
+          .setRequired(true))),
+
+    new SlashCommandBuilder()
+      .setName('help')
+      .setDescription('Lihat seluruh command Rizebot yang tersedia')
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('verify')
+      .setDescription('Buat kode untuk verifikasi akun Minecraft')
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('member')
+      .setDescription('Lihat jumlah member Discord saat ini')
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('rules')
+      .setDescription('Lihat item dan entity terlarang di server')
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('shop')
+      .setDescription('Lihat harga shop atau ubah harga sebagai admin')
+      .setDMPermission(false)
+      .addStringOption(option => option
+        .setName('item')
+        .setDescription('Index atau nama item; kosong untuk melihat daftar')
+        .setMaxLength(100)
+        .setRequired(false))
+      .addIntegerOption(option => option
+        .setName('harga')
+        .setDescription('Harga Geon baru; wajib jika item diisi')
+        .setMinValue(1)
+        .setMaxValue(100_000_000)
+        .setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('perusahaan')
+      .setDescription('Buka Company Control Minecraft')
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('organisasi')
+      .setDescription('Lihat daftar atau detail organisasi legal')
+      .setDMPermission(false)
+      .addStringOption(option => option
+        .setName('nama')
+        .setDescription('Nama organisasi; kosong untuk melihat daftar')
+        .setMaxLength(100)
+        .setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('tf')
+      .setDescription('Transfer Geon ke player atau semua player online')
+      .setDMPermission(false)
+      .addSubcommand(subcommand => subcommand
+        .setName('player')
+        .setDescription('Transfer ke gamertag Minecraft')
+        .addStringOption(option => option
+          .setName('nama')
+          .setDescription('Gamertag target')
+          .setMinLength(2)
+          .setMaxLength(80)
+          .setAutocomplete(true)
+          .setRequired(true))
+        .addIntegerOption(option => option
+          .setName('jumlah')
+          .setDescription('Jumlah Geon')
+          .setMinValue(1)
+          .setMaxValue(100_000_000)
+          .setRequired(true))
+        .addStringOption(option => option
+          .setName('alasan')
+          .setDescription('Alasan transfer opsional')
+          .setMaxLength(180)
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName('user')
+        .setDescription('Transfer ke akun Discord yang sudah terhubung')
+        .addUserOption(option => option
+          .setName('target')
+          .setDescription('User Discord target')
+          .setRequired(true))
+        .addIntegerOption(option => option
+          .setName('jumlah')
+          .setDescription('Jumlah Geon')
+          .setMinValue(1)
+          .setMaxValue(100_000_000)
+          .setRequired(true))
+        .addStringOption(option => option
+          .setName('alasan')
+          .setDescription('Alasan transfer opsional')
+          .setMaxLength(180)
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName('all')
+        .setDescription('Transfer per orang ke semua player online')
+        .addIntegerOption(option => option
+          .setName('jumlah')
+          .setDescription('Jumlah Geon per player')
+          .setMinValue(1)
+          .setMaxValue(100_000_000)
+          .setRequired(true))),
+
+    new SlashCommandBuilder()
+      .setName('bansos')
+      .setDescription('Buat bansos Geon untuk diklaim di Minecraft')
+      .setDMPermission(false)
+      .addIntegerOption(option => option
+        .setName('geon')
+        .setDescription('Geon per penerima')
+        .setMinValue(1)
+        .setMaxValue(100_000_000)
+        .setRequired(true))
+      .addIntegerOption(option => option
+        .setName('orang')
+        .setDescription('Jumlah maksimal penerima')
+        .setMinValue(1)
+        .setMaxValue(100)
+        .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('geonrate')
+      .setDescription('Hitung estimasi Geon dari nominal rupiah')
+      .setDMPermission(false)
+      .addIntegerOption(option => option
+        .setName('rupiah')
+        .setDescription('Nominal rupiah')
+        .setMinValue(1)
+        .setMaxValue(2_000_000_000)
+        .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('uu')
+      .setDescription('Baca dan kelola Undang-Undang Ethergeon')
+      .setDMPermission(false)
+      .addSubcommand(subcommand => subcommand
+        .setName('lihat')
+        .setDescription('Lihat daftar atau cari Undang-Undang')
+        .addStringOption(option => option
+          .setName('pencarian')
+          .setDescription('Nomor, kode, judul, atau kata pencarian')
+          .setMaxLength(160)
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName('help')
+        .setDescription('Lihat tutorial Undang-Undang'))
+      .addSubcommand(subcommand => subcommand
+        .setName('create')
+        .setDescription('Buat draft Undang-Undang baru')
+        .addStringOption(option => option
+          .setName('catatan')
+          .setDescription('Isi awal Pasal 1 Ayat (1)')
+          .setMaxLength(1800)
+          .setRequired(true)))
+      .addSubcommand(subcommand => subcommand
+        .setName('draft')
+        .setDescription('Buka kembali draft atau revisi yang tersimpan')
+        .addStringOption(option => option
+          .setName('id')
+          .setDescription('ID draft atau kode UU; kosong untuk draft terakhir')
+          .setMaxLength(80)
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName('revise')
+        .setDescription('Mulai revisi Undang-Undang')
+        .addStringOption(option => option
+          .setName('id')
+          .setDescription('Nomor atau kode UU; kosong untuk memilih dari panel')
+          .setMaxLength(80)
+          .setRequired(false))
+        .addStringOption(option => option
+          .setName('alasan')
+          .setDescription('Alasan revisi opsional')
+          .setMaxLength(500)
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName('cabut')
+        .setDescription('Cabut Undang-Undang tanpa menghapus arsip')
+        .addStringOption(option => option
+          .setName('id')
+          .setDescription('Nomor atau kode UU')
+          .setMaxLength(80)
+          .setRequired(true))
+        .addStringOption(option => option
+          .setName('alasan')
+          .setDescription('Alasan pencabutan')
+          .setMaxLength(500)
+          .setRequired(true))),
+
+    new SlashCommandBuilder()
+      .setName('moderasi')
+      .setDescription('Petisi timeout dan pembatalan timeout')
+      .setDMPermission(false)
+      .addSubcommand(subcommand => subcommand
+        .setName('timeout')
+        .setDescription('Buat petisi timeout untuk user')
+        .addUserOption(option => option
+          .setName('user')
+          .setDescription('User target petisi')
+          .setRequired(true)))
+      .addSubcommand(subcommand => subcommand
+        .setName('freedom')
+        .setDescription('Batalkan timeout aktif sebagai admin')
+        .addUserOption(option => option
+          .setName('user')
+          .setDescription('User yang timeout-nya dibatalkan')
+          .setRequired(true))),
+
+    new SlashCommandBuilder()
+      .setName('minecraft')
+      .setDescription('Command administrasi Minecraft bridge')
+      .setDMPermission(false)
+      .addSubcommand(subcommand => subcommand.setName('status').setDescription('Lihat status bridge Minecraft'))
+      .addSubcommand(subcommand => subcommand.setName('ping').setDescription('Tes koneksi behavior pack'))
+      .addSubcommand(subcommand => subcommand.setName('online').setDescription('Lihat player yang sedang online'))
+      .addSubcommand(subcommand => subcommand
+        .setName('chat')
+        .setDescription('Kirim pesan ke chat Minecraft')
+        .addStringOption(option => option
+          .setName('pesan')
+          .setDescription('Pesan maksimal 240 karakter')
+          .setMaxLength(240)
+          .setRequired(true)))
+      .addSubcommand(subcommand => subcommand
+        .setName('search')
+        .setDescription('Cari player dari data server')
+        .addStringOption(option => option
+          .setName('nama')
+          .setDescription('Nama player')
+          .setMinLength(2)
+          .setMaxLength(80)
+          .setAutocomplete(true)
+          .setRequired(true)))
+      .addSubcommand(subcommand => subcommand
+        .setName('saldo')
+        .setDescription('Lihat saldo player')
+        .addStringOption(option => option
+          .setName('nama')
+          .setDescription('Nama player')
+          .setMinLength(2)
+          .setMaxLength(80)
+          .setAutocomplete(true)
+          .setRequired(true)))
+      .addSubcommand(subcommand => subcommand
+        .setName('migrasi')
+        .setDescription('Preview migrasi data gamertag lama ke baru')
+        .addStringOption(option => option
+          .setName('lama')
+          .setDescription('Gamertag lama')
+          .setMinLength(2)
+          .setMaxLength(80)
+          .setRequired(true))
+        .addStringOption(option => option
+          .setName('baru')
+          .setDescription('Gamertag baru')
+          .setMinLength(2)
+          .setMaxLength(80)
+          .setRequired(true)))
+      .addSubcommand(subcommand => subcommand
+        .setName('bonus')
+        .setDescription('Berikan bonus Geon sebagai admin utama')
+        .addStringOption(option => option
+          .setName('nama')
+          .setDescription('Gamertag target')
+          .setMinLength(2)
+          .setMaxLength(80)
+          .setAutocomplete(true)
+          .setRequired(true))
+        .addIntegerOption(option => option
+          .setName('jumlah')
+          .setDescription('Jumlah bonus Geon')
+          .setMinValue(1)
+          .setMaxValue(100_000_000)
+          .setRequired(true))),
+
+    new SlashCommandBuilder()
+      .setName('topup')
+      .setDescription('Command topup Geon untuk admin')
+      .setDMPermission(false)
+      .addSubcommand(subcommand => subcommand.setName('help').setDescription('Lihat bantuan topup'))
+      .addSubcommand(subcommand => subcommand
+        .setName('kirim')
+        .setDescription('Kirim topup Geon ke player')
+        .addStringOption(option => option
+          .setName('nama')
+          .setDescription('Gamertag atau key target')
+          .setMinLength(2)
+          .setMaxLength(80)
+          .setAutocomplete(true)
+          .setRequired(true))
+        .addIntegerOption(option => option
+          .setName('geon')
+          .setDescription('Jumlah Geon')
+          .setMinValue(1)
+          .setMaxValue(100_000_000)
+          .setRequired(true))
+        .addIntegerOption(option => option
+          .setName('rupiah')
+          .setDescription('Nilai rupiah transaksi')
+          .setMinValue(1)
+          .setMaxValue(2_000_000_000)
+          .setRequired(true)))
+      .addSubcommand(subcommand => subcommand
+        .setName('kupon')
+        .setDescription('Generate satu atau beberapa kupon topup')
+        .addIntegerOption(option => option
+          .setName('geon')
+          .setDescription('Geon per kupon')
+          .setMinValue(1)
+          .setMaxValue(100_000_000)
+          .setRequired(true))
+        .addIntegerOption(option => option
+          .setName('rupiah')
+          .setDescription('Nilai rupiah per kupon')
+          .setMinValue(1)
+          .setMaxValue(2_000_000_000)
+          .setRequired(true))
+        .addIntegerOption(option => option
+          .setName('jumlah')
+          .setDescription('Jumlah kupon, default 1')
+          .setMinValue(1)
+          .setMaxValue(50)
+          .setRequired(false))
+        .addIntegerOption(option => option
+          .setName('hari')
+          .setDescription('Masa berlaku hari, default 30')
+          .setMinValue(1)
+          .setMaxValue(365)
+          .setRequired(false))),
   ];
 }
 
@@ -197,6 +578,11 @@ function mention(user) {
 
 function commandToLegacyContent(interaction) {
   const options = interaction.options;
+  const commandName = interaction.commandName;
+  if (commandName === 'help') return '!help';
+  if (commandName === 'verify') return '!verifyme';
+  if (commandName === 'member') return '!member';
+  if (commandName === 'rules') return '!rules';
   if (interaction.commandName === 'register') {
     return `!reg ${options.getString('gamertag', true)}`;
   }
@@ -210,15 +596,88 @@ function commandToLegacyContent(interaction) {
   if (interaction.commandName === 'registry') {
     const subcommand = options.getSubcommand(true);
     if (subcommand === 'sync') return '!sync-reg';
+    if (subcommand === 'set-gamertag') {
+      return `!setreg ${mention(options.getUser('user', true))} ${options.getString('gamertag', true)}`;
+    }
     const status = options.getString('status') || 'all';
     const page = options.getInteger('halaman') || 1;
     return `!list ${status} ${page}`;
+  }
+  if (interaction.commandName === 'shop') {
+    const item = options.getString('item') || '';
+    const price = options.getInteger('harga');
+    return item || price ? `!shopsetting ${item}${price ? ` ${price}` : ''}` : '!shop';
+  }
+  if (interaction.commandName === 'perusahaan') return '!perusahaan';
+  if (interaction.commandName === 'organisasi') {
+    const name = options.getString('nama') || '';
+    return `!organisasi${name ? ` ${name}` : ''}`;
+  }
+  if (interaction.commandName === 'tf') {
+    const subcommand = options.getSubcommand(true);
+    const amount = options.getInteger('jumlah');
+    if (subcommand === 'all') return `!tf --all ${amount}`;
+    const reason = options.getString('alasan') || '';
+    const target = subcommand === 'user'
+      ? mention(options.getUser('target', true))
+      : options.getString('nama', true);
+    return `!tf ${target} ${amount}${reason ? ` ${reason}` : ''}`;
+  }
+  if (interaction.commandName === 'bansos') {
+    return `!bansos ${options.getInteger('geon')} ${options.getInteger('orang')}`;
+  }
+  if (interaction.commandName === 'geonrate') return `!geonrate ${options.getInteger('rupiah')}`;
+  if (interaction.commandName === 'uu') {
+    const subcommand = options.getSubcommand(true);
+    if (subcommand === 'help') return '!uu-help';
+    if (subcommand === 'lihat') {
+      const query = options.getString('pencarian') || '';
+      return `!uu${query ? ` ${query}` : ''}`;
+    }
+    if (subcommand === 'create') return `!create-uu ${options.getString('catatan', true)}`;
+    if (subcommand === 'draft') {
+      const id = options.getString('id') || '';
+      return `!draft-uu${id ? ` ${id}` : ''}`;
+    }
+    if (subcommand === 'revise') {
+      const id = options.getString('id') || '';
+      const reason = options.getString('alasan') || '';
+      return `!revise-uu${id || reason ? ` ${id}${reason ? ` | ${reason}` : ''}` : ''}`;
+    }
+    return `!cabut-uu ${options.getString('id', true)} | ${options.getString('alasan', true)}`;
+  }
+  if (interaction.commandName === 'moderasi') {
+    const subcommand = options.getSubcommand(true);
+    return `!${subcommand} ${mention(options.getUser('user', true))}`;
+  }
+  if (interaction.commandName === 'minecraft') {
+    const subcommand = options.getSubcommand(true);
+    if (subcommand === 'status') return '!mcstatus';
+    if (subcommand === 'ping') return '!mcping';
+    if (subcommand === 'online') return '!online';
+    if (subcommand === 'chat') return `!p ${options.getString('pesan', true)}`;
+    if (subcommand === 'search') return `!srcpl ${options.getString('nama', true)}`;
+    if (subcommand === 'saldo') return `!geon ${options.getString('nama', true)}`;
+    if (subcommand === 'migrasi') {
+      return `!migrasi ${options.getString('lama', true)} -> ${options.getString('baru', true)}`;
+    }
+    return `!bonus ${options.getString('nama', true)} ${options.getInteger('jumlah')}`;
+  }
+  if (interaction.commandName === 'topup') {
+    const subcommand = options.getSubcommand(true);
+    if (subcommand === 'help') return '!topup-help';
+    if (subcommand === 'kirim') {
+      return `!tu ${options.getString('nama', true)} ${options.getInteger('geon')} ${options.getInteger('rupiah')}`;
+    }
+    return `!gnrtkpn ${options.getInteger('geon')} ${options.getInteger('rupiah')} ${options.getInteger('jumlah') || 1} ${options.getInteger('hari') || 30}`;
   }
   if (interaction.commandName !== 'interview') return '';
 
   const subcommand = options.getSubcommand(true);
   if (subcommand === 'doctor') return '!interview-doctor';
   if (subcommand === 'repair') return `!repair-interviews --${options.getString('mode', true)}`;
+  if (subcommand === 'compile') return `!compile ${options.getInteger('jumlah') || 'all'}`;
+  if (subcommand === 'archive') return `!archive-interviews ${options.getInteger('jumlah') || 25}`;
   if (subcommand === 'status') {
     const target = options.getUser('user');
     return `!interview-status${target ? ` ${mention(target)}` : ''}`;
@@ -254,6 +713,22 @@ function normalizeReplyPayload(payload) {
   return normalized;
 }
 
+function createInteractionMentions(interaction) {
+  const users = [];
+  for (const optionName of ['user', 'target']) {
+    const user = interaction.options?.getUser?.(optionName) || null;
+    if (user?.id && !users.some(item => item.id === user.id)) users.push(user);
+  }
+  return {
+    users: {
+      first: () => users[0] || null,
+      get: userId => users.find(user => String(user.id) === String(userId)) || null,
+      has: userId => users.some(user => String(user.id) === String(userId)),
+      values: () => users.values(),
+    },
+  };
+}
+
 async function resolveInteractionMember(interaction) {
   if (interaction.member?.roles?.cache && interaction.member?.permissions?.has) return interaction.member;
   if (!interaction.guild?.members?.fetch) return interaction.member || null;
@@ -273,8 +748,14 @@ function createInteractionMessageAdapter(interaction, content, { ephemeral = fal
     channel: interaction.channel,
     channelId: interaction.channelId,
     client: interaction.client,
+    mentions: createInteractionMentions(interaction),
+    interaction,
+    fromApplicationCommand: true,
     createdAt: interaction.createdAt,
     createdTimestamp: interaction.createdTimestamp,
+    get replyCount() {
+      return replyCount;
+    },
     async reply(payload) {
       const normalized = normalizeReplyPayload(payload);
       let sent;
@@ -302,6 +783,7 @@ function createInteractionMessageAdapter(interaction, content, { ephemeral = fal
 function slashResponseIsEphemeral(interaction) {
   if (interaction.commandName === 'interview' || interaction.commandName === 'registry') return true;
   if (interaction.commandName === 'register') return true;
+  if (interaction.commandName === 'moderasi') return true;
   return false;
 }
 
@@ -343,7 +825,7 @@ function autocompleteChoices(interaction, bridge, registerStore) {
     .map(value => ({ name: value.slice(0, 100), value: value.slice(0, 100) }));
 }
 
-function createApplicationCommandHandler({ registerHandler, minecraftBridgeHandler, bridge, registerStore }) {
+function createApplicationCommandHandler({ commandHandler, registerHandler, minecraftBridgeHandler, bridge, registerStore }) {
   return async function handleApplicationCommand(interaction) {
     if (interaction?.isAutocomplete?.()) {
       if (!APPLICATION_COMMAND_NAMES.has(interaction.commandName)) return false;
@@ -368,10 +850,16 @@ function createApplicationCommandHandler({ registerHandler, minecraftBridgeHandl
 
     await interaction.deferReply(ephemeral ? { flags: MessageFlags.Ephemeral } : {});
 
-    const handler = interaction.commandName === 'player' ? minecraftBridgeHandler : registerHandler;
+    const handler = commandHandler || (interaction.commandName === 'player' ? minecraftBridgeHandler : registerHandler);
+    if (typeof handler !== 'function') {
+      await adapter.reply('Handler slash command belum tersedia.').catch(() => null);
+      return true;
+    }
     const handled = await handler(adapter);
     if (!handled) {
       await adapter.reply('Slash command dikenali, tetapi handler tidak dapat memprosesnya.').catch(() => null);
+    } else if (adapter.replyCount === 0) {
+      await adapter.reply('Command berhasil diproses.').catch(() => null);
     }
     return true;
   };
@@ -383,5 +871,6 @@ module.exports = {
   commandToLegacyContent,
   createApplicationCommandHandler,
   createInteractionMessageAdapter,
+  isLegacyPrefixCommand,
   registerApplicationCommands,
 };

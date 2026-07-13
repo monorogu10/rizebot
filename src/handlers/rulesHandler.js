@@ -137,7 +137,7 @@ function createRulesHandler({ bridge, database }) {
     const collector = loading.createMessageComponentCollector({ time: COLLECTOR_MS });
     collector.on('collect', async interaction => {
       if (interaction.user.id !== msg.author.id) {
-        await interaction.reply({ content: 'Panel ini hanya bisa dikendalikan oleh user yang menjalankan `!rules`.', ephemeral: true });
+        await interaction.reply({ content: 'Panel ini hanya bisa dikendalikan oleh user yang menjalankan `/rules`.', ephemeral: true });
         return;
       }
       if (interaction.customId === `rules_cat_${session}`) {

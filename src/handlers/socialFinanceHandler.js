@@ -99,8 +99,8 @@ function createSocialFinanceHandler({ bridge, registerStore }) {
               .setColor(0xe74c3c)
               .setTitle('Format Bansos')
               .setDescription([
-                'Gunakan: `!bansos <geon_per_orang> <jumlah_orang>`',
-                'Contoh: `!bansos 500 20`',
+                'Gunakan `/bansos` dengan option `geon` dan `orang`.',
+                'Contoh: `geon:500 orang:20`.',
                 `Maksimal **${BANSOS_MAX_RECIPIENTS} orang** dan total **${formatNumber(FINANCE_TRANSFER_MAX)} Geon**.`,
               ].join('\n')),
           ],
@@ -234,7 +234,7 @@ function createSocialFinanceHandler({ bridge, registerStore }) {
             new EmbedBuilder()
               .setColor(0xe74c3c)
               .setTitle('Format Transfer Massal')
-              .setDescription('Gunakan: `!tf --all <geon_per_player>`\nContoh: `!tf --all 1000`'),
+              .setDescription('Gunakan `/tf all jumlah:<geon_per_player>`.\nContoh: `jumlah:1000`.'),
           ],
         })).catch(() => {});
         return true;

@@ -201,7 +201,7 @@ function createLawHandler({ database, serverStatusNotifier }) {
     const collector = panel.createMessageComponentCollector({ time: PUBLIC_COLLECTOR_MS });
     collector.on('collect', async interaction => {
       if (interaction.user.id !== msg.author.id) {
-        await interaction.reply({ content: 'Panel `!uu` ini hanya bisa dikendalikan oleh pembuat command.', ephemeral: true });
+        await interaction.reply({ content: 'Panel `/uu lihat` ini hanya bisa dikendalikan oleh pembuat command.', ephemeral: true });
         return;
       }
       if (interaction.customId === `uu_select_${session}`) {
@@ -253,38 +253,38 @@ function createLawHandler({ database, serverStatusNotifier }) {
           {
             name: 'Membaca UU (semua player)',
             value: [
-              '`!uu` — buka daftar UU.',
-              '`!uu <nomor/kode/kata>` — cari dan buka UU tertentu.',
-              '`!uu-help` — buka tutorial ini.',
+              '`/uu lihat` — buka daftar UU.',
+              '`/uu lihat pencarian:<nomor/kode/kata>` — cari dan buka UU tertentu.',
+              '`/uu help` — buka tutorial ini.',
             ].join('\n'),
           },
           {
             name: 'Membuat UU baru (admin)',
             value: [
-              '`!create-uu <isi awal>` — membuat Draft Pasal 1 Ayat (1).',
+              '`/uu create catatan:<isi awal>` — membuat Draft Pasal 1 Ayat (1).',
               'Di editor: atur Judul UU/Pasal, tambah Ayat/Pasal, lalu Preview.',
               'Tekan **Terbitkan UU**, kemudian ketik `TERBITKAN`.',
-              '`!draft-uu [ID/kode]` / `!edit-uu [ID/kode]` — buka kembali draft yang tersimpan.',
+              '`/uu draft [id]` — buka kembali draft yang tersimpan.',
             ].join('\n'),
           },
           {
             name: 'Merevisi UU aktif (admin)',
             value: [
-              '`!revise-uu` — pilih UU, lalu pilih Pasal yang ingin dibuka.',
-              '`!revise-uu <kode>` — langsung pilih Pasal pada UU tersebut.',
-              '`!revise-uu <kode> | <alasan>` — siapkan alasan tanpa modal tambahan.',
+              '`/uu revise` — pilih UU, lalu pilih Pasal yang ingin dibuka.',
+              '`/uu revise id:<kode>` — langsung pilih Pasal pada UU tersebut.',
+              '`/uu revise id:<kode> alasan:<teks>` — siapkan alasan tanpa modal tambahan.',
               'Gunakan **Tambah Ayat**, **Ubah Ayat**, **Cabut/Pulihkan**, atau **Tambah Pasal**.',
               'Periksa **Lihat Perubahan**, lalu ketik `TERBITKAN REVISI` untuk menerbitkan.',
-              '`!edit-uu <kode>` — lanjutkan draft revisi setelah editor ditutup/kedaluwarsa.',
+              '`/uu draft id:<kode>` — lanjutkan draft revisi setelah editor ditutup/kedaluwarsa.',
             ].join('\n'),
           },
           {
             name: 'Mencabut UU (admin)',
-            value: '`!cabut-uu <nomor/kode> | <alasan>` — mencabut UU tanpa menghapus isi dan riwayat versinya.',
+            value: '`/uu cabut id:<nomor/kode> alasan:<teks>` — mencabut UU tanpa menghapus isi dan riwayat versinya.',
           },
           {
             name: 'Catatan keamanan',
-            value: 'Editor menyimpan otomatis. Satu UU hanya memiliki satu draft revisi aktif. Publish membuat backup SQLite dan JSON. Versi lama tetap dapat dibaca dari riwayat `!uu`.',
+            value: 'Editor menyimpan otomatis. Satu UU hanya memiliki satu draft revisi aktif. Publish membuat backup SQLite dan JSON. Versi lama tetap dapat dibaca dari riwayat `/uu lihat`.',
           }
         )
         .setFooter({ text: 'Admin UU: Administrator, Manage Server, pemilik bot, atau role LAW_ADMIN_ROLE_IDS.' })],
@@ -300,7 +300,7 @@ function createLawHandler({ database, serverStatusNotifier }) {
     }
     let selectedLaw = identifier ? database.getLaw(identifier) : null;
     if (identifier && !selectedLaw) {
-      await msg.reply({ content: `UU \`${compact(identifier, 100)}\` tidak ditemukan. Jalankan \`!revise-uu\` untuk memilih dari daftar.`, allowedMentions: { repliedUser: false } });
+      await msg.reply({ content: `UU \`${compact(identifier, 100)}\` tidak ditemukan. Jalankan \`/uu revise\` untuk memilih dari daftar.`, allowedMentions: { repliedUser: false } });
       return;
     }
     if (selectedLaw?.status === 'REVOKED') {
@@ -613,7 +613,7 @@ function createLawHandler({ database, serverStatusNotifier }) {
           return;
         } else if (interaction.customId === `uud_close_${session}`) {
           collector.stop('closed');
-          await interaction.update({ ...payload(true), content: 'Editor ditutup. Semua perubahan sudah tersimpan; buka lagi dengan `!edit-uu <kode/ID>`.' });
+          await interaction.update({ ...payload(true), content: 'Editor ditutup. Semua perubahan sudah tersimpan; buka lagi dengan `/uu draft`.' });
           return;
         }
         await panel.edit(payload());
@@ -689,7 +689,7 @@ function createLawHandler({ database, serverStatusNotifier }) {
       }
       const note = String(match[1] || '').trim();
       if (!note) {
-        await msg.reply({ content: 'Format: `!create-uu [catatan awal]`\nContoh: `!create-uu Setiap warga wajib menjaga ketertiban umum.`', allowedMentions: { repliedUser: false } });
+        await msg.reply({ content: 'Gunakan `/uu create catatan:<isi awal>`.', allowedMentions: { repliedUser: false } });
         return true;
       }
       try {
@@ -721,7 +721,7 @@ function createLawHandler({ database, serverStatusNotifier }) {
           : database.listLawRevisionDrafts({ creatorId: msg.author.id, limit: 100 })[0] || null;
       }
       if (!full || full.revisionStatus !== 'DRAFT') {
-        await msg.reply({ content: 'Draft aktif tidak ditemukan. Buat dengan `!create-uu <isi>` atau mulai revisi dengan `!revise-uu`.', allowedMentions: { repliedUser: false } });
+        await msg.reply({ content: 'Draft aktif tidak ditemukan. Gunakan `/uu create` atau `/uu revise`.', allowedMentions: { repliedUser: false } });
         return true;
       }
       await draftPanel(msg, full);
@@ -746,7 +746,7 @@ function createLawHandler({ database, serverStatusNotifier }) {
       const args = parseAdminLawArgs(match[1]);
       const law = database.getLaw(args.identifier);
       if (!law || !args.note) {
-        await msg.reply({ content: 'Format: `!cabut-uu <nomor/kode> | <alasan pencabutan>`', allowedMentions: { repliedUser: false } });
+        await msg.reply({ content: 'Gunakan `/uu cabut` dengan option `id` dan `alasan`.', allowedMentions: { repliedUser: false } });
         return true;
       }
       await confirmLawRevocation(msg, { law, note: args.note });

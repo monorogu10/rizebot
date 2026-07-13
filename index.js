@@ -2,13 +2,14 @@ require('dotenv').config();
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { Client, GatewayIntentBits: I, Partials: T } = require('discord.js');
+const { Client, GatewayIntentBits: I, MessageFlags, Partials: T } = require('discord.js');
 
 const { maybeBlockLink } = require('./src/features/linkBlocker');
 const { maybeReplyKeyword } = require('./src/features/keywordReply');
 const { createMessageHandler } = require('./src/handlers/messageHandler');
 const {
   createApplicationCommandHandler,
+  isLegacyPrefixCommand,
   registerApplicationCommands,
 } = require('./src/commands/applicationCommands');
 const { registerMemberEvents } = require('./src/handlers/memberEvents');
@@ -190,12 +191,6 @@ const minecraftBridgeHandler = createMinecraftBridgeHandler({
   bridge: bridgeService,
   registerStore: legacyRegisterStore,
 });
-const applicationCommandHandler = createApplicationCommandHandler({
-  registerHandler,
-  minecraftBridgeHandler,
-  bridge: bridgeService,
-  registerStore: legacyRegisterStore,
-});
 const companyPanelHandler = createCompanyPanelHandler({
   bridge: bridgeService,
   registerStore: legacyRegisterStore,
@@ -240,6 +235,11 @@ const baseHandleMessage = createMessageHandler({
   companyPanelHandler,
   minecraftBridgeHandler,
   topupHandler
+});
+const applicationCommandHandler = createApplicationCommandHandler({
+  commandHandler: baseHandleMessage,
+  bridge: bridgeService,
+  registerStore: legacyRegisterStore,
 });
 
 registerMemberEvents(client);
@@ -682,6 +682,15 @@ async function markInterviewApplicantReply(msg) {
 async function handleMessageCreate(msg) {
   if (await reloadLegacyRegisterDataFromMessage(msg)) return;
   if (await reloadInterviewTranscriptDataFromMessage(msg)) return;
+  if (!msg.author?.bot && isLegacyPrefixCommand(msg.content)) {
+    if (isAllowedBotOutputChannel(msg)) {
+      await msg.reply({
+        content: 'Command prefix `!` sudah dinonaktifkan. Gunakan `/help` untuk melihat seluruh slash command.',
+        allowedMentions: { parse: [], repliedUser: false },
+      }).catch(() => null);
+    }
+    return;
+  }
   await markInterviewApplicantReply(msg).catch(err => {
     console.error('Failed to mark interview applicant reply:', err);
   });
@@ -772,11 +781,13 @@ client.on('messageUpdate', handleMessageUpdate);
 client.on('interactionCreate', async interaction => {
   const handledApplicationCommand = await applicationCommandHandler(interaction).catch(async err => {
     console.error('Application command handler error:', err);
-    const payload = { content: `Slash command gagal diproses: ${err.message || err}`, ephemeral: true };
-    if (interaction.deferred || interaction.replied) {
-      await interaction.followUp(payload).catch(() => null);
+    const content = `Slash command gagal diproses: ${err.message || err}`;
+    if (interaction.deferred && !interaction.replied) {
+      await interaction.editReply({ content }).catch(() => null);
+    } else if (interaction.replied) {
+      await interaction.followUp({ content, flags: MessageFlags.Ephemeral }).catch(() => null);
     } else {
-      await interaction.reply(payload).catch(() => null);
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral }).catch(() => null);
     }
     return true;
   });

@@ -154,7 +154,7 @@ function findTopupReply(text) {
     `Topup Geon lewat: ${TOPUP_SUPPORT_URL}`,
     'Saat isi SociaBuzz, tulis GAMERTAG MINECRAFT kamu dengan jelas di nama dan pesan. Jangan typo.',
     'Contoh pesan: `GT: NamaMinecraft | DC: username_discord`',
-    'Cek kurs: `!geonrate <rupiah>` atau `!kurs <rupiah>`.'
+    'Cek kurs dengan `/geonrate rupiah:<nominal>`.'
   ].join('\n');
 }
 

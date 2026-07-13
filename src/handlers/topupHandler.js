@@ -68,10 +68,10 @@ function formatCandidates(candidates) {
 function helpText() {
   return [
     '**TOPUP admin commands**',
-    '`!srcpl <nama>` - cari player dari data asli server Minecraft + status Discord',
-    '`!tu <nama/key> <geon> <rupiah>` - kirim topup ke Minecraft',
-    '`!gnrtkpn <geon> <rupiah> [jumlah] [hari_expired]` - generate kupon',
-    '`!geonrate <rupiah>` / `!kurs <rupiah>` - cek kalkulasi Geon otomatis SociaBuzz',
+    '`/minecraft search` - cari player dari data asli server Minecraft + status Discord',
+    '`/topup kirim` - kirim topup ke Minecraft',
+    '`/topup kupon` - generate kupon',
+    '`/geonrate` - cek kalkulasi Geon otomatis SociaBuzz',
   ].join('\n');
 }
 
@@ -118,7 +118,7 @@ function createTopupHandler({ bridge }) {
     if (isRateCommand(parsed.command)) {
       const rupiah = bridge.normalizePositiveInt(parsed.args, RUPIAH_MAX);
       if (!rupiah) {
-        await msg.reply('Format: `!geonrate <rupiah>` atau `!kurs <rupiah>`').catch(() => {});
+        await msg.reply('Gunakan `/geonrate rupiah:<nominal>`.').catch(() => {});
         return true;
       }
       await msg.reply(
@@ -128,7 +128,7 @@ function createTopupHandler({ bridge }) {
     }
 
     if (!isTopupAdmin(msg.author?.id)) {
-      await msg.reply('Command TOPUP hanya untuk admin. Untuk cek kurs, pakai `!geonrate <rupiah>`.').catch(() => {});
+      await msg.reply('Command topup hanya untuk admin. Untuk cek kurs, gunakan `/geonrate`.').catch(() => {});
       return true;
     }
 
@@ -139,7 +139,7 @@ function createTopupHandler({ bridge }) {
 
     if (parsed.command === 'srcpl' || parsed.command === 'searchpl') {
       if (parsed.args.length < 2) {
-        await msg.reply('Format: `!srcpl <minimal 2 huruf nama player>`').catch(() => {});
+        await msg.reply('Gunakan `/minecraft search nama:<minimal 2 huruf>`.').catch(() => {});
         return true;
       }
 
@@ -162,7 +162,7 @@ function createTopupHandler({ bridge }) {
     if (parsed.command === 'tu' || parsed.command === 'topup') {
       const topup = parseTopupArgs(parsed.args, bridge);
       if (!topup) {
-        await msg.reply('Format: `!tu <nama/key> <geon> <rupiah>`').catch(() => {});
+        await msg.reply('Gunakan `/topup kirim` dengan option `nama`, `geon`, dan `rupiah`.').catch(() => {});
         return true;
       }
 
@@ -198,7 +198,7 @@ function createTopupHandler({ bridge }) {
     if (parsed.command === 'gnrtkpn' || parsed.command === 'kupon' || parsed.command === 'coupon') {
       const coupon = parseCouponArgs(parsed.args, bridge);
       if (!coupon) {
-        await msg.reply('Format: `!gnrtkpn <geon> <rupiah> [jumlah] [hari_expired]`').catch(() => {});
+        await msg.reply('Gunakan `/topup kupon` dengan option `geon`, `rupiah`, `jumlah`, dan `hari`.').catch(() => {});
         return true;
       }
 
