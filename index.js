@@ -447,7 +447,7 @@ client.once('clientReady', async () => {
   await ethergeonCitizenRoleEvents.sync()
     .then(stats => {
       console.log(
-        `Ethergeon Citizen role sync selesai. scanned=${stats.scanned}, migrated=${stats.migrated}, failed=${stats.failed}, skipped=${stats.skipped}, fromLegacyRole=${stats.fromLegacyRole || 0}, fromRegisterData=${stats.fromRegisterData || 0}`
+        `Ethergeon Citizen role sync selesai. scanned=${stats.scanned}, migrated=${stats.migrated}, failed=${stats.failed}, skipped=${stats.skipped}, fromLegacyRole=${stats.fromLegacyRole || 0}, fromInterviewData=${stats.fromInterviewData || 0}, fromRegisterData=${stats.fromRegisterData || 0}`
       );
     })
     .catch(err => {

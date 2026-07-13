@@ -319,8 +319,8 @@ async function setNicknameToGamertag(member, gamertag) {
   if (!member.nickname && member.user?.username === nickname) return true;
 
   const botMember = member.guild?.members?.me;
-  const canManageNicknames = botMember?.permissions?.has(PermissionsBitField.Flags.ManageNicknames);
-  if (!canManageNicknames || member.manageable === false) return false;
+  const canManageNicknames = botMember?.permissions?.has?.(PermissionsBitField.Flags.ManageNicknames);
+  if (canManageNicknames === false || member.manageable === false) return false;
 
   try {
     const updated = await member.setNickname(nickname, 'Ethergeon gamertag registration sync');
@@ -1107,6 +1107,7 @@ async function handleRegisterCommandUnlocked(msg, options) {
       return true;
     }
 
+    const nicknameNote = await syncGamertagNickname(member, currentGamertag || gamertag, 'approved gamertag refresh');
     await moveMemberToCitizenRole(member, {
       citizenRoleId: verifiedRoleId,
       legacyRoleId: pendingRoleId,
@@ -1115,7 +1116,6 @@ async function handleRegisterCommandUnlocked(msg, options) {
       console.error('Failed to refresh legal role:', err);
       return false;
     });
-    const nicknameNote = await syncGamertagNickname(member, currentGamertag || gamertag, 'approved gamertag refresh');
     queueLegalAccessJob(options.bridge, 'approve', existing, msg.author.id, msg.author);
     await replyNoPing(
       msg,
@@ -1235,11 +1235,11 @@ async function handleRegisterCommandUnlocked(msg, options) {
     return true;
   }
 
+  const nicknameNote = await syncGamertagNickname(member, gamertag, 'pending register');
   await moveMemberToPendingRole(member, { pendingRoleId, verifiedRoleId, rejectedRoleId }).catch(err => {
     console.error('Failed to set pending register role:', err);
     return false;
   });
-  const nicknameNote = await syncGamertagNickname(member, gamertag, 'pending register');
 
   const entry = { ...saved.entry, userId: msg.author.id };
   await channel.send({
@@ -1328,6 +1328,7 @@ async function handleSetRegisterGamertagCommand(msg, options) {
   }
 
   if (member) {
+    await syncGamertagNickname(member, parsed.gamertag, 'admin gamertag update');
     await moveMemberToCitizenRole(member, {
       citizenRoleId: options.verifiedRoleId,
       legacyRoleId: options.pendingRoleId,
@@ -1336,7 +1337,6 @@ async function handleSetRegisterGamertagCommand(msg, options) {
       console.error('Failed to refresh legal role after admin gamertag update:', err);
       return false;
     });
-    await syncGamertagNickname(member, parsed.gamertag, 'admin gamertag update');
   }
 
   if (updated.oldGamertag && gamertagKey(updated.oldGamertag) !== gamertagKey(parsed.gamertag)) {
@@ -1643,12 +1643,12 @@ async function handleInterviewAdminCommand(msg, options) {
         session = options.database.closeInterviewSession(session, { actor, force: true, reason: 'Force accept tanpa channel interview aktif' });
       }
       if (member) {
+        await syncGamertagNickname(member, updated.gamertag, parsed.force ? 'force accept interview' : 'accept interview command');
         await moveMemberToCitizenRole(member, {
           citizenRoleId: options.verifiedRoleId,
           legacyRoleId: options.pendingRoleId,
           rejectedRoleId: options.rejectedRoleId,
         });
-        await syncGamertagNickname(member, updated.gamertag, parsed.force ? 'force accept interview' : 'accept interview command');
       }
       queueLegalAccessJob(options.bridge, 'approve', updated, target.userId, msg.author);
       await replyNoPing(msg, `✅ <@${target.userId}> diputuskan **LOLOS**${parsed.force ? ' melalui force recovery' : ''} sebagai \`${updated.gamertag}\`. Session: \`${session?.interviewId || 'legacy'}\`.`);
@@ -2934,6 +2934,8 @@ async function handleSyncCitizenCommand(msg, options) {
       `Berhasil: ${stats.migrated}`,
       `Tidak ditemukan: ${stats.skipped}`,
       `Gagal: ${stats.failed}`,
+      `Status dipulihkan dari role resmi: ${stats.fromLegacyRole || 0}`,
+      `Status dipulihkan dari keputusan interview: ${stats.fromInterviewData || 0}`,
       `Nickname sync: ${stats.nicknameSynced || 0} sukses, ${stats.nicknameFailed || 0} gagal`,
     ].join('\n')
   );
@@ -2966,6 +2968,97 @@ async function replyInterviewInteraction(interaction, content) {
   return interaction.reply(payload).catch(() => null);
 }
 
+function gamertagFromInterviewMessage(message) {
+  for (const embed of message?.embeds || []) {
+    const description = String(embed?.description || embed?.data?.description || '');
+    const match = description.match(/Gamertag:\s*`([^`\r\n]+)`/i);
+    const gamertag = normalizeGamertag(match?.[1] || '');
+    if (isValidGamertag(gamertag)) return gamertag;
+  }
+  return '';
+}
+
+async function resolveInterviewButtonContext(interaction, parsed, registerStore, database) {
+  const channelId = String(interaction.channelId || interaction.channel?.id || '').trim();
+  const channelSession = channelId && database?.getInterviewSession
+    ? database.getInterviewSession(channelId, { by: 'channel' })
+    : null;
+  const numberedSession = parsed.sessionNumber && database?.getInterviewSession
+    ? database.getInterviewSession(String(parsed.sessionNumber), { by: 'number' })
+    : null;
+  const numberedBelongsHere = numberedSession && (
+    !numberedSession.channelId || String(numberedSession.channelId) === channelId
+  );
+  // The channel mapping is more reliable than a custom id from an old control
+  // message. A numbered session from another channel must never be reused here.
+  const session = channelSession || (numberedBelongsHere ? numberedSession : null);
+  const linked = channelId ? registerStore.findUserByInterviewChannel?.(channelId) : null;
+  const userId = String(session?.userId || linked?.userId || parsed.userId || '').trim();
+  if (!userId) {
+    return { error: 'Applicant tombol tidak dapat dikenali. Gunakan `!relink-interview @user [gamertag]`.' };
+  }
+
+  let entry = registerStore.getUser(userId) || null;
+  const gamertag = normalizeGamertag(
+    session?.gamertag || entry?.gamertag || linked?.entry?.gamertag || gamertagFromInterviewMessage(interaction.message)
+  );
+
+  if (!entry) {
+    if (!isValidGamertag(gamertag)) {
+      return {
+        error: `Data interview <@${userId}> tidak lengkap dan gamertag tidak dapat dipulihkan dari session/panel. Gunakan \`!accept --force @user gamertag\`.`,
+      };
+    }
+    const duplicate = registerStore.findUserByGamertag?.(gamertag, userId);
+    if (duplicate) {
+      return { error: `Recovery dihentikan: gamertag \`${gamertag}\` tercatat untuk <@${duplicate.userId}>.` };
+    }
+    const member = interaction.guild?.members?.fetch
+      ? await interaction.guild.members.fetch(userId).catch(() => null)
+      : null;
+    const identity = channelInterviewIdentity(interaction.channel);
+    const restored = await registerStore.upsertPendingUser(
+      userId,
+      gamertag,
+      member?.user?.tag || member?.user?.username || session?.username || '',
+      {
+        interviewId: session?.interviewId || identity.interviewId,
+        interviewChannelId: channelId,
+        interviewCreatedAt: session?.openedAt || interaction.channel?.createdAt?.toISOString?.() || new Date().toISOString(),
+      }
+    );
+    if (!restored?.entry || restored.duplicate) {
+      return { error: `Registry <@${userId}> gagal direkonstruksi dari data interview.` };
+    }
+    entry = restored.entry;
+  } else if (channelId && session?.userId === userId && (
+    entry.interviewChannelId !== channelId || entry.interviewId !== session.interviewId
+  )) {
+    entry = await registerStore.relinkInterview(userId, {
+      interviewId: session.interviewId,
+      interviewChannelId: channelId,
+      interviewCreatedAt: entry.interviewCreatedAt || session.openedAt || session.reservedAt,
+      interviewClosedAt: null,
+    }) || entry;
+  }
+
+  // If a previous click reached the durable session decision but failed before
+  // updating the JSON/role, make the next button click idempotently finish it.
+  if (entry.status === 'pending' && session?.decision === 'APPROVED') {
+    entry = await registerStore.approveUser(userId, {
+      id: interaction.user?.id,
+      tag: interaction.user?.tag || interaction.user?.username || 'button recovery',
+    }) || entry;
+  } else if (entry.status === 'pending' && session?.decision === 'REJECTED') {
+    entry = await registerStore.rejectUser(userId, {
+      id: interaction.user?.id,
+      tag: interaction.user?.tag || interaction.user?.username || 'button recovery',
+    }, session.decisionReason || 'Recovered from interview session') || entry;
+  }
+
+  return { userId, entry, session, channelSession, numberedSession };
+}
+
 async function approveInterview(interaction, registerStore, entryUserId, options) {
   const member = await interaction.guild.members.fetch(entryUserId).catch(() => null);
   const entry = await registerStore.approveUser(entryUserId, {
@@ -2977,6 +3070,7 @@ async function approveInterview(interaction, registerStore, entryUserId, options
     return true;
   }
   if (member) {
+    await syncGamertagNickname(member, entry.gamertag, 'approve interview');
     await moveMemberToCitizenRole(member, {
       citizenRoleId: options.roleId,
       legacyRoleId: options.legacyRoleId,
@@ -2985,13 +3079,14 @@ async function approveInterview(interaction, registerStore, entryUserId, options
       console.error('Failed to move approved member role:', err);
       return false;
     });
-    await syncGamertagNickname(member, entry.gamertag, 'approve interview');
   }
   const session = options.database?.getInterviewSession?.(
     String(options.sessionNumber || interaction.channelId),
     { by: options.sessionNumber ? 'number' : 'channel' }
   );
-  if (session) options.database.decideInterviewSession(session, 'APPROVED', { actor: interaction.user, force: false });
+  if (session?.decision === 'PENDING') {
+    options.database.decideInterviewSession(session, 'APPROVED', { actor: interaction.user, force: false });
+  }
   await updateInterviewMessage(interaction, {
     embeds: [buildInterviewEmbed({ ...entry, userId: entryUserId }, { id: entryUserId })],
     components: [buildInterviewButtons(entryUserId, false, session?.sessionNumber || options.sessionNumber, 'APPROVED')],
@@ -3024,7 +3119,9 @@ async function rejectInterview(interaction, registerStore, entryUserId, options)
     String(options.sessionNumber || interaction.channelId),
     { by: options.sessionNumber ? 'number' : 'channel' }
   );
-  if (session) options.database.decideInterviewSession(session, 'REJECTED', { actor: interaction.user, force: false });
+  if (session?.decision === 'PENDING') {
+    options.database.decideInterviewSession(session, 'REJECTED', { actor: interaction.user, force: false });
+  }
   await updateInterviewMessage(interaction, {
     embeds: [buildInterviewEmbed({ ...entry, userId: entryUserId }, { id: entryUserId })],
     components: [buildInterviewButtons(entryUserId, false, session?.sessionNumber || options.sessionNumber, 'REJECTED')],
@@ -3151,30 +3248,27 @@ function createRegisterInteractionHandler({
       await interaction.deferUpdate().catch(() => null);
       await ensureRegisterStore(registerStore, interaction.client);
 
-      const buttonSession = interview.sessionNumber && database?.getInterviewSession
-        ? database.getInterviewSession(String(interview.sessionNumber), { by: 'number' })
-        : null;
-      if (interview.sessionNumber && database?.getInterviewSession && !buttonSession) {
-        await replyInterviewInteraction(interaction, 'Session tombol tidak ditemukan di database. Jalankan `!interview-doctor` atau gunakan command recovery `--force`.');
+      const context = await resolveInterviewButtonContext(interaction, interview, registerStore, database);
+      if (context.error) {
+        await replyInterviewInteraction(interaction, context.error);
         return true;
       }
-      if (buttonSession && buttonSession.userId !== interview.userId) {
-        await replyInterviewInteraction(interaction, 'Session tombol tidak cocok dengan applicant. Jalankan `!interview-doctor` sebelum memproses.');
-        return true;
-      }
-      if (buttonSession?.channelId && String(buttonSession.channelId) !== String(interaction.channelId)) {
-        await replyInterviewInteraction(interaction, 'Tombol ini bukan milik channel session tersebut. Jalankan `!interview-doctor` sebelum memproses.');
-        return true;
-      }
+      const buttonSession = context.session;
+      const entryUserId = context.userId;
       if (buttonSession && !['RESERVED', 'OPEN'].includes(buttonSession.lifecycleStatus)) {
         await replyInterviewInteraction(interaction, `Session \`${buttonSession.interviewId}\` sudah ${buttonSession.lifecycleStatus}; tombol lama tidak boleh dipakai.`);
         return true;
       }
       if (buttonSession && interview.action !== 'close' && buttonSession.decision !== 'PENDING') {
-        await replyInterviewInteraction(interaction, `Session ini sudah diputuskan ${buttonSession.decision}. Gunakan command \`--force\` hanya jika keputusan memang harus dikoreksi.`);
-        return true;
+        const repeatedDecision =
+          (interview.action === 'approve' && buttonSession.decision === 'APPROVED') ||
+          (interview.action === 'reject' && buttonSession.decision === 'REJECTED');
+        if (!repeatedDecision) {
+          await replyInterviewInteraction(interaction, `Session ini sudah diputuskan ${buttonSession.decision}. Gunakan command \`--force\` hanya jika keputusan memang harus dikoreksi.`);
+          return true;
+        }
       }
-      const actionLock = String(interview.sessionNumber || `${interview.userId}:${interaction.channelId}`);
+      const actionLock = String(buttonSession?.sessionNumber || `${entryUserId}:${interaction.channelId}`);
       if (interviewActionLocks.has(actionLock)) {
         await replyInterviewInteraction(interaction, 'Session ini sedang diproses admin lain. Tunggu sebentar.');
         return true;
@@ -3188,12 +3282,12 @@ function createRegisterInteractionHandler({
         bridge,
         transcriptStore,
         database,
-        sessionNumber: interview.sessionNumber,
+        sessionNumber: buttonSession?.sessionNumber || 0,
       };
       try {
-        if (interview.action === 'approve') return await approveInterview(interaction, registerStore, interview.userId, options);
-        if (interview.action === 'reject') return await rejectInterview(interaction, registerStore, interview.userId, options);
-        if (interview.action === 'close') return await closeInterview(interaction, registerStore, interview.userId, options);
+        if (interview.action === 'approve') return await approveInterview(interaction, registerStore, entryUserId, options);
+        if (interview.action === 'reject') return await rejectInterview(interaction, registerStore, entryUserId, options);
+        if (interview.action === 'close') return await closeInterview(interaction, registerStore, entryUserId, options);
         return false;
       } finally {
         interviewActionLocks.delete(actionLock);

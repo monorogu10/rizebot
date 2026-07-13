@@ -7,7 +7,12 @@ const { ChannelType } = require('discord.js');
 
 const { createRizebotDatabase } = require('../src/services/rizebotDatabase');
 const { createRegisterStore } = require('../src/services/registerStore');
-const { createRegisterHandler } = require('../src/handlers/registerHandler');
+const { createTopupBridgeService } = require('../src/services/topupBridgeService');
+const {
+  createRegisterHandler,
+  createRegisterInteractionHandler,
+} = require('../src/handlers/registerHandler');
+const { syncEthergeonCitizenRoles } = require('../src/handlers/ethergeonCitizenRoleHandler');
 
 test('fallback interview allocator returns its captured number during concurrent saves', async () => {
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -132,6 +137,123 @@ test('cancelling a force accept does not create registry or session data', async
   }
 });
 
+test('confirmed force accept directly recreates and approves a missing user', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rizebot-force-accept-test-'));
+  const database = createRizebotDatabase({ dataDir: directory });
+  const saveChannelStore = {
+    async load() {
+      return { users: {}, order: [], interviewSequence: 0 };
+    },
+    async save() {},
+    isDataMessage() {
+      return false;
+    },
+  };
+  const registerStore = createRegisterStore({ database, saveChannelStore });
+  const adminId = '905001';
+  const targetId = '905002';
+  const citizenRoleId = 'citizen';
+  const pendingRoleId = 'pending';
+  const rejectedRoleId = 'rejected';
+  const roleCache = new Set();
+  const channel = { id: '805001', name: 'admin-command', parentId: '', createdAt: new Date() };
+  const guild = {
+    id: '705001',
+    roles: {
+      cache: new Map([
+        [citizenRoleId, { id: citizenRoleId }],
+        [pendingRoleId, { id: pendingRoleId }],
+        [rejectedRoleId, { id: rejectedRoleId }],
+      ]),
+      async fetch(id) {
+        return { id };
+      },
+    },
+    channels: {
+      cache: new Map([[channel.id, channel]]),
+    },
+    members: {
+      me: { permissions: { has: () => true } },
+      async fetch() {
+        return member;
+      },
+    },
+  };
+  const member = {
+    id: targetId,
+    user: { username: 'target', tag: 'target#0001', bot: false },
+    guild,
+    nickname: '',
+    roles: {
+      cache: roleCache,
+      async add(role) {
+        roleCache.add(role.id);
+        return member;
+      },
+      async remove(role) {
+        roleCache.delete(role.id);
+        return member;
+      },
+    },
+    async setNickname(value) {
+      member.nickname = value;
+      return member;
+    },
+  };
+  const replies = [];
+  const msg = {
+    id: '605001',
+    content: `!accept --force <@${targetId}> ForcePlayer`,
+    author: { id: adminId, username: 'admin', tag: 'admin#0001', bot: false },
+    member: { permissions: { has: () => true } },
+    guild,
+    channel,
+    channelId: channel.id,
+    client: {},
+    async reply(payload) {
+      replies.push(payload);
+      if (!payload?.components?.length) return {};
+      const confirmId = payload.components[0].components[0].data.custom_id;
+      return {
+        async awaitMessageComponent({ filter }) {
+          const interaction = {
+            user: { id: adminId },
+            customId: confirmId,
+            async deferUpdate() {},
+          };
+          assert.equal(filter(interaction), true);
+          return interaction;
+        },
+        async edit() {},
+      };
+    },
+  };
+
+  try {
+    const handler = createRegisterHandler({
+      roleId: citizenRoleId,
+      legacyRoleId: pendingRoleId,
+      rejectedRoleId,
+      registerStore,
+      database,
+    });
+    assert.equal(await handler(msg), true);
+    const entry = registerStore.getUser(targetId);
+    assert.equal(entry.status, 'approved');
+    assert.equal(entry.gamertag, 'ForcePlayer');
+    assert.equal(roleCache.has(citizenRoleId), true);
+    assert.equal(member.nickname, 'ForcePlayer');
+    const sessions = database.listInterviewSessions({ userId: targetId, limit: 10 });
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].decision, 'APPROVED');
+    assert.equal(sessions[0].lifecycleStatus, 'CLOSED');
+    assert.ok(replies.length >= 2);
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('simultaneous register commands from one user create only one channel', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rizebot-register-handler-test-'));
   const database = createRizebotDatabase({ dataDir: directory });
@@ -226,6 +348,413 @@ test('simultaneous register commands from one user create only one channel', asy
     assert.equal(channelCreates, 1);
     assert.equal(database.listInterviewSessions({ lifecycle: 'OPEN' }).length, 1);
     assert.equal(registerStore.getUser(userId).interviewId, 'interview-0259');
+    assert.equal(member.nickname, 'ConcurrentGT');
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('legacy legal evidence and approved duplicate survive registry normalization', async () => {
+  const pendingUserId = '940001';
+  const approvedUserId = '940002';
+  const saveChannelStore = {
+    async load() {
+      return {
+        users: {
+          [pendingUserId]: {
+            gamertag: 'LegacyLegal',
+            status: 'pending',
+            legal: false,
+            registeredAt: new Date(1_000).toISOString(),
+          },
+          [approvedUserId]: {
+            gamertag: 'LegacyLegal',
+            status: 'pending',
+            legal: true,
+            approvedAt: new Date(2_000).toISOString(),
+            registeredAt: new Date(2_000).toISOString(),
+          },
+        },
+        order: [pendingUserId, approvedUserId],
+        interviewSequence: 0,
+      };
+    },
+    async save() {},
+    isDataMessage() {
+      return false;
+    },
+  };
+  const registerStore = createRegisterStore({ saveChannelStore });
+  await registerStore.init({});
+
+  assert.equal(registerStore.getUser(pendingUserId), undefined);
+  assert.equal(registerStore.getUser(approvedUserId).status, 'approved');
+  assert.equal(registerStore.getUser(approvedUserId).legal, true);
+});
+
+test('startup citizen-role sync promotes pending registry and restores nickname', async () => {
+  const userId = '950001';
+  const citizenRoleId = 'citizen';
+  const pendingRoleId = 'pending';
+  const rejectedRoleId = 'rejected';
+  const saveChannelStore = {
+    async load() {
+      return {
+        users: {
+          [userId]: {
+            gamertag: 'SyncedPlayer',
+            username: 'discord-user',
+            status: 'pending',
+            registeredAt: new Date().toISOString(),
+          },
+        },
+        order: [userId],
+        interviewSequence: 0,
+      };
+    },
+    async save() {},
+    isDataMessage() {
+      return false;
+    },
+  };
+  const registerStore = createRegisterStore({ saveChannelStore });
+  const roleCache = new Set([citizenRoleId, pendingRoleId]);
+  const guild = {
+    roles: {
+      cache: new Map([
+        [citizenRoleId, { id: citizenRoleId }],
+        [pendingRoleId, { id: pendingRoleId }],
+        [rejectedRoleId, { id: rejectedRoleId }],
+      ]),
+      async fetch(id) {
+        return { id };
+      },
+    },
+    members: {
+      me: { permissions: { has: () => true } },
+      async fetch() {
+        return members;
+      },
+    },
+  };
+  const member = {
+    id: userId,
+    user: { username: 'discord-user', bot: false },
+    guild,
+    nickname: '',
+    roles: {
+      cache: roleCache,
+      async add(role) {
+        roleCache.add(role.id);
+        return member;
+      },
+      async remove(role) {
+        roleCache.delete(role.id);
+        return member;
+      },
+    },
+    async setNickname(value) {
+      member.nickname = value;
+      return member;
+    },
+  };
+  const members = new Map([[userId, member]]);
+  const client = { guilds: { cache: new Map([['guild', guild]]) } };
+
+  const stats = await syncEthergeonCitizenRoles(client, {
+    registerStore,
+    citizenRoleId,
+    legacyRoleId: pendingRoleId,
+    rejectedRoleId,
+  });
+
+  assert.equal(registerStore.getUser(userId).status, 'approved');
+  assert.equal(registerStore.getUser(userId).legal, true);
+  assert.equal(roleCache.has(pendingRoleId), false);
+  assert.equal(member.nickname, 'SyncedPlayer');
+  assert.equal(stats.fromLegacyRole, 1);
+
+  const bridge = createTopupBridgeService({ registerStore });
+  const joinResult = await bridge.handleMinecraftEvent({
+    type: 'player_join',
+    player: { name: 'SyncedPlayer', persistentId: 'stable-player-id' },
+  });
+  assert.equal(joinResult.registeredMatch, true);
+  assert.equal(joinResult.accessAllowed, true);
+  assert.equal(joinResult.discordUserId, userId);
+});
+
+test('approve button reconstructs a missing registry record from its durable session', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rizebot-button-recovery-test-'));
+  const database = createRizebotDatabase({ dataDir: directory });
+  const saveChannelStore = {
+    async load() {
+      return { users: {}, order: [], interviewSequence: 0 };
+    },
+    async save() {},
+    isDataMessage() {
+      return false;
+    },
+  };
+  const registerStore = createRegisterStore({ database, saveChannelStore });
+  const targetId = '960001';
+  const adminId = '960002';
+  const channelId = '960003';
+  const citizenRoleId = 'citizen';
+  const pendingRoleId = 'pending';
+  const rejectedRoleId = 'rejected';
+  const roleCache = new Set([pendingRoleId]);
+  let editedPayload = null;
+  const sent = [];
+  const channel = {
+    id: channelId,
+    name: 'interview-0001',
+    parentId: '',
+    createdAt: new Date(),
+    async send(content) {
+      sent.push(content);
+    },
+  };
+  const channelCache = new Map([[channelId, channel]]);
+  const guild = {
+    roles: {
+      everyone: { id: 'everyone' },
+      cache: new Map([
+        [citizenRoleId, { id: citizenRoleId }],
+        [pendingRoleId, { id: pendingRoleId }],
+        [rejectedRoleId, { id: rejectedRoleId }],
+      ]),
+      async fetch(id) {
+        return { id };
+      },
+    },
+    channels: {
+      cache: channelCache,
+      async fetch(id) {
+        return id ? channelCache.get(id) || null : channelCache;
+      },
+    },
+    members: {
+      me: { permissions: { has: () => true } },
+      async fetch() {
+        return member;
+      },
+    },
+  };
+  const member = {
+    id: targetId,
+    user: { username: 'target', tag: 'target#0001', bot: false },
+    guild,
+    nickname: '',
+    roles: {
+      cache: roleCache,
+      async add(role) {
+        roleCache.add(role.id);
+        return member;
+      },
+      async remove(role) {
+        roleCache.delete(role.id);
+        return member;
+      },
+    },
+    async setNickname(value) {
+      member.nickname = value;
+      return member;
+    },
+  };
+
+  try {
+    await registerStore.init({});
+    const reservation = database.reserveInterviewSession({ userId: targetId, gamertag: 'RecoveredButton' });
+    const session = database.attachInterviewChannel(reservation.session.sessionNumber, channelId);
+    const interaction = {
+      customId: `interview:approve:${targetId}:${session.sessionNumber}`,
+      user: { id: adminId, username: 'admin', tag: 'admin#0001' },
+      member: { permissions: { has: () => true } },
+      guild,
+      channel,
+      channelId,
+      client: {},
+      deferred: false,
+      replied: false,
+      message: {
+        embeds: [],
+        async edit(payload) {
+          editedPayload = payload;
+        },
+      },
+      isButton() {
+        return true;
+      },
+      async deferUpdate() {
+        this.deferred = true;
+      },
+      async followUp() {},
+      async reply() {},
+    };
+    const handler = createRegisterInteractionHandler({
+      roleId: citizenRoleId,
+      legacyRoleId: pendingRoleId,
+      rejectedRoleId,
+      registerStore,
+      database,
+    });
+
+    assert.equal(await handler(interaction), true);
+    assert.equal(registerStore.getUser(targetId).status, 'approved');
+    assert.equal(registerStore.getUser(targetId).gamertag, 'RecoveredButton');
+    assert.equal(database.getInterviewSession(String(session.sessionNumber), { by: 'number' }).decision, 'APPROVED');
+    assert.equal(roleCache.has(citizenRoleId), true);
+    assert.equal(roleCache.has(pendingRoleId), false);
+    assert.equal(member.nickname, 'RecoveredButton');
+    assert.ok(editedPayload?.components?.length);
+    assert.equal(sent.length, 1);
+  } finally {
+    database.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('reject and close buttons recover missing data and finish the interview lifecycle', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rizebot-reject-close-recovery-test-'));
+  const database = createRizebotDatabase({ dataDir: directory });
+  const saveChannelStore = {
+    async load() {
+      return { users: {}, order: [], interviewSequence: 0 };
+    },
+    async save() {},
+    isDataMessage() {
+      return false;
+    },
+  };
+  const registerStore = createRegisterStore({ database, saveChannelStore });
+  const targetId = '970001';
+  const adminId = '970002';
+  const channelId = '970003';
+  const citizenRoleId = 'citizen';
+  const pendingRoleId = 'pending';
+  const rejectedRoleId = 'rejected';
+  const roleCache = new Set([pendingRoleId]);
+  let applicantLocked = false;
+  const channel = {
+    id: channelId,
+    name: 'interview-0001',
+    type: ChannelType.GuildText,
+    parentId: '',
+    createdAt: new Date(),
+    permissionOverwrites: {
+      async edit() {
+        applicantLocked = true;
+      },
+    },
+    async send() {},
+    async setName(value) {
+      this.name = value;
+      return this;
+    },
+    async setParent(parentId) {
+      this.parentId = parentId;
+      return this;
+    },
+  };
+  const channelCache = new Map([[channelId, channel]]);
+  const guild = {
+    roles: {
+      everyone: { id: 'everyone' },
+      cache: new Map([
+        [citizenRoleId, { id: citizenRoleId }],
+        [pendingRoleId, { id: pendingRoleId }],
+        [rejectedRoleId, { id: rejectedRoleId }],
+      ]),
+      async fetch(id) {
+        return { id };
+      },
+    },
+    channels: {
+      cache: channelCache,
+      async fetch(id) {
+        return id ? channelCache.get(id) || null : channelCache;
+      },
+      async create(options) {
+        const category = {
+          id: 'archive-category',
+          name: options.name,
+          type: ChannelType.GuildCategory,
+          rawPosition: 1,
+        };
+        channelCache.set(category.id, category);
+        return category;
+      },
+    },
+    members: {
+      me: { id: 'bot', permissions: { has: () => true } },
+      async fetch() {
+        return member;
+      },
+    },
+  };
+  const member = {
+    id: targetId,
+    user: { username: 'target', tag: 'target#0001', bot: false },
+    guild,
+    roles: {
+      cache: roleCache,
+      async add(role) {
+        roleCache.add(role.id);
+        return member;
+      },
+      async remove(role) {
+        roleCache.delete(role.id);
+        return member;
+      },
+    },
+  };
+
+  const interactionFor = customId => ({
+    customId,
+    user: { id: adminId, username: 'admin', tag: 'admin#0001' },
+    member: { permissions: { has: () => true } },
+    guild,
+    channel,
+    channelId,
+    client: {},
+    deferred: false,
+    replied: false,
+    message: { embeds: [], async edit() {} },
+    isButton() {
+      return true;
+    },
+    async deferUpdate() {
+      this.deferred = true;
+    },
+    async followUp() {},
+    async reply() {},
+  });
+
+  try {
+    await registerStore.init({});
+    const reservation = database.reserveInterviewSession({ userId: targetId, gamertag: 'RejectedButton' });
+    const session = database.attachInterviewChannel(reservation.session.sessionNumber, channelId);
+    const handler = createRegisterInteractionHandler({
+      roleId: citizenRoleId,
+      legacyRoleId: pendingRoleId,
+      rejectedRoleId,
+      registerStore,
+      database,
+    });
+
+    assert.equal(await handler(interactionFor(`interview:reject:${targetId}:${session.sessionNumber}`)), true);
+    assert.equal(registerStore.getUser(targetId).status, 'rejected');
+    assert.equal(roleCache.has(rejectedRoleId), true);
+    assert.equal(database.getInterviewSession(String(session.sessionNumber), { by: 'number' }).decision, 'REJECTED');
+
+    assert.equal(await handler(interactionFor(`interview:close:${targetId}:${session.sessionNumber}`)), true);
+    const closed = database.getInterviewSession(String(session.sessionNumber), { by: 'number' });
+    assert.equal(closed.lifecycleStatus, 'CLOSED');
+    assert.ok(registerStore.getUser(targetId).interviewClosedAt);
+    assert.equal(applicantLocked, true);
+    assert.match(channel.name, /^closed-interview-/);
   } finally {
     database.close();
     fs.rmSync(directory, { recursive: true, force: true });

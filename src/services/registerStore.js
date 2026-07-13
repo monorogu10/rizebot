@@ -33,7 +33,7 @@ function normalizeUsers(users = {}) {
         .filter(Boolean)
         .slice(-10)
       : [];
-    const status = normalizeStatus(entry?.status);
+    const status = normalizeStatus(entry?.status, entry);
     const interviewId = typeof entry?.interviewId === 'string' ? entry.interviewId.trim() : '';
     const interviewChannelId = typeof entry?.interviewChannelId === 'string' ? entry.interviewChannelId.trim() : '';
     normalized[userId] = {
@@ -67,10 +67,13 @@ function normalizeUsers(users = {}) {
   return normalized;
 }
 
-function normalizeStatus(rawStatus) {
+function normalizeStatus(rawStatus, entry = {}) {
   const status = String(rawStatus || '').trim().toLowerCase();
   if (status === 'approved' || status === 'legal') return 'approved';
   if (status === 'rejected') return 'rejected';
+  // Older registry snapshots used `legal`/approval metadata before `status`
+  // became authoritative. Do not silently downgrade those users on restart.
+  if (entry?.legal === true || entry?.approvedAt || entry?.approvedBy) return 'approved';
   return 'pending';
 }
 
@@ -81,6 +84,13 @@ function normalizeGamertagKey(gamertag) {
 function getRegisteredAtMs(entry) {
   const timestamp = new Date(entry?.registeredAt || '').getTime();
   return Number.isFinite(timestamp) ? timestamp : Number.MAX_SAFE_INTEGER;
+}
+
+function registrationCanonicalScore(entry = {}) {
+  const status = normalizeStatus(entry.status, entry);
+  if (status === 'approved') return 300 + (entry.verified ? 20 : 0) + (entry.persistentId ? 10 : 0);
+  if (status === 'pending') return 200 + (entry.answered ? 10 : 0);
+  return 100;
 }
 
 function normalizeOrder(order, users) {
@@ -122,8 +132,13 @@ function removeDuplicateGamertags(users, order) {
     const currentEntry = users[current];
     const entryTime = getRegisteredAtMs(entry);
     const currentTime = getRegisteredAtMs(currentEntry);
+    const entryScore = registrationCanonicalScore(entry);
+    const currentScore = registrationCanonicalScore(currentEntry);
 
-    if (entryTime < currentTime) {
+    // Preserve the record with the strongest approval evidence. Registration
+    // time is only a tie breaker, so an old pending duplicate cannot delete an
+    // approved/verified account during startup cleanup.
+    if (entryScore > currentScore || (entryScore === currentScore && entryTime < currentTime)) {
       conflicts.push({
         type: 'duplicate-gamertag',
         userId: current,
@@ -416,6 +431,18 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
     const existing = state.users[userId];
     const nowIso = new Date().toISOString();
     if (existing) {
+      if (existing.status === 'approved' || existing.legal === true) {
+        return { created: false, protected: true, entry: existing };
+      }
+      const duplicate = findUserByGamertag(gamertag, userId);
+      if (duplicate) {
+        return {
+          created: false,
+          duplicate: true,
+          duplicateUserId: duplicate.userId,
+          entry: duplicate.entry
+        };
+      }
       existing.gamertag = gamertag;
       existing.username = username || existing.username || '';
       existing.updatedAt = nowIso;
@@ -587,11 +614,16 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
     const entry = state.users[userId];
     if (!entry) return null;
     const nowIso = new Date().toISOString();
+    const alreadyApproved = entry.status === 'approved' || entry.legal === true;
     entry.status = 'approved';
     entry.legal = true;
-    entry.approvedAt = nowIso;
-    entry.approvedBy = String(reviewer.id || '').trim();
-    entry.approvedByName = String(reviewer.name || reviewer.tag || '').trim();
+    entry.approvedAt = alreadyApproved && entry.approvedAt ? entry.approvedAt : nowIso;
+    entry.approvedBy = alreadyApproved && entry.approvedBy
+      ? entry.approvedBy
+      : String(reviewer.id || '').trim();
+    entry.approvedByName = alreadyApproved && entry.approvedByName
+      ? entry.approvedByName
+      : String(reviewer.name || reviewer.tag || '').trim();
     entry.rejectedAt = null;
     entry.rejectedBy = '';
     entry.rejectedByName = '';
@@ -599,6 +631,35 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
     entry.updatedAt = nowIso;
     await persist();
     return entry;
+  }
+
+  async function reconcileApprovedUsers(userIds = [], reviewer = {}) {
+    await ensureReady();
+    const requested = new Set(Array.from(userIds || [], value => String(value || '').trim()).filter(Boolean));
+    const updatedUserIds = [];
+    if (!requested.size) return { updatedUserIds };
+
+    const nowIso = new Date().toISOString();
+    for (const userId of requested) {
+      const entry = state.users[userId];
+      // A rejected decision remains authoritative. This recovery only fixes
+      // pending records for members who already hold the official citizen role.
+      if (!entry || entry.status !== 'pending') continue;
+      entry.status = 'approved';
+      entry.legal = true;
+      entry.approvedAt = entry.approvedAt || nowIso;
+      entry.approvedBy = entry.approvedBy || String(reviewer.id || '').trim();
+      entry.approvedByName = entry.approvedByName || String(reviewer.name || reviewer.tag || '').trim();
+      entry.rejectedAt = null;
+      entry.rejectedBy = '';
+      entry.rejectedByName = '';
+      entry.rejectionReason = '';
+      entry.updatedAt = nowIso;
+      updatedUserIds.push(userId);
+    }
+
+    if (updatedUserIds.length) await persist('reconcile-approved-role');
+    return { updatedUserIds };
   }
 
   async function rejectUser(userId, reviewer = {}, reasonRaw = '') {
@@ -763,6 +824,7 @@ function createRegisterStore({ database = null, saveChannelStore: providedSaveCh
     updateApprovedGamertag,
     markVerified,
     approveUser,
+    reconcileApprovedUsers,
     rejectUser,
     closeInterview,
     findUserByInterviewChannel,
