@@ -446,6 +446,15 @@ client.once('clientReady', async () => {
     process.exit(1);
     return;
   }
+  await sociabuzzTopupService.recoverPendingPayments()
+    .then(summary => {
+      if (summary.checked) {
+        console.log(
+          `SociaBuzz recovery selesai. checked=${summary.checked}, recovered=${summary.recovered}, failed=${summary.failed}`
+        );
+      }
+    })
+    .catch(err => console.error('Failed to recover pending SociaBuzz payments:', err));
   await moderationStore.init(client).catch(err => {
     console.error('Failed to init moderation store:', err);
   });

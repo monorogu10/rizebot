@@ -112,6 +112,7 @@ function createVerifyCode() {
 }
 
 function normalizeMessageReference(reference = {}) {
+  if (!reference || typeof reference !== 'object') return null;
   const channelId = String(reference.channelId || reference.channel?.id || '').trim();
   const messageId = String(reference.messageId || reference.id || '').trim();
   return channelId && messageId ? { channelId, messageId } : null;

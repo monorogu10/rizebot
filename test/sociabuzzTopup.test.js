@@ -71,6 +71,28 @@ test('SociaBuzz parser understands Nama and Nama DC from the crowdfunding card',
   assert.equal(payment.autoCandidate.userId, entry.userId);
 });
 
+test('SociaBuzz parser recognizes the Gt-only format and active rate from the incident card', () => {
+  const entry = approvedEntry('100000000000000009', 'Jozr Vladzov');
+  const payment = parsePayment({
+    kind: 'discord',
+    sourceKey: 'discord:gt-only-48000',
+    messageId: 'gt-only-48000',
+    channelId: 'source-channel',
+    content: '',
+    embeds: [{
+      title: 'DANA SEBESAR IDR48,000 DARI INVESTOR Someone',
+      description: 'Gt: Jozr Vladzov',
+      author: '', footer: '', url: '', fields: [],
+    }],
+  }, registerStoreStub([entry]), {
+    rate: { version: 3, geonPer1000: 210 },
+  });
+
+  assert.equal(payment.identity.gamertag, 'Jozr Vladzov');
+  assert.equal(payment.geon, 19_950);
+  assert.equal(payment.autoCandidate.userId, entry.userId);
+});
+
 test('dynamic rate scales the complete tier curve proportionally', () => {
   assert.equal(calculateGeon(1_000, 150), 150);
   assert.equal(calculateGeon(10_000, 150), 1_500);
@@ -160,6 +182,7 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
     },
   };
   let resultListener = null;
+  let failNextEnqueue = false;
   const jobs = [];
   const bridge = {
     onJobResult(listener) {
@@ -167,6 +190,10 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
       return () => {};
     },
     enqueueTopup(payload) {
+      if (failNextEnqueue) {
+        failNextEnqueue = false;
+        throw new Error('simulated bridge persistence failure');
+      }
       const job = { id: `job-${jobs.length + 1}`, type: 'topup', ...payload };
       jobs.push(job);
       return job;
@@ -239,6 +266,25 @@ test('unmatched payment stays open, can be redirected, learns aliases, and recor
       result: { ok: true, status: 'pending' },
     });
     assert.equal(database.getSociabuzzPayment(received.record.id).status, 'pending_join');
+
+    failNextEnqueue = true;
+    const recoverablePayload = {
+      payment_id: 'recoverable-exact-001',
+      provider: 'SociaBuzz',
+      amount: '1000',
+      message: 'Nama: RealPlayer | Nama DC: monodeco',
+    };
+    await assert.rejects(
+      service.handleWebhookPayload(recoverablePayload),
+      /simulated bridge persistence failure/
+    );
+    const recoverable = database.listSociabuzzPayments({ limit: 20 })
+      .find(record => record.sourceKey === 'webhook:recoverable-exact-001');
+    assert.ok(recoverable);
+    assert.equal(database.getSociabuzzPayment(recoverable.id).status, 'preparing');
+    const recovery = await service.recoverPendingPayments();
+    assert.equal(recovery.failed, 0);
+    assert.equal(database.getSociabuzzPayment(recoverable.id).status, 'queued');
   } finally {
     database.close();
   }

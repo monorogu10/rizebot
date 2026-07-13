@@ -938,6 +938,34 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
     return task;
   }
 
+  async function recoverPendingPayments() {
+    ensureDatabaseHydrated();
+    const candidates = Object.values(store.records || {}).filter(record => (
+      (record.status === 'preparing' && !record.jobId) ||
+      (!record.logMessageId && ['queued', 'needs_target', 'pending', 'resolving', 'failed'].includes(record.status))
+    ));
+    const summary = { checked: candidates.length, recovered: 0, failed: 0 };
+    for (const record of candidates) {
+      try {
+        const context = paymentContext();
+        const payment = parsePayment(record.source || {}, registerStore, {
+          ...context,
+          rate: record.rate || context.rate,
+        });
+        if (!payment) {
+          summary.failed += 1;
+          continue;
+        }
+        await processPayment(payment, 'sociabuzz-startup-recovery');
+        summary.recovered += 1;
+      } catch (error) {
+        summary.failed += 1;
+        console.error(`Failed to recover SociaBuzz payment ${record.id || '-'}:`, error);
+      }
+    }
+    return summary;
+  }
+
   async function handleDiscordMessage(msg) {
     if (!msg || !msg.author?.bot) return false;
     if (client?.user?.id && msg.author.id === client.user.id) return false;
@@ -1233,6 +1261,7 @@ function createSociabuzzTopupService({ bridge, registerStore, client }) {
     setRate,
     listRateHistory,
     resolvePayment,
+    recoverPendingPayments,
     handleDiscordMessage,
     handleWebhookPayload,
     handleInteraction,
