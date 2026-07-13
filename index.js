@@ -213,6 +213,7 @@ const lawHandler = createLawHandler({
 });
 const topupHandler = createTopupHandler({
   bridge: bridgeService,
+  sociabuzz: sociabuzzTopupService,
 });
 const moderationHandler = createModerationHandler({
   moderationStore,

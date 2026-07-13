@@ -330,14 +330,42 @@ function buildApplicationCommands() {
 
     new SlashCommandBuilder()
       .setName('geonrate')
-      .setDescription('Hitung estimasi Geon dari nominal rupiah')
+      .setDescription('Hitung dan kelola rate Geon')
       .setDMPermission(false)
-      .addIntegerOption(option => option
-        .setName('rupiah')
-        .setDescription('Nominal rupiah')
-        .setMinValue(1)
-        .setMaxValue(2_000_000_000)
-        .setRequired(true)),
+      .addSubcommand(subcommand => subcommand
+        .setName('cek')
+        .setDescription('Hitung Geon dari nominal rupiah')
+        .addIntegerOption(option => option
+          .setName('rupiah')
+          .setDescription('Nominal rupiah')
+          .setMinValue(1)
+          .setMaxValue(2_000_000_000)
+          .setRequired(true)))
+      .addSubcommand(subcommand => subcommand
+        .setName('set')
+        .setDescription('Ubah rate dasar untuk semua harga')
+        .addIntegerOption(option => option
+          .setName('geon-per-1000')
+          .setDescription('Jumlah Geon untuk dasar Rp1.000')
+          .setMinValue(1)
+          .setMaxValue(1_000_000)
+          .setRequired(true))
+        .addStringOption(option => option
+          .setName('alasan')
+          .setDescription('Alasan perubahan rate')
+          .setMaxLength(240)
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName('history')
+        .setDescription('Lihat riwayat perubahan rate'))
+      .addSubcommand(subcommand => subcommand
+        .setName('reset')
+        .setDescription('Kembalikan rate ke 100 Geon per Rp1.000')
+        .addStringOption(option => option
+          .setName('alasan')
+          .setDescription('Alasan reset rate')
+          .setMaxLength(240)
+          .setRequired(false))),
 
     new SlashCommandBuilder()
       .setName('uu')
@@ -499,32 +527,32 @@ function buildApplicationCommands() {
           .setAutocomplete(true)
           .setRequired(true))
         .addIntegerOption(option => option
-          .setName('geon')
-          .setDescription('Jumlah Geon')
-          .setMinValue(1)
-          .setMaxValue(100_000_000)
-          .setRequired(true))
-        .addIntegerOption(option => option
           .setName('rupiah')
           .setDescription('Nilai rupiah transaksi')
           .setMinValue(1)
           .setMaxValue(2_000_000_000)
-          .setRequired(true)))
+          .setRequired(true))
+        .addIntegerOption(option => option
+          .setName('geon')
+          .setDescription('Override Geon; kosong = hitung dari rate aktif')
+          .setMinValue(1)
+          .setMaxValue(100_000_000)
+          .setRequired(false)))
       .addSubcommand(subcommand => subcommand
         .setName('kupon')
         .setDescription('Generate satu atau beberapa kupon topup')
-        .addIntegerOption(option => option
-          .setName('geon')
-          .setDescription('Geon per kupon')
-          .setMinValue(1)
-          .setMaxValue(100_000_000)
-          .setRequired(true))
         .addIntegerOption(option => option
           .setName('rupiah')
           .setDescription('Nilai rupiah per kupon')
           .setMinValue(1)
           .setMaxValue(2_000_000_000)
           .setRequired(true))
+        .addIntegerOption(option => option
+          .setName('geon')
+          .setDescription('Override Geon; kosong = hitung dari rate aktif')
+          .setMinValue(1)
+          .setMaxValue(100_000_000)
+          .setRequired(false))
         .addIntegerOption(option => option
           .setName('jumlah')
           .setDescription('Jumlah kupon, default 1')
@@ -536,7 +564,22 @@ function buildApplicationCommands() {
           .setDescription('Masa berlaku hari, default 30')
           .setMinValue(1)
           .setMaxValue(365)
-          .setRequired(false))),
+          .setRequired(false)))
+      .addSubcommand(subcommand => subcommand
+        .setName('resolve')
+        .setDescription('Alihkan payment SociaBuzz yang belum punya target')
+        .addStringOption(option => option
+          .setName('payment')
+          .setDescription('ID payment dari kartu SociaBuzz')
+          .setMinLength(4)
+          .setMaxLength(80)
+          .setRequired(true))
+        .addStringOption(option => option
+          .setName('nama')
+          .setDescription('Gamertag, Discord, mention, atau ID tujuan')
+          .setMinLength(2)
+          .setMaxLength(80)
+          .setRequired(true))),
   ];
 }
 
@@ -626,7 +669,19 @@ function commandToLegacyContent(interaction) {
   if (interaction.commandName === 'bansos') {
     return `!bansos ${options.getInteger('geon')} ${options.getInteger('orang')}`;
   }
-  if (interaction.commandName === 'geonrate') return `!geonrate ${options.getInteger('rupiah')}`;
+  if (interaction.commandName === 'geonrate') {
+    const subcommand = options.getSubcommand(true);
+    if (subcommand === 'cek') return `!geonrate cek ${options.getInteger('rupiah')}`;
+    if (subcommand === 'set') {
+      const reason = options.getString('alasan') || '';
+      return `!geonrate set ${options.getInteger('geon-per-1000')}${reason ? ` | ${reason}` : ''}`;
+    }
+    if (subcommand === 'reset') {
+      const reason = options.getString('alasan') || '';
+      return `!geonrate reset${reason ? ` | ${reason}` : ''}`;
+    }
+    return '!geonrate history';
+  }
   if (interaction.commandName === 'uu') {
     const subcommand = options.getSubcommand(true);
     if (subcommand === 'help') return '!uu-help';
@@ -667,9 +722,12 @@ function commandToLegacyContent(interaction) {
     const subcommand = options.getSubcommand(true);
     if (subcommand === 'help') return '!topup-help';
     if (subcommand === 'kirim') {
-      return `!tu ${options.getString('nama', true)} ${options.getInteger('geon')} ${options.getInteger('rupiah')}`;
+      return `!tu ${options.getString('nama', true)} ${options.getInteger('geon') || 'auto'} ${options.getInteger('rupiah')}`;
     }
-    return `!gnrtkpn ${options.getInteger('geon')} ${options.getInteger('rupiah')} ${options.getInteger('jumlah') || 1} ${options.getInteger('hari') || 30}`;
+    if (subcommand === 'kupon') {
+      return `!gnrtkpn ${options.getInteger('geon') || 'auto'} ${options.getInteger('rupiah')} ${options.getInteger('jumlah') || 1} ${options.getInteger('hari') || 30}`;
+    }
+    return `!topup-resolve ${options.getString('payment', true)} | ${options.getString('nama', true)}`;
   }
   if (interaction.commandName !== 'interview') return '';
 

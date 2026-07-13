@@ -261,6 +261,51 @@ function createRizebotDatabase({
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
       VALUES (3, datetime('now'));
+
+      CREATE TABLE IF NOT EXISTS geon_rate_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        geon_per_1000 INTEGER NOT NULL CHECK (geon_per_1000 BETWEEN 1 AND 1000000),
+        changed_by TEXT NOT NULL DEFAULT '',
+        changed_by_name TEXT NOT NULL DEFAULT '',
+        reason TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+      );
+
+      INSERT INTO geon_rate_versions(
+        geon_per_1000, changed_by, changed_by_name, reason, created_at
+      )
+      SELECT 100, 'system', 'Rizebot migration', 'Default Geon rate', datetime('now')
+      WHERE NOT EXISTS (SELECT 1 FROM geon_rate_versions);
+
+      CREATE TABLE IF NOT EXISTS topup_recipient_aliases (
+        alias_key TEXT PRIMARY KEY,
+        alias_text TEXT NOT NULL,
+        alias_type TEXT NOT NULL DEFAULT 'manual',
+        user_id TEXT NOT NULL,
+        confirmed_by TEXT NOT NULL DEFAULT '',
+        confirmed_by_name TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_topup_alias_user
+      ON topup_recipient_aliases(user_id, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS sociabuzz_payments (
+        payment_id TEXT PRIMARY KEY,
+        source_key TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        recipient_user_id TEXT NOT NULL DEFAULT '',
+        job_id TEXT NOT NULL DEFAULT '',
+        rupiah INTEGER NOT NULL DEFAULT 0,
+        geon INTEGER NOT NULL DEFAULT 0,
+        rate_version INTEGER NOT NULL DEFAULT 0,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sociabuzz_payments_status
+      ON sociabuzz_payments(status, updated_at DESC);
+
     `);
 
     const versionColumns = new Set(connection.prepare('PRAGMA table_info(law_versions)').all().map(row => String(row.name)));
@@ -297,6 +342,8 @@ function createRizebotDatabase({
       ON law_versions(law_id, revision_status, version_number DESC);
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
       VALUES (4, datetime('now'));
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+      VALUES (5, datetime('now'));
     `);
   }
 
@@ -531,6 +578,177 @@ function createRizebotDatabase({
       resolvedAt: row.resolved_at ? String(row.resolved_at) : null,
       resolvedBy: String(row.resolved_by || ''), resolution: String(row.resolution || ''),
     }));
+  }
+
+  function topupAliasKey(value) {
+    return String(value || '')
+      .normalize('NFKC')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, '')
+      .slice(0, 160);
+  }
+
+  function getGeonRate() {
+    ensureOpen();
+    const row = db.prepare(`
+      SELECT id, geon_per_1000, changed_by, changed_by_name, reason, created_at
+      FROM geon_rate_versions ORDER BY id DESC LIMIT 1
+    `).get();
+    return row ? {
+      version: Number(row.id),
+      geonPer1000: Number(row.geon_per_1000),
+      changedBy: String(row.changed_by || ''),
+      changedByName: String(row.changed_by_name || ''),
+      reason: String(row.reason || ''),
+      createdAt: String(row.created_at || ''),
+    } : null;
+  }
+
+  function setGeonRate(geonPer1000Raw, actor = {}, reason = '') {
+    ensureOpen();
+    const geonPer1000 = Math.floor(Number(geonPer1000Raw) || 0);
+    if (geonPer1000 < 1 || geonPer1000 > 1_000_000) {
+      throw new Error('Geon rate harus antara 1 dan 1.000.000 per Rp1.000');
+    }
+    const who = lawActor(actor);
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO geon_rate_versions(
+        geon_per_1000, changed_by, changed_by_name, reason, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(geonPer1000, who.id, who.name, cleanLawText(reason, 240), now);
+    return getGeonRate();
+  }
+
+  function listGeonRateHistory({ limit = 10 } = {}) {
+    ensureOpen();
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(Number(limit) || 10)));
+    return db.prepare(`
+      SELECT id, geon_per_1000, changed_by, changed_by_name, reason, created_at
+      FROM geon_rate_versions ORDER BY id DESC LIMIT ${safeLimit}
+    `).all().map(row => ({
+      version: Number(row.id),
+      geonPer1000: Number(row.geon_per_1000),
+      changedBy: String(row.changed_by || ''),
+      changedByName: String(row.changed_by_name || ''),
+      reason: String(row.reason || ''),
+      createdAt: String(row.created_at || ''),
+    }));
+  }
+
+  function saveTopupRecipientAlias(aliasRaw, userIdRaw, actor = {}, aliasType = 'manual') {
+    ensureOpen();
+    const aliasText = cleanLawText(aliasRaw, 160).replace(/\s+/g, ' ').trim();
+    const aliasKey = topupAliasKey(aliasText);
+    const userId = String(userIdRaw || '').trim();
+    if (!aliasKey || !userId) return null;
+    const who = lawActor(actor);
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO topup_recipient_aliases(
+        alias_key, alias_text, alias_type, user_id, confirmed_by, confirmed_by_name,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(alias_key) DO UPDATE SET
+        alias_text = excluded.alias_text,
+        alias_type = excluded.alias_type,
+        user_id = excluded.user_id,
+        confirmed_by = excluded.confirmed_by,
+        confirmed_by_name = excluded.confirmed_by_name,
+        updated_at = excluded.updated_at
+    `).run(
+      aliasKey,
+      aliasText,
+      cleanLawText(aliasType || 'manual', 40),
+      userId,
+      who.id,
+      who.name,
+      now,
+      now
+    );
+    return findTopupRecipientAlias(aliasText);
+  }
+
+  function findTopupRecipientAlias(aliasRaw) {
+    ensureOpen();
+    const aliasKey = topupAliasKey(aliasRaw);
+    if (!aliasKey) return null;
+    const row = db.prepare(`
+      SELECT alias_key, alias_text, alias_type, user_id, confirmed_by,
+        confirmed_by_name, created_at, updated_at
+      FROM topup_recipient_aliases WHERE alias_key = ?
+    `).get(aliasKey);
+    return row ? {
+      aliasKey: String(row.alias_key),
+      alias: String(row.alias_text),
+      type: String(row.alias_type),
+      userId: String(row.user_id),
+      confirmedBy: String(row.confirmed_by || ''),
+      confirmedByName: String(row.confirmed_by_name || ''),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    } : null;
+  }
+
+  function saveSociabuzzPayment(record = {}) {
+    ensureOpen();
+    const paymentId = String(record.id || '').trim();
+    const sourceKey = String(record.sourceKey || '').trim();
+    if (!paymentId || !sourceKey) throw new Error('SociaBuzz payment id/source tidak valid');
+    const now = new Date().toISOString();
+    const createdAt = String(record.createdAt || now);
+    const updatedAt = String(record.updatedAt || now);
+    db.prepare(`
+      INSERT INTO sociabuzz_payments(
+        payment_id, source_key, status, recipient_user_id, job_id, rupiah, geon,
+        rate_version, record_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(payment_id) DO UPDATE SET
+        source_key = excluded.source_key,
+        status = excluded.status,
+        recipient_user_id = excluded.recipient_user_id,
+        job_id = excluded.job_id,
+        rupiah = excluded.rupiah,
+        geon = excluded.geon,
+        rate_version = excluded.rate_version,
+        record_json = excluded.record_json,
+        updated_at = excluded.updated_at
+    `).run(
+      paymentId,
+      sourceKey,
+      String(record.status || 'needs_target'),
+      String(record.target?.userId || record.recipientUserId || ''),
+      String(record.jobId || ''),
+      Math.max(0, Math.floor(Number(record.rupiah) || 0)),
+      Math.max(0, Math.floor(Number(record.geon) || 0)),
+      Math.max(0, Math.floor(Number(record.rate?.version || record.rateVersion) || 0)),
+      JSON.stringify(record),
+      createdAt,
+      updatedAt
+    );
+    return getSociabuzzPayment(paymentId);
+  }
+
+  function sociabuzzPaymentFromRow(row) {
+    if (!row) return null;
+    try {
+      return JSON.parse(String(row.record_json || '{}'));
+    } catch (error) {
+      throw new Error(`Invalid SociaBuzz payment JSON ${row.payment_id}: ${error.message}`);
+    }
+  }
+
+  function getSociabuzzPayment(paymentIdRaw) {
+    ensureOpen();
+    const row = db.prepare('SELECT * FROM sociabuzz_payments WHERE payment_id = ?').get(String(paymentIdRaw || '').trim());
+    return sociabuzzPaymentFromRow(row);
+  }
+
+  function listSociabuzzPayments({ limit = 1000 } = {}) {
+    ensureOpen();
+    const safeLimit = Math.max(1, Math.min(5000, Math.floor(Number(limit) || 1000)));
+    return db.prepare(`SELECT * FROM sociabuzz_payments ORDER BY updated_at DESC LIMIT ${safeLimit}`)
+      .all().map(sociabuzzPaymentFromRow).filter(Boolean);
   }
 
   function insertInterviewAudit(session, action, actor = {}, detail = '') {
@@ -1679,6 +1897,14 @@ function createRizebotDatabase({
     saveRegistrationSnapshot,
     saveRegistrationConflicts,
     listRegistrationConflicts,
+    getGeonRate,
+    setGeonRate,
+    listGeonRateHistory,
+    saveTopupRecipientAlias,
+    findTopupRecipientAlias,
+    saveSociabuzzPayment,
+    getSociabuzzPayment,
+    listSociabuzzPayments,
     currentInterviewSequence,
     setInterviewSequenceAtLeast,
     allocateInterviewCode,

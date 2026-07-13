@@ -1212,6 +1212,7 @@ function buildMigrationApplyEmbed(record = {}, result = {}) {
 
 function createTopupBridgeService({ registerStore, client = null }) {
   const jobs = new Map();
+  const jobResultListeners = new Set();
   const pendingBridgeWaiters = new Map();
   const pendingVerifications = new Map();
   const onlinePlayers = new Map();
@@ -1247,6 +1248,31 @@ function createTopupBridgeService({ registerStore, client = null }) {
     minecraftQueueLastSuccessAt: null,
     minecraftQueueLastFailureAt: null,
   };
+
+  function onJobResult(listener, { replayDone = true } = {}) {
+    if (typeof listener !== 'function') throw new TypeError('Job result listener must be a function');
+    jobResultListeners.add(listener);
+    if (replayDone) {
+      pruneJobs();
+      for (const record of jobs.values()) {
+        if (record.status !== 'done' || !record.result) continue;
+        Promise.resolve()
+          .then(() => listener({ job: record.job, result: record.result, record }))
+          .catch(error => console.error('Topup bridge replay listener failed:', error));
+      }
+    }
+    return () => jobResultListeners.delete(listener);
+  }
+
+  async function notifyJobResult(record, result) {
+    const payload = { job: record.job, result, record };
+    const settled = await Promise.allSettled(
+      [...jobResultListeners].map(listener => Promise.resolve().then(() => listener(payload)))
+    );
+    for (const item of settled) {
+      if (item.status === 'rejected') console.error('Topup bridge job result listener failed:', item.reason);
+    }
+  }
 
   function normalizeEventId(value) {
     return String(value || '')
@@ -1988,7 +2014,29 @@ function createTopupBridgeService({ registerStore, client = null }) {
     return job;
   }
 
-  function enqueueTopup({ target, geon, rupiah, requestedBy, message, loadingMessage = null, source = '', paymentId = '' }) {
+  function enqueueTopup({
+    target,
+    geon,
+    rupiah,
+    requestedBy,
+    message,
+    loadingMessage = null,
+    source = '',
+    paymentId = '',
+    retry = false,
+  }) {
+    pruneJobs();
+    if (paymentId && !retry) {
+      const existing = [...jobs.values()].reverse().find(record => (
+        record.job?.type === 'topup' &&
+        record.job?.source === source &&
+        record.job?.paymentId === paymentId
+      ));
+      if (existing) {
+        if (existing.status === 'done' && existing.result) void notifyJobResult(existing, existing.result);
+        return existing.job;
+      }
+    }
     return enqueueJob('topup', {
       targetKey: target.gamertag,
       targetName: target.gamertag,
@@ -2974,6 +3022,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     record.result = resultRaw;
     bridgeStats.lastResultAt = new Date().toISOString();
     saveJobsToDisk(record.updatedAt);
+    await notifyJobResult(record, resultRaw);
 
     const waiter = pendingBridgeWaiters.get(jobId);
     if (waiter) {
@@ -3436,6 +3485,7 @@ function createTopupBridgeService({ registerStore, client = null }) {
     enqueueBridgeQueryWithResult,
     takeJobs,
     completeJob,
+    onJobResult,
     handleMinecraftEvent,
     getBridgeStatus,
   };
